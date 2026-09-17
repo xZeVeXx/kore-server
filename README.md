@@ -62,35 +62,198 @@ Kore. Kore prüft an einem Plan nur Form und Grenzen, nie den Inhalt.
 
 ---
 
-## Quickstart (drei Schritte)
+## Anleitung
 
-Voraussetzung: Docker mit Compose, und für den Coach-Chat ein laufender Hermes-Agent (siehe unten).
+Die Schritt-für-Schritt-Anleitung, auf die Kore aus den Einstellungen verlinkt (Einstellungen →
+Experimentelle Funktionen → „Anleitung öffnen"). Wortgleich liegt sie auch in der App-Dokumentation
+(`docs/eigener-coach.md`, englisch `docs/own-coach.md`).
 
-**1. Tokens erzeugen und Server starten**
+> **Was dein Coach sagt, ist keine Kore-Aussage.** Er ist eine fremde KI. Kore hat seine Sätze weder
+> geschrieben noch nachgerechnet und prüft an einem Plan nur Form und Grenzen, nie den Inhalt.
+> Weder Kore noch dein Coach stellen Diagnosen.
+
+### Voraussetzungen
+
+| | |
+| --- | --- |
+| **Kore** | Version 0.9 oder neuer (Einstellungen → ganz unten steht die Version) |
+| **Ein Rechner, der läuft** | NAS, Mini-PC, Homeserver, Raspberry Pi 5 — irgendetwas im selben WLAN wie dein iPhone |
+| **Docker mit Compose** *oder* **Python 3.12** | Compose ist der kürzere Weg; ohne Docker gibt es systemd-Units in [`deploy/`](deploy/) |
+| **Ein Hermes-Agent** | getestet mit **Hermes Agent v0.21.2 (2026.9.11)**. Nur für den Chat nötig — ohne ihn kann dein Coach lesen und Pläne vorschlagen, nur nicht mit dir reden |
+
+Du brauchst **keine** öffentliche Adresse, **keine** Domain und **kein** HTTPS-Zertifikat. Alles
+bleibt im Heimnetz. Genau das ist der Punkt.
+
+### Schritt 1 — Server starten
+
+Der Server sind zwei kleine Prozesse auf einer gemeinsamen SQLite-Datei: **Ingest (8081)** nimmt den
+Snapshot deines iPhones entgegen und gibt Plan-Vorschläge zurück, **MCP (8000)** stellt deinem
+Agenten die acht Werkzeuge bereit.
 
 ```bash
 cp .env.example .env
-# drei Werte setzen, z. B. mit: openssl rand -hex 24  (bzw. -hex 32 fürs Origin-Secret)
-docker compose up -d
-curl -s localhost:8081/health          # -> {"ok":true}
-curl -o /dev/null -w "%{http_code}\n" localhost:8000/mcp   # -> 401 (ohne Token korrekt abgewiesen)
 ```
 
-Damit dein iPhone den Server erreicht, trage in der `.env` `KORE_BIND_ADDRESS=<LAN-IP dieses
-Rechners>` ein und starte neu. Ohne Docker: siehe [`deploy/`](deploy/).
+Drei Werte in der `.env` setzen — erzeuge sie, tippe sie nicht aus:
 
-**2. In Kore eintragen**
+```bash
+openssl rand -hex 24   # für KORE_INGEST_TOKEN
+openssl rand -hex 24   # für KORE_MCP_TOKEN
+openssl rand -hex 32   # für KORE_PLAN_ORIGIN_SECRET
+```
 
-Einstellungen → Experimentelle Funktionen → Server & Coach: Adresse `http://<LAN-IP>:8081` und
-`KORE_INGEST_TOKEN` eintragen, „Jetzt synchronisieren". Die App pusht ab jetzt bei jedem
-Vordergrundstart einen Snapshot.
+Damit dein iPhone den Server überhaupt erreicht, zusätzlich die LAN-Adresse dieses Rechners:
 
-**3. Agent anbinden**
+```
+KORE_BIND_ADDRESS=10.0.0.10     # deine echte LAN-IP, nie 0.0.0.0
+```
 
-Den Block aus [`hermes/profile-mcp.example.yaml`](hermes/profile-mcp.example.yaml) in das
-Hermes-Profil eintragen, das dein Coach nutzt, und `MCP_KORE_API_KEY` mit `KORE_MCP_TOKEN` in die
-Umgebung des Hermes-Prozesses legen. Danach kann der Agent lesen. Für den Coach-Tab in der App
-zusätzlich die [Coach-Bridge](#coach-bridge-hermes) starten.
+Dann starten und nachsehen, ob es steht:
+
+```bash
+docker compose up -d
+curl -s localhost:8081/health                              # -> {"ok":true}
+curl -o /dev/null -w "%{http_code}\n" localhost:8000/mcp   # -> 401
+```
+
+Die **401** ist kein Fehler, sondern die richtige Antwort: Der MCP-Port weist jeden ab, der kein
+Token vorzeigt. **Ohne Docker:** [`deploy/`](deploy/) — eigener Systemnutzer, venv,
+`pip install -r server/requirements.txt`, dieselbe `.env` auf `chmod 600`,
+`systemctl enable --now kore-ingest kore-mcp`. Dieselben zwei `curl`-Proben gelten.
+
+### Schritt 2 — Deinen Agenten anbinden
+
+Den Block aus [`hermes/profile-mcp.example.yaml`](hermes/profile-mcp.example.yaml) in die
+`config.yaml` **genau des Profils** eintragen, das dein Coach benutzt:
+
+```yaml
+mcp_servers:
+  kore:
+    url: http://10.0.0.10:8000/mcp/      # der abschließende Schrägstrich gehört dazu
+    headers:
+      Authorization: Bearer ${MCP_KORE_API_KEY}
+    enabled: true
+```
+
+Das Token steht **nicht** in der Datei, sondern in der Umgebung des Hermes-Prozesses
+(`MCP_KORE_API_KEY` = dein `KORE_MCP_TOKEN`). Prüfen mit `hermes -p <profil> mcp list`: Taucht
+`kore` mit seinen acht Werkzeugen auf, ist der Schritt fertig. Damit kann dein Agent schon lesen —
+den Chat-Tab in Kore gibt es erst mit der [Coach-Bridge](#coach-bridge-hermes).
+
+### Schritt 3 — In Kore eintragen
+
+**Einstellungen → Experimentelle Funktionen.** Oben steht die Warnkarte, darunter vier Felder:
+
+| Feld | Wert |
+| --- | --- |
+| **Server-URL** | `http://10.0.0.10:8081` — die LAN-Adresse deines Servers |
+| **Ingest-Token** | `KORE_INGEST_TOKEN` aus deiner `.env` |
+| **Coach-Bridge-URL** | `http://10.0.0.10:8090` — nur, wenn du die Bridge betreibst |
+| **Coach-Token** | `KORE_BRIDGE_TOKEN` aus deiner `bridge.env` |
+
+Dazu die Schalter **Coach aktiv**, **Health-Snapshot synchronisieren** und — getrennt davon und mit
+eigener Rückfrage — **Health-Kontext mit Coach teilen**. Die Trennung ist Absicht: Das eine schickt
+dein Tagesbild an *deinen Server*, das andere erlaubt, dass es in einer *Chat-Anfrage* mitgeht.
+
+Dann **„Jetzt synchronisieren"**. Die Statuszeile „Verbindung" sagt danach **Antwortet** (dein
+Server hat den Snapshot angenommen), **Keine Antwort** (es kam gar nichts zurück) oder **Kein
+Server / Unvollständig** (es fehlen noch Felder). „Verbunden" heißt nur *eingetragen und gültig*,
+nicht *antwortet*. Ab jetzt schickt Kore bei jedem Start im Vordergrund einen frischen Snapshot.
+
+### Die erste Coach-Nachricht
+
+Sobald eine Coach-Bridge-URL eingetragen ist, erscheint oben rechts der Coach-Knopf (`✦`). Ohne
+Bridge gibt es ihn nicht — er führte sonst in einen leeren Raum. Eine gute erste Frage ist eine,
+deren Antwort du selbst nachprüfen kannst: *„Wie war meine Erholung diese Woche, und was fällt dir
+an meinem Schlaf auf?"* Dein Agent ruft dafür `get_coach_briefing` oder einzelne Werkzeuge auf.
+
+Solange **Health-Kontext mit Coach teilen** aus ist, geht inhaltlich nur an die Bridge, was du
+selbst tippst — ohne ausdrückliches `true` reicht sie keinen Kontext weiter (fail-closed).
+
+### Vom Vorschlag zum Plan
+
+Dein Coach kann keinen Plan aktivieren. Er kann einen **vorschlagen** — mehr lässt das Werkzeug
+nicht zu.
+
+1. **Der Agent ruft `propose_training_plan`.** Der Plan wird hart validiert und mit `status=pending`
+   abgelegt; zusätzlich braucht jeder Schreibvorgang ein kurzlebiges, HMAC-signiertes Einmal-Ticket
+   der Bridge — der MCP-Token allein genügt nicht.
+2. **Kore holt ihn ab** und zeigt ihn unter *Experimentelle Funktionen → Coach-Vorschläge*.
+3. **Du siehst ihn, bevor du entscheidest** — mit der Kapsel „VOM COACH" und genau in der Form, in
+   der er lokal gespeichert würde.
+4. **Erst dein Tippen auf „Übernehmen" macht ihn wirksam.** Lehnst du ab, passiert nichts.
+
+Ein Update eines bestehenden Plans wird abgewiesen, wenn es auf einem veralteten Stand aufsetzt —
+lieber ein Fehler als ein stilles Überschreiben deines Plans.
+
+### Was dein Coach sieht — und was nicht
+
+Die acht Werkzeuge stehen unten im Abschnitt [Die Werkzeuge](#die-werkzeuge-7-lesen-1-schlägt-vor).
+Was ausdrücklich **nicht** geliefert wird, weil es gar nicht erst auf dem Server liegt:
+
+- **Keine Health-Rohwerte.** Keine Herzschlagintervalle, keine Messreihen, keine HealthKit-Exporte.
+  Was ankommt, sind ausgerechnete Tageswerte.
+- **Kein Standort, keine Kontakte, keine Fotos, keine Zyklusdetails.**
+- **Keine Schreibrechte außer dem einen Vorschlagsweg.** Dein Coach kann in Kore nichts löschen,
+  nichts abhaken und nichts stillschweigend aktivieren.
+
+### Sicherheit
+
+Die sieben Punkte oben unter [Sicherheitsprinzipien](#sicherheitsprinzipien) sind die vollständige
+Fassung. Die vier, die beim Einrichten am häufigsten schiefgehen:
+
+- **Kein Port-Forward. Niemals.** Was du freigäbst, ist ein Gesundheitsverlauf mit einem einzigen
+  Bearer-Token davor. Von unterwegs heran geht über ein VPN (WireGuard, Tailscale) — das ist der
+  vorgesehene Weg, nicht die Ausnahme.
+- **Zwei Tokens, und du rotierst sie.** Neuer Wert in `.env`, Dienste neu starten, Wert in Kore und
+  im Agenten-Profil nachziehen. Tu das, wenn du den Agenten wechselst, einen Rechner abgibst oder
+  einen Token irgendwo eingefügt hast, wo er nicht hingehörte — auch in ein Chatfenster.
+- **`Origin` bleibt leer.** `KORE_MCP_ALLOWED_ORIGINS` nur füllen, wenn du wirklich eine eigene
+  Weboberfläche davorhängst; leer heißt „gar kein Browser".
+- **Tool Poisoning.** In dem Profil, das `kore` sieht, nur Werkzeug-Server, deren Quelle du kennst.
+  Ein fremder MCP-Server kann in seiner Werkzeug-*Beschreibung* Anweisungen für deinen Agenten
+  verstecken.
+
+Dazu die **Prozessliste**: Die Bridge reicht den Prompt über stdin weiter
+(`hermes chat --query-file -`), er steht also weder in `/proc/<pid>/cmdline` noch auf der Platte.
+`KORE_HERMES_ALLOW_ARGV_PROMPTS=1` schaltet auf den alten argv-Weg zurück (nur für Hermes-Stände vor
+v0.21.2) und macht den kompletten Prompt für jeden lokalen Nutzer lesbar. Setze es nicht aus
+Gewohnheit. Und: `.env` und `bridge.env` sind Klartext — `chmod 600`, dem Dienstnutzer gehörend, nie
+in ein Backup, das anderswo landet.
+
+### Ohne eigenen Agenten: Claude Desktop
+
+Du kannst den Kore-MCP auch direkt in **Claude Desktop** eintragen (Einstellungen → Entwickler →
+MCP-Server, mit `url` und dem `Authorization`-Header wie oben). Dann kannst du im Desktop-Fenster
+über deine Werte reden und dir dort einen Plan vorschlagen lassen, den du in Kore bestätigst.
+
+Was dabei **fehlt**: der Chat-Tab **in** Kore. Der hängt an der Coach-Bridge, und die spricht die
+`hermes`-CLI. Ohne Bridge gibt es keinen Coach-Knopf in der Kopfzeile — Lesen und Plan-Vorschlag
+funktionieren, das Gespräch findet aber in Claude Desktop statt, nicht in der App.
+
+### Ausbaustufe: claude.ai oder ChatGPT
+
+Die Web-Connectoren von claude.ai und ChatGPT brauchen etwas, das dieser Aufbau bewusst nicht hat:
+eine **öffentlich erreichbare HTTPS-Adresse** und **OAuth 2.1**. Das heißt Reverse-Proxy,
+Zertifikat, ein Autorisierungsserver — und ein Gesundheitsserver, der aus dem offenen Internet
+erreichbar ist. Eine andere Betriebsart mit anderem Risiko, und **bewusst nicht Teil von 0.9**. Wer
+sie baut, baut sie selbst und weiß, was er tut.
+
+### Wenn etwas nicht geht
+
+Kore nennt in den Experimentellen Funktionen den nächsten Schritt:
+
+| Kore sagt | Was wirklich los ist | Was du tust |
+| --- | --- | --- |
+| „Der Server antwortet nicht. Läuft `docker compose up`?" | Es kam überhaupt keine Antwort — der Dienst ist aus, oder die Adresse zeigt woandershin. | `docker compose ps`. Läuft er, dann `KORE_BIND_ADDRESS` prüfen: Steht dort `127.0.0.1`, erreicht ihn nur dieser Rechner, nicht dein iPhone. |
+| „Token abgelehnt. Prüfe den Ingest-Token in .env." | Der Server hat geantwortet und dich abgewiesen (401/403). Gute Nachricht: die Adresse stimmt. | `KORE_INGEST_TOKEN` mit dem Feld in Kore vergleichen; nach einer Änderung `docker compose up -d` erneut. |
+| „Bridge nicht erreichbar. Läuft der Dienst kore-coach-bridge?" | Die Bridge ist ein **eigener** Dienst, nicht Teil von Compose. | `systemctl status kore-coach-bridge`, oder `python3 bridge.py` im Vordergrund starten und die erste Zeile lesen. |
+| „Die Bridge läuft, ist aber unfertig konfiguriert." | Sie steht, hat aber kein Token — sie antwortet absichtlich mit einem Fehler, statt offen zu stehen. | `KORE_BRIDGE_TOKEN` in `bridge.env` setzen und neu starten. |
+| „Der Server hat mit Fehler 500 geantwortet." | Etwas im Server selbst. | `docker compose logs -f ingest` — die Statuszahl ist das, womit du im Log suchst. |
+
+Zwei Dinge, die sind, was sie sind: Die **401** auf `localhost:8000/mcp` ist korrekt (der Port lebt
+und weist Fremde ab), und **„Verbunden" heißt nicht „antwortet"** — das sagt erst „Jetzt
+synchronisieren".
 
 ---
 
