@@ -2,7 +2,8 @@
 """Kore Coach Bridge — verbindet den App-Coach-Tab mit dem self-hosted Agenten Max.
 Ablauf:  App  → POST /coach {message, conversation_id, session?, health_context_allowed, context?}
          → diese Bridge
-         → `hermes -p <explicit-profile> chat -Q -q "<message+kontext>" [--resume <session>]`
+         → `hermes -p <explicit-profile> chat -Q --query-file - [--resume <session>]`
+           (Prompt ueber stdin; argv-Weg nur mit KORE_HERMES_ALLOW_ARGV_PROMPTS=1)
          → Max-Antwort (Markdown, Absätze erhalten) → JSON zurück an die App.
          POST /coach/adjust-today {session, health_context_allowed, context} → Tages-Anpassung als striktes JSON.
 Läuft als User `hermes` (systemd). Zero-Dependency (nur Python-Stdlib). Bearer-Auth aus ENV.
@@ -28,6 +29,7 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -60,7 +62,13 @@ TIMEOUT = _bounded_env_int("KORE_BRIDGE_TIMEOUT", 150, 1, 600)
 MAX_REQUEST_BYTES = _bounded_env_int("KORE_BRIDGE_MAX_REQUEST_BYTES", 262_144, 1_024, 1_048_576)
 MAX_OUTPUT_BYTES = _bounded_env_int("KORE_HERMES_MAX_OUTPUT_BYTES", 524_288, 4_096, 4_194_304)
 MAX_PROMPT_BYTES = _bounded_env_int("KORE_HERMES_MAX_PROMPT_BYTES", 120 * 1_024, 4_096, 1_048_576)
+# Prompt-Transport: Standard ist stdin (`hermes chat --query-file -`). Der Prompt taucht dann
+# nirgends in /proc/<pid>/cmdline auf und liegt zu keinem Zeitpunkt auf der Platte. Nachgesehen in
+# Hermes v0.21.2: `_read_query_file()` in hermes_cli/main.py liest `-` vollstaendig von stdin und
+# setzt args.query, bevor irgendetwas dispatcht wird; Hermes benutzt denselben Weg intern fuer
+# seine eigene Bot-Zustellung. argv bleibt als ausdrueckliches Opt-in fuer aeltere CLI-Staende.
 ALLOW_ARGV_PROMPTS = os.environ.get("KORE_HERMES_ALLOW_ARGV_PROMPTS", "") == "1"
+PROMPT_TRANSPORT = "argv" if ALLOW_ARGV_PROMPTS else "stdin"
 PLAN_ORIGIN_SECRET = os.environ.get("KORE_PLAN_ORIGIN_SECRET", "")
 PLAN_ORIGIN_PRINCIPAL = os.environ.get("KORE_PLAN_ORIGIN_PRINCIPAL", "")
 PLAN_ORIGIN_TTL_SECONDS = _bounded_env_int("KORE_PLAN_ORIGIN_TTL_SECONDS", 180, 30, 300)
@@ -193,11 +201,32 @@ def prompt_argument_limit() -> int:
     return min(MAX_PROMPT_BYTES, _linux_prompt_argument_limit())
 
 
+def prompt_payload_limit() -> int:
+    """Auf stdin gilt MAX_ARG_STRLEN nicht — nur das eigene, konfigurierte Dach."""
+    return MAX_PROMPT_BYTES
+
+
+def prompt_transport_limit(transport=None) -> int:
+    return prompt_argument_limit() if (transport or PROMPT_TRANSPORT) == "argv" else (
+        prompt_payload_limit()
+    )
+
+
 def validate_prompt_argument(prompt: str) -> str:
     if not isinstance(prompt, str):
         raise ValueError("Hermes prompt must be a string")
     if len(prompt.encode("utf-8")) > prompt_argument_limit():
         raise HermesPromptTooLarge("Hermes-Prompt überschreitet das sichere argv-Byte-Limit")
+    return prompt
+
+
+def validate_prompt_payload(prompt: str, transport=None) -> str:
+    """Ein Dach gilt auf BEIDEN Wegen. Der stdin-Weg erbt kein Linux-argv-Limit, aber ein
+    unbegrenzter Prompt waere ein Speicher- und Kostenhebel aus einer einzigen Anfrage."""
+    if not isinstance(prompt, str):
+        raise ValueError("Hermes prompt must be a string")
+    if len(prompt.encode("utf-8")) > prompt_transport_limit(transport):
+        raise HermesPromptTooLarge("Hermes-Prompt überschreitet das sichere Byte-Limit")
     return prompt
 
 
@@ -267,12 +296,18 @@ def capabilities_payload() -> dict:
     capabilities = list(BRIDGE_CAPABILITIES)
     if plan_origin_configured():
         capabilities.append("plan_origin_v1")
+    if PROMPT_TRANSPORT == "stdin":
+        capabilities.append("stdin_prompt_transport_v1")
     return {
         "service": "kore-coach-bridge",
         "api_version": BRIDGE_API_VERSION,
-        "capabilities": capabilities,
+        "capabilities": sorted(capabilities),
         "health_context_fail_closed": True,
-        "prompt_transport": "argv-explicit-opt-in",
+        # Ehrlich benannt, damit ein Betreiber an /capabilities ablesen kann, ob auf DIESER
+        # Installation der Gesundheitskontext in der Prozessliste steht.
+        "prompt_transport": (
+            "stdin" if PROMPT_TRANSPORT == "stdin" else "argv-explicit-opt-in"
+        ),
     }
 
 
@@ -310,15 +345,29 @@ def validated_bind_host(value) -> str:
     return str(address)
 
 
+def runtime_configuration_warning():
+    """Ein Start, der laeuft, aber schlechter geschuetzt ist als der Standard, muss sich melden.
+
+    Der argv-Weg ist ein bewusster Rueckschritt: er legt den kompletten Prompt — beim
+    Gesundheits-Chat also den Gesundheitskontext — fuer jeden lokalen Nutzer in
+    /proc/<pid>/cmdline ab, solange der Aufruf laeuft. Er bleibt waehlbar fuer aeltere
+    Hermes-Staende ohne --query-file, aber nie stillschweigend.
+    """
+    if ALLOW_ARGV_PROMPTS:
+        return (
+            "WARNUNG: KORE_HERMES_ALLOW_ARGV_PROMPTS=1 — der Prompt inklusive Gesundheitskontext "
+            "steht waehrend jedes Coach-Aufrufs in der Prozessliste (/proc/<pid>/cmdline) und ist "
+            "fuer jeden lokalen Nutzer lesbar. Ohne diese Variable benutzt die Bridge stdin "
+            "(hermes chat --query-file -) und der Prompt taucht nirgends auf. Nur setzen, wenn "
+            "der Hermes-Stand --query-file nicht kennt (vor v0.21.2)."
+        )
+    return None
+
+
 def runtime_configuration_error():
     """Return a non-secret startup error for an unsafe/incomplete deployment."""
     if not TOKEN:
         return "KORE_BRIDGE_TOKEN must be configured before the bridge can start"
-    if not ALLOW_ARGV_PROMPTS:
-        return (
-            "Hermes chat has no verified non-argv query mode; keep the bridge stopped or set "
-            "KORE_HERMES_ALLOW_ARGV_PROMPTS=1 after accepting the documented /proc exposure"
-        )
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(INSTANCE_ID) is None:
         return "KORE_INSTANCE_ID must be configured as a safe explicit instance identifier"
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(PROFILE) is None:
@@ -653,17 +702,39 @@ def _terminate_process_group(process) -> bool:
     return wait_for_group_exit(1)
 
 
-def _run_process_bounded(args, *, cwd, env, timeout, output_limit):
-    """Run one isolated process with a combined, in-memory stdout/stderr ceiling."""
+def _run_process_bounded(args, *, cwd, env, timeout, output_limit, input_bytes=None):
+    """Run one isolated process with a combined, in-memory stdout/stderr ceiling.
+
+    `input_bytes` feeds stdin from a writer thread and closes it. A blocking write in the
+    main thread would deadlock as soon as the prompt outgrows the pipe buffer (64 KiB on
+    Linux) while nobody drains stdout — and the coach prompt routinely does.
+    """
     process = subprocess.Popen(
         args,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
         env=env,
         start_new_session=True,
     )
+    writer = None
+    if input_bytes is not None:
+        def write_stdin():
+            # A child that exits early leaves a broken pipe. That is the child's failure to
+            # report, not the writer's, so it dies quietly and the exit code speaks.
+            try:
+                process.stdin.write(input_bytes)
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            finally:
+                try:
+                    process.stdin.close()
+                except (BrokenPipeError, OSError, ValueError):
+                    pass
+
+        writer = threading.Thread(target=write_stdin, daemon=True)
+        writer.start()
     chunks = {"stdout": [], "stderr": []}
     total_bytes = 0
     lock = threading.Lock()
@@ -695,10 +766,12 @@ def _run_process_bounded(args, *, cwd, env, timeout, output_limit):
         reader.start()
 
     def close_pipes():
-        for stream in (process.stdout, process.stderr):
+        # stdin is closed too: a writer still blocked on a full pipe would otherwise keep the
+        # descriptor — and the prompt bytes — alive after the run was already abandoned.
+        for stream in (process.stdin, process.stdout, process.stderr):
             try:
                 stream.close()
-            except (AttributeError, OSError):
+            except (AttributeError, OSError, ValueError):
                 pass
 
     deadline = time.monotonic() + timeout
@@ -737,6 +810,8 @@ def _run_process_bounded(args, *, cwd, env, timeout, output_limit):
 
     for reader in readers:
         reader.join()
+    if writer is not None:
+        writer.join(timeout=1)
 
     # A tool may close both inherited pipes before continuing in the background. A complete leader
     # and complete readers are therefore not sufficient: every invocation ends with an empty PGID.
@@ -756,8 +831,8 @@ def _run_process_bounded(args, *, cwd, env, timeout, output_limit):
 
 def run_max(message: str, session, context=None, max_turns: str = "6",
             health_context_allowed: bool = False, conversation_id=None) -> dict:
-    if not ALLOW_ARGV_PROMPTS:
-        raise PromptTransportUnavailable("argv prompt transport is not explicitly enabled")
+    if PROMPT_TRANSPORT not in ("stdin", "argv"):
+        raise PromptTransportUnavailable("no usable Hermes prompt transport is configured")
     if not isinstance(message, str) or not message.strip():
         raise ValueError("message must be a non-empty string")
     if type(health_context_allowed) is not bool:
@@ -790,11 +865,19 @@ def run_max(message: str, session, context=None, max_turns: str = "6",
         health_context_allowed,
         origin_ticket=origin_ticket,
     )
-    # Der tatsaechlich an Popen uebergebene String wird bytegenau geprueft. Request- oder
-    # Kontextlimits allein reichen nicht, weil JSON-Huelle, Sicherheitsdirektiven und Session
-    # gemeinsam in genau einem Linux-argv-Element landen.
-    validate_prompt_argument(prompt)
-    args += ["-q", prompt, "--max-turns", str(turn_limit)]
+    # Der tatsaechlich uebergebene Prompt wird bytegenau geprueft. Request- oder Kontextlimits
+    # allein reichen nicht, weil JSON-Huelle, Sicherheitsdirektiven und Session gemeinsam in
+    # genau einer Nutzlast landen — auf dem argv-Weg zusaetzlich in genau einem Linux-argv-Element.
+    validate_prompt_payload(prompt)
+    prompt_bytes = None
+    if PROMPT_TRANSPORT == "argv":
+        args += ["-q", prompt]
+    else:
+        # `--query-file -` liest stdin vollstaendig und setzt daraus die einzige Query. Der
+        # Gesundheitskontext beruehrt damit weder die Prozessliste noch die Platte.
+        args += ["--query-file", "-"]
+        prompt_bytes = prompt.encode("utf-8")
+    args += ["--max-turns", str(turn_limit)]
     if resume_id:
         args += ["--resume", resume_id]
     p = _run_process_bounded(
@@ -803,6 +886,7 @@ def run_max(message: str, session, context=None, max_turns: str = "6",
         env=hermes_child_env(),
         timeout=TIMEOUT,
         output_limit=MAX_OUTPUT_BYTES,
+        input_bytes=prompt_bytes,
     )
     if p.returncode != 0:
         raise HermesInvocationError("Hermes exited unsuccessfully")
@@ -1070,5 +1154,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if error := runtime_configuration_error():
         raise SystemExit(error)
+    if warning := runtime_configuration_warning():
+        # stderr, damit die Zeile im journal des Dienstes landet und nicht in einer Antwort.
+        print(warning, file=sys.stderr, flush=True)
     port = int(os.environ.get("KORE_BRIDGE_PORT", "8090"))
     ThreadingHTTPServer((validated_bind_host(BIND_HOST), port), Handler).serve_forever()

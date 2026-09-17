@@ -17,9 +17,28 @@ from unittest.mock import patch
 import bridge
 
 
+def sent_prompt(run):
+    """Der uebergebene Prompt, unabhaengig vom Transport.
+
+    Damit prueft jeder Inhaltstest denselben Text, egal ob er ueber stdin (Standard) oder
+    ueber argv (Opt-in) gegangen ist — und ein Transportwechsel kann keinen Inhaltstest
+    still in eine leere Behauptung verwandeln.
+    """
+    args = run.call_args.args[0]
+    if "-q" in args:
+        return args[args.index("-q") + 1]
+    if args[args.index("--query-file") + 1] != "-":
+        raise AssertionError("--query-file muss auf stdin zeigen, nie auf eine Datei")
+    return run.call_args.kwargs["input_bytes"].decode("utf-8")
+
+
 class BridgePrivacyTests(unittest.TestCase):
     def setUp(self):
-        self.argv_prompt_patcher = patch.object(bridge, "ALLOW_ARGV_PROMPTS", True)
+        # Der Standard, nicht die Umgebung des Entwicklers: stdin-Transport, argv aus.
+        self.argv_prompt_patcher = patch.object(bridge, "ALLOW_ARGV_PROMPTS", False)
+        self.prompt_transport_patcher = patch.object(bridge, "PROMPT_TRANSPORT", "stdin")
+        self.prompt_transport_patcher.start()
+        self.addCleanup(self.prompt_transport_patcher.stop)
         self.instance_id_patcher = patch.object(bridge, "INSTANCE_ID", "test-bridge")
         self.profile_patcher = patch.object(bridge, "PROFILE", "test-profile")
         self.origin_secret_patcher = patch.object(bridge, "PLAN_ORIGIN_SECRET", "")
@@ -72,9 +91,20 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertIn("bounded_subprocess_v1", payload["capabilities"])
         self.assertIn("child_env_allowlist_v1", payload["capabilities"])
         self.assertIn("momentum_safety_v1", payload["capabilities"])
-        self.assertEqual(payload["prompt_transport"], "argv-explicit-opt-in")
+        self.assertEqual(payload["prompt_transport"], "stdin")
+        self.assertIn("stdin_prompt_transport_v1", payload["capabilities"])
         self.assertEqual(bridge.health_payload()["capabilities"], payload["capabilities"])
         self.assertTrue(bridge.health_payload()["ok"])
+
+    def test_capabilities_name_the_argv_opt_in_so_an_operator_can_read_the_exposure(self):
+        # /capabilities muss unterscheidbar machen, ob auf DIESER Installation der
+        # Gesundheitskontext in der Prozessliste steht — sonst ist die Warnung nicht pruefbar.
+        with patch.object(bridge, "ALLOW_ARGV_PROMPTS", True), patch.object(
+            bridge, "PROMPT_TRANSPORT", "argv"
+        ):
+            payload = bridge.capabilities_payload()
+        self.assertEqual(payload["prompt_transport"], "argv-explicit-opt-in")
+        self.assertNotIn("stdin_prompt_transport_v1", payload["capabilities"])
 
     def test_plan_origin_capability_is_conditional_on_a_valid_complete_configuration(self):
         self.assertNotIn("plan_origin_v1", bridge.capabilities_payload()["capabilities"])
@@ -170,7 +200,7 @@ class BridgePrivacyTests(unittest.TestCase):
             )
 
         args = run.call_args.args[0]
-        prompt = args[args.index("-q") + 1]
+        prompt = sent_prompt(run)
         marker = "[KORE-PLAN-HERKUNFT — BRIDGE-AUTORITATIV]"
         authority = prompt.split(marker, 1)[1]
         self.assertLess(prompt.index(fake_ticket), prompt.index(marker))
@@ -219,7 +249,7 @@ class BridgePrivacyTests(unittest.TestCase):
         )
 
         args = run.call_args.args[0]
-        prompt = args[args.index("-q") + 1]
+        prompt = sent_prompt(run)
         self.assertIn("--safe-mode", args)
         self.assertIn("readiness", prompt)
         self.assertIn("MCP-Planvorschlags-Tooling ist für diese Anfrage nicht freigegeben", prompt)
@@ -250,6 +280,7 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertIn("--safe-mode", args)
         self.assertNotIn("--resume", args)
         self.assertNotIn("readiness", " ".join(args))
+        self.assertNotIn("readiness", sent_prompt(run))
         self.assertFalse(result["used_kore"])
         self.assertEqual(result["session"], "general:fresh")
 
@@ -293,7 +324,7 @@ class BridgePrivacyTests(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertNotIn("--safe-mode", args)
         self.assertEqual(args[args.index("--resume") + 1], "legacy-session")
-        self.assertIn("readiness", " ".join(args))
+        self.assertIn("readiness", sent_prompt(run))
         self.assertTrue(result["used_kore"])
         self.assertEqual(result["session"], "health:health-session")
 
@@ -483,30 +514,104 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertNotIn("UNRELATED_SECRET", child)
 
     @patch("bridge._run_process_bounded")
-    def test_argv_prompt_transport_is_fail_closed_without_explicit_opt_in(self, run):
-        with patch.object(bridge, "ALLOW_ARGV_PROMPTS", False):
+    def test_the_default_transport_keeps_the_prompt_out_of_the_process_list(self, run):
+        run.return_value = SimpleNamespace(stdout="Antwort", stderr="", returncode=0)
+
+        bridge.run_max(
+            "sensibler Gesundheitsprompt",
+            None,
+            health_context_allowed=False,
+        )
+
+        args = run.call_args.args[0]
+        # Der Kern der Sache: kein einziges argv-Element traegt den Prompt, und der Aufruf
+        # zeigt --query-file auf stdin. /proc/<pid>/cmdline zeigt nichts Privates.
+        self.assertNotIn("-q", args)
+        self.assertEqual(args[args.index("--query-file") + 1], "-")
+        self.assertNotIn("sensibler Gesundheitsprompt", " ".join(args))
+        self.assertIn("sensibler Gesundheitsprompt", sent_prompt(run))
+        self.assertIsInstance(run.call_args.kwargs["input_bytes"], bytes)
+
+    @patch("bridge._run_process_bounded")
+    def test_the_health_context_never_reaches_argv_on_the_default_transport(self, run):
+        run.return_value = SimpleNamespace(stdout="Antwort", stderr="", returncode=0)
+
+        bridge.run_max(
+            "Wie sieht es aus?",
+            "health:legacy-session",
+            {"readiness": {"score": 87}},
+            health_context_allowed=True,
+            conversation_id="123e4567-e89b-42d3-a456-426614174000",
+        )
+
+        self.assertNotIn("readiness", " ".join(run.call_args.args[0]))
+        self.assertIn("readiness", sent_prompt(run))
+
+    @patch("bridge._run_process_bounded")
+    def test_the_argv_opt_in_still_works_for_a_hermes_without_query_file(self, run):
+        # Der Rueckfallweg bleibt benutzbar — er ist nur nicht mehr der Standard.
+        run.return_value = SimpleNamespace(stdout="Antwort", stderr="", returncode=0)
+
+        with patch.object(bridge, "ALLOW_ARGV_PROMPTS", True), patch.object(
+            bridge, "PROMPT_TRANSPORT", "argv"
+        ):
+            bridge.run_max("Hallo", None, health_context_allowed=False)
+
+        args = run.call_args.args[0]
+        self.assertNotIn("--query-file", args)
+        self.assertIn("Hallo", args[args.index("-q") + 1])
+        self.assertIsNone(run.call_args.kwargs["input_bytes"])
+
+    @patch("bridge._run_process_bounded")
+    def test_an_unknown_transport_fails_closed_instead_of_guessing(self, run):
+        with patch.object(bridge, "PROMPT_TRANSPORT", "carrier-pigeon"):
             with self.assertRaises(bridge.PromptTransportUnavailable):
                 bridge.run_max("sensibler Prompt", None, health_context_allowed=False)
 
         run.assert_not_called()
 
+    def test_the_argv_opt_in_warns_about_the_process_list_and_the_default_does_not(self):
+        with patch.object(bridge, "ALLOW_ARGV_PROMPTS", True):
+            warning = bridge.runtime_configuration_warning()
+        self.assertIsNotNone(warning)
+        self.assertIn("KORE_HERMES_ALLOW_ARGV_PROMPTS", warning)
+        self.assertIn("Prozessliste", warning)
+        self.assertIn("Gesundheitskontext", warning)
+        with patch.object(bridge, "ALLOW_ARGV_PROMPTS", False):
+            self.assertIsNone(bridge.runtime_configuration_warning())
+
     @patch("bridge._run_process_bounded")
     def test_exact_built_prompt_is_byte_bounded_before_popen(self, run):
         run.return_value = SimpleNamespace(stdout="Antwort", stderr="", returncode=0)
 
-        with patch.object(bridge, "prompt_argument_limit", return_value=64), patch.object(
+        with patch.object(bridge, "prompt_payload_limit", return_value=64), patch.object(
             bridge, "build_prompt", return_value="ä" * 32
         ):
             bridge.run_max("Hallo", None, health_context_allowed=False)
         run.assert_called_once()
 
         run.reset_mock()
-        with patch.object(bridge, "prompt_argument_limit", return_value=64), patch.object(
+        with patch.object(bridge, "prompt_payload_limit", return_value=64), patch.object(
             bridge, "build_prompt", return_value="ä" * 32 + "x"
         ):
             with self.assertRaises(bridge.HermesPromptTooLarge) as raised:
                 bridge.run_max("Hallo", None, health_context_allowed=False)
-        self.assertIn("argv-Byte-Limit", str(raised.exception))
+        self.assertIn("Byte-Limit", str(raised.exception))
+        run.assert_not_called()
+
+    @patch("bridge._run_process_bounded")
+    def test_the_argv_path_keeps_the_stricter_linux_argument_ceiling(self, run):
+        # stdin hat kein MAX_ARG_STRLEN — argv schon. Das Dach darf beim Opt-in nicht
+        # stillschweigend auf das groesszuegigere stdin-Limit springen.
+        run.return_value = SimpleNamespace(stdout="Antwort", stderr="", returncode=0)
+
+        with patch.object(bridge, "ALLOW_ARGV_PROMPTS", True), patch.object(
+            bridge, "PROMPT_TRANSPORT", "argv"
+        ), patch.object(bridge, "prompt_argument_limit", return_value=16), patch.object(
+            bridge, "prompt_payload_limit", return_value=1_048_576
+        ), patch.object(bridge, "build_prompt", return_value="x" * 17):
+            with self.assertRaises(bridge.HermesPromptTooLarge):
+                bridge.run_max("Hallo", None, health_context_allowed=False)
         run.assert_not_called()
 
     @patch("bridge.run_max", side_effect=bridge.HermesPromptTooLarge("oversized"))
@@ -625,15 +730,9 @@ class BridgePrivacyTests(unittest.TestCase):
 
         run.assert_not_called()
 
-    def test_runtime_configuration_requires_explicit_instance_profile_token_and_argv(self):
-        with patch.object(bridge, "TOKEN", ""), patch.object(
-            bridge, "ALLOW_ARGV_PROMPTS", True
-        ):
+    def test_runtime_configuration_requires_explicit_instance_profile_and_token(self):
+        with patch.object(bridge, "TOKEN", ""):
             self.assertIn("KORE_BRIDGE_TOKEN", bridge.runtime_configuration_error())
-        with patch.object(bridge, "TOKEN", "configured"), patch.object(
-            bridge, "ALLOW_ARGV_PROMPTS", False
-        ):
-            self.assertIn("KORE_HERMES_ALLOW_ARGV_PROMPTS", bridge.runtime_configuration_error())
         with patch.object(bridge, "TOKEN", "configured"), patch.object(
             bridge, "INSTANCE_ID", ""
         ):
@@ -642,8 +741,11 @@ class BridgePrivacyTests(unittest.TestCase):
             bridge, "PROFILE", ""
         ):
             self.assertIn("KORE_HERMES_PROFILE", bridge.runtime_configuration_error())
+        # Der Start haengt nicht mehr an KORE_HERMES_ALLOW_ARGV_PROMPTS: eine vollstaendige
+        # Installation laeuft auf dem sicheren Standardweg los, ohne dass jemand eine
+        # /proc-Preisgabe quittieren muss.
         with patch.object(bridge, "TOKEN", "configured"), patch.object(
-            bridge, "ALLOW_ARGV_PROMPTS", True
+            bridge, "ALLOW_ARGV_PROMPTS", False
         ):
             self.assertIsNone(bridge.runtime_configuration_error())
 
@@ -682,8 +784,8 @@ class BridgePrivacyTests(unittest.TestCase):
 
     def test_runtime_configuration_rejects_an_unsafe_bind_host(self):
         with patch.object(bridge, "TOKEN", "configured"), patch.object(
-            bridge, "ALLOW_ARGV_PROMPTS", True
-        ), patch.object(bridge, "BIND_HOST", "0.0.0.0"):
+            bridge, "BIND_HOST", "0.0.0.0"
+        ):
             self.assertIn("KORE_BRIDGE_BIND_HOST", bridge.runtime_configuration_error())
 
     @patch("bridge._run_process_bounded")
@@ -768,6 +870,64 @@ class BridgePrivacyTests(unittest.TestCase):
                         os.kill(descendant_pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+
+    def test_bounded_runner_delivers_stdin_verbatim_to_a_real_child(self):
+        # Kein Mock: ein echter Prozess liest den Prompt von stdin zurueck. Hostile Zeichen
+        # sind absichtlich dabei — auf stdin wird nichts von einer Shell interpretiert.
+        prompt = 'Zeile 1\n"Anfuehrung" $(id) `date` \\ Umlaute: äöü\nZeile 2'
+        script = (
+            "import sys\n"
+            "sys.stdout.write(sys.stdin.read())\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = bridge._run_process_bounded(
+                [sys.executable, "-c", script],
+                cwd=directory,
+                env=bridge.hermes_child_env({}),
+                timeout=10,
+                output_limit=1_048_576,
+                input_bytes=prompt.encode("utf-8"),
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, prompt)
+
+    def test_bounded_runner_does_not_deadlock_on_a_prompt_larger_than_the_pipe_buffer(self):
+        # Der eigentliche Grund fuer den Writer-Thread: 256 KiB passen nicht in den
+        # 64-KiB-Pipe-Puffer. Ein blockierender Write im Hauptthread haette hier gehangen,
+        # bis der Timeout zuschlaegt — und der Coach haette nie geantwortet.
+        prompt = "ä" * 128_000  # 256 000 Bytes in UTF-8
+        script = (
+            "import sys\n"
+            "data = sys.stdin.buffer.read()\n"
+            "sys.stdout.write(str(len(data)))\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = bridge._run_process_bounded(
+                [sys.executable, "-c", script],
+                cwd=directory,
+                env=bridge.hermes_child_env({}),
+                timeout=20,
+                output_limit=4096,
+                input_bytes=prompt.encode("utf-8"),
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, str(len(prompt.encode("utf-8"))))
+
+    def test_bounded_runner_survives_a_child_that_never_reads_stdin(self):
+        # Ein Hermes, der frueh abbricht, laesst eine kaputte Pipe zurueck. Das darf den
+        # Lauf nicht mit einem Writer-Fehler ueberschreiben — der Exit-Code redet.
+        script = "import sys\nsys.stdout.write('fertig')\n"
+        with tempfile.TemporaryDirectory() as directory:
+            result = bridge._run_process_bounded(
+                [sys.executable, "-c", script],
+                cwd=directory,
+                env=bridge.hermes_child_env({}),
+                timeout=20,
+                output_limit=4096,
+                input_bytes=("x" * 256_000).encode("utf-8"),
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "fertig")
 
     def test_bounded_runner_reaps_descendant_that_closes_pipes_before_leader_exit(self):
         descendant_pid = None
