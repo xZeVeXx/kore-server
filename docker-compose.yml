@@ -1,0 +1,38 @@
+# Two processes, one SQLite database, one person. No multi-tenancy.
+#
+# Both ports bind to 127.0.0.1 by default. To reach the server from your iPhone
+# or from a Hermes agent on another host, set KORE_BIND_ADDRESS in .env to the
+# LAN address of this machine (e.g. 10.0.0.10) — never to 0.0.0.0, and never
+# forward these ports in your router.
+
+services:
+  ingest:
+    build: .
+    image: kore-server:local
+    command: ["uvicorn", "ingest_api:app", "--host", "0.0.0.0", "--port", "8081"]
+    env_file: .env
+    environment:
+      KORE_DB_PATH: /data/kore.db
+    ports:
+      - "${KORE_BIND_ADDRESS:-127.0.0.1}:8081:8081"
+    volumes:
+      - kore-db:/data
+    restart: unless-stopped
+
+  mcp:
+    build: .
+    image: kore-server:local
+    command: ["python", "mcp_server.py"]
+    env_file: .env
+    environment:
+      KORE_DB_PATH: /data/kore.db
+      KORE_MCP_HOST: 0.0.0.0
+      KORE_MCP_PORT: "8000"
+    ports:
+      - "${KORE_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    volumes:
+      - kore-db:/data
+    restart: unless-stopped
+
+volumes:
+  kore-db:
