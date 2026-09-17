@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Never commit real configuration or data.
+*.env
+!*.env.example
+.env
+*.db
+*.db-shm
+*.db-wal
+
+.DS_Store
+._*
+.pytest_cache/
