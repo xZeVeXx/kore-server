@@ -1,0 +1,13 @@
+[Unit]
+Description=Kore Ingest API (FastAPI)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/kore-server
+EnvironmentFile=/opt/kore-server/.env
+ExecStart=/opt/kore-server/.venv/bin/uvicorn ingest_api:app --host 0.0.0.0 --port 8081
+Restart=on-failure
+User=kore
+
+[Install]
+WantedBy=multi-user.target

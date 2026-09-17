@@ -1,0 +1,14 @@
+[Unit]
+Description=Kore Coach Bridge (App -> hermes profile max -> kore MCP)
+After=network-online.target
+
+[Service]
+User=hermes
+WorkingDirectory=/home/hermes
+Environment=HOME=/home/hermes
+EnvironmentFile=/home/hermes/kore-coach-bridge/bridge.env
+ExecStart=/usr/bin/python3 /home/hermes/kore-coach-bridge/bridge.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

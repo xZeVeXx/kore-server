@@ -1,0 +1,16 @@
+# Ausschnitt aus einem Hermes-Profil (~/.hermes/profiles/<profil>/config.yaml).
+# Getestet mit Hermes Agent v0.21.2 (2026.9.11).
+#
+# Trage den Block in genau das Profil ein, das die Bridge über
+# KORE_HERMES_PROFILE aufruft. Das Token steht NICHT hier, sondern kommt aus
+# der Umgebung des Hermes-Prozesses (systemd `Environment=` oder Secret-Store);
+# der Wert ist KORE_MCP_TOKEN aus der .env des Servers.
+
+mcp_servers:
+  kore:
+    # LAN-Adresse des Rechners, auf dem kore-server läuft. Der abschließende
+    # Schrägstrich hinter /mcp gehört dazu.
+    url: http://10.0.0.10:8000/mcp/
+    headers:
+      Authorization: Bearer ${MCP_KORE_API_KEY}
+    enabled: true

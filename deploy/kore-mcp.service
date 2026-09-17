@@ -1,0 +1,13 @@
+[Unit]
+Description=Kore MCP Server (FastMCP, Streamable HTTP)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/kore-server
+EnvironmentFile=/opt/kore-server/.env
+ExecStart=/opt/kore-server/.venv/bin/python mcp_server.py
+Restart=on-failure
+User=kore
+
+[Install]
+WantedBy=multi-user.target
