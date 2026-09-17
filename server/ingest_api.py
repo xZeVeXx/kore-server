@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 import store
 from models import PlanAck, Snapshot
+from origin_guard import OriginGuardMiddleware, allowed_origins_from_env
 from origin_ticket import policy_from_env
 
 
@@ -25,7 +26,13 @@ def _required_env(name: str) -> str:
 INGEST_TOKEN = _required_env("KORE_INGEST_TOKEN")
 ORIGIN_POLICY = policy_from_env()
 
+ALLOWED_ORIGINS = allowed_origins_from_env()
+
 app = FastAPI(title="Kore Ingest API", version="1.0")
+# Outermost layer on purpose: a rejected origin must not reach routing, validation or the
+# token check, so a probing page learns nothing from response shape or timing. /health is
+# covered too — it is the cheapest existence oracle on the box.
+app.add_middleware(OriginGuardMiddleware, allowed_origins=ALLOWED_ORIGINS)
 
 
 @app.exception_handler(RequestValidationError)

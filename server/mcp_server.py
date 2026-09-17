@@ -33,9 +33,11 @@ import fastmcp  # noqa: E402
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.utilities.logging import configure_logging
+from starlette.middleware import Middleware
 
 import store
 from models import TrainingPlanProposal
+from origin_guard import OriginGuardMiddleware, allowed_origins_from_env
 from origin_ticket import policy_from_env, secret_from_env, verify_origin_ticket
 
 
@@ -119,7 +121,18 @@ token_verifier = StaticTokenVerifier(
     required_scopes=["read:health"],
 )
 mcp = FastMCP("Kore", auth=token_verifier)
+ALLOWED_ORIGINS = allowed_origins_from_env()
 store.init()
+
+
+def origin_guard_middleware() -> list[Middleware]:
+    """The ASGI layer FastMCP mounts outside its own session handling.
+
+    FastMCP 3.4 builds its Starlette app inside `run()`, so the guard is handed in as a
+    middleware spec rather than wrapped around a finished app. `TransportSecuritySettings`
+    from the MCP SDK would be the built-in route, but FastMCP never forwards it.
+    """
+    return [Middleware(OriginGuardMiddleware, allowed_origins=ALLOWED_ORIGINS)]
 
 
 def _snapshot_freshness(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -223,4 +236,5 @@ if __name__ == "__main__":
         transport="http",
         host=os.environ.get("KORE_MCP_HOST", "127.0.0.1"),
         port=int(os.environ.get("KORE_MCP_PORT", "8000")),
+        middleware=origin_guard_middleware(),
     )
