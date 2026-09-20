@@ -91,6 +91,7 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertIn("bounded_subprocess_v1", payload["capabilities"])
         self.assertIn("child_env_allowlist_v1", payload["capabilities"])
         self.assertIn("momentum_safety_v1", payload["capabilities"])
+        self.assertIn("momentum_safety_v2", payload["capabilities"])
         self.assertEqual(payload["prompt_transport"], "stdin")
         self.assertIn("stdin_prompt_transport_v1", payload["capabilities"])
         self.assertEqual(bridge.health_payload()["capabilities"], payload["capabilities"])
@@ -393,6 +394,124 @@ class BridgePrivacyTests(unittest.TestCase):
         naive_time = self.momentum_context(computed_at="2026-07-11T12:00:00")
         self.assertEqual(bridge.momentum_context_error(naive_time), "computed_at")
 
+    def test_momentum_contract_accepts_only_canonical_optional_sleep_timing(self):
+        now = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
+        sleep_base = {
+            "action": "sleep",
+            "factor": "sleep",
+            "protection_reasons": ["sleepPriority"],
+        }
+        for phase in sorted(bridge._MOMENTUM_SLEEP_PREPARATION_PHASES):
+            with self.subTest(valid_phase=phase):
+                self.assertIsNone(bridge.momentum_context_error(self.momentum_context(
+                    now,
+                    **sleep_base,
+                    sleep_preparation_phase=phase,
+                )))
+        self.assertIsNone(bridge.momentum_context_error(self.momentum_context(
+            now,
+            **sleep_base,
+            sleep_preparation_phase="laterToday",
+            sleep_preparation_opens_at=(now + timedelta(hours=8)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+        )))
+
+        invalid_cases = [
+            (
+                "unknown phase",
+                {**sleep_base, "sleep_preparation_phase": "tonightMaybe"},
+                "sleep_preparation_phase",
+            ),
+            (
+                "opening without phase",
+                {
+                    **sleep_base,
+                    "sleep_preparation_opens_at": now.isoformat().replace("+00:00", "Z"),
+                },
+                "sleep_preparation_opens_at",
+            ),
+            (
+                "naive opening",
+                {
+                    **sleep_base,
+                    "sleep_preparation_phase": "laterToday",
+                    "sleep_preparation_opens_at": "2026-07-11T20:00:00",
+                },
+                "sleep_preparation_opens_at",
+            ),
+            (
+                "non-sleep action",
+                {
+                    **sleep_base,
+                    "action": "recovery",
+                    "sleep_preparation_phase": "laterToday",
+                },
+                "sleep_preparation",
+            ),
+            (
+                "non-sleep factor",
+                {
+                    **sleep_base,
+                    "factor": "recovery",
+                    "sleep_preparation_phase": "laterToday",
+                },
+                "sleep_preparation",
+            ),
+            (
+                "missing sleep protection",
+                {
+                    **sleep_base,
+                    "protection_reasons": [],
+                    "sleep_preparation_phase": "laterToday",
+                },
+                "sleep_preparation",
+            ),
+        ]
+        for label, overrides, expected in invalid_cases:
+            with self.subTest(invalid=label):
+                self.assertEqual(
+                    bridge.momentum_context_error(self.momentum_context(now, **overrides)),
+                    expected,
+                )
+
+    def test_momentum_relational_contradictions_are_unclear(self):
+        now = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
+        cases = [
+            ("plan completed but available", {"plan_completed_today": True}),
+            ("plan secured but incomplete", {"plan_today_state": "secured"}),
+            ("daily completed but available", {"daily_completed_today": True}),
+            ("daily secured but incomplete", {"daily_today_state": "secured"}),
+            (
+                "plan completion without daily completion",
+                {"plan_today_state": "secured", "plan_completed_today": True},
+            ),
+            (
+                "computed at expiry",
+                {
+                    "computed_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+                    "valid_until": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+                },
+            ),
+        ]
+        for label, overrides in cases:
+            with self.subTest(case=label):
+                self.assertEqual(
+                    bridge.momentum_safety_state(self.momentum_context(now, **overrides), now=now),
+                    "unclear",
+                )
+
+        canonical_secured = self.momentum_context(
+            now,
+            plan_today_state="secured",
+            plan_completed_today=True,
+            daily_today_state="secured",
+            daily_completed_today=True,
+        )
+        self.assertEqual(
+            bridge.momentum_safety_state(canonical_secured, now=now), "no_pressure"
+        )
+
     def test_momentum_protection_and_rest_states_disable_loss_pressure(self):
         now = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
         self.assertIn("noPlannedSession", bridge._MOMENTUM_PROTECTIONS)
@@ -434,6 +553,134 @@ class BridgePrivacyTests(unittest.TestCase):
             self.assertIn("keinen Verfall", directive)
             self.assertIn("keine Gefährdung", directive)
 
+        exactly_twelve_hours_old = self.momentum_context(
+            now,
+            computed_at=(now - timedelta(hours=12)).isoformat().replace("+00:00", "Z"),
+            valid_until=(now + timedelta(hours=14)).isoformat().replace("+00:00", "Z"),
+        )
+        self.assertEqual(
+            bridge.momentum_safety_state(exactly_twelve_hours_old, now=now), "no_pressure"
+        )
+
+        exact_maximum_span = self.momentum_context(
+            now,
+            computed_at=now.isoformat().replace("+00:00", "Z"),
+            valid_until=(now + timedelta(hours=26)).isoformat().replace("+00:00", "Z"),
+        )
+        self.assertEqual(bridge.momentum_safety_state(exact_maximum_span, now=now), "no_pressure")
+        overlong_span = self.momentum_context(
+            now,
+            computed_at=now.isoformat().replace("+00:00", "Z"),
+            valid_until=(now + timedelta(hours=26, seconds=1)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+        )
+        self.assertEqual(bridge.momentum_safety_state(overlong_span, now=now), "unclear")
+
+    def test_momentum_pressure_is_track_specific_and_requires_feasible_training(self):
+        now = datetime(2026, 7, 11, 12, tzinfo=timezone.utc)
+
+        def pressure_context(**overrides):
+            values = {
+                "action": "training",
+                "factor": "strength",
+                "plan_today_state": "atRisk",
+                "plan_remaining_minutes": 12,
+                "valid_until": (now + timedelta(minutes=13)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+            }
+            values.update(overrides)
+            return self.momentum_context(now, **values)
+
+        cases = [
+            ("plan", {}, "pressure_plan"),
+            (
+                "daily fallback",
+                {"plan_today_state": "available", "daily_today_state": "atRisk"},
+                "pressure_daily",
+            ),
+            (
+                "daily fallback preserves raw plan risk truth",
+                {
+                    "plan_training_streak_days": 0,
+                    "daily_today_state": "atRisk",
+                },
+                "pressure_daily",
+            ),
+            ("plan wins when both qualify", {"daily_today_state": "atRisk"}, "pressure_plan"),
+            ("non-training action", {"action": "mobility", "factor": "activity"}, "no_pressure"),
+            ("non-training factor", {"factor": "activity"}, "no_pressure"),
+            ("zero plan streak", {"plan_training_streak_days": 0}, "no_pressure"),
+            ("zero remaining minutes", {"plan_remaining_minutes": 0}, "no_pressure"),
+            ("no at-risk track", {"plan_today_state": "available"}, "no_pressure"),
+            (
+                "daily streak is zero",
+                {
+                    "plan_today_state": "available",
+                    "daily_today_state": "atRisk",
+                    "daily_momentum_streak_days": 0,
+                },
+                "no_pressure",
+            ),
+            (
+                "exact completion boundary",
+                {
+                    "valid_until": (now + timedelta(minutes=12)).isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                },
+                "no_pressure",
+            ),
+            (
+                "one second before completion boundary",
+                {
+                    "valid_until": (now + timedelta(minutes=12, seconds=1)).isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                },
+                "pressure_plan",
+            ),
+        ]
+        for label, overrides, expected in cases:
+            with self.subTest(case=label):
+                self.assertEqual(
+                    bridge.momentum_safety_state(pressure_context(**overrides), now=now),
+                    expected,
+                )
+
+        plan_directive = bridge.momentum_safety_directive(pressure_context(), now=now)
+        self.assertIn("Ausschließlich für den Plan-Trainingsstreak", plan_directive)
+        self.assertIn("Daily-Momentum-Spur nicht als gefährdet", plan_directive)
+        both_at_risk_directive = bridge.momentum_safety_directive(
+            pressure_context(daily_today_state="atRisk"), now=now
+        )
+        self.assertIn("priorisiere trotzdem nur den Plan", both_at_risk_directive)
+        self.assertIn("Behaupte nicht, Daily sei gesichert oder ungefährdet", both_at_risk_directive)
+        self.assertNotIn("Daily-Momentum-Spur nicht als gefährdet", both_at_risk_directive)
+        daily_directive = bridge.momentum_safety_directive(pressure_context(
+            plan_today_state="available", daily_today_state="atRisk"
+        ), now=now)
+        self.assertIn("Ausschließlich für den Daily-Momentum-Streak", daily_directive)
+        self.assertIn("Plan-Trainingsstreak nicht als gefährdet", daily_directive)
+        daily_fallback_with_raw_plan_risk = bridge.momentum_safety_directive(
+            pressure_context(
+                plan_training_streak_days=0,
+                daily_today_state="atRisk",
+            ),
+            now=now,
+        )
+        self.assertIn("richte keinen zweiten Verlustappell", daily_fallback_with_raw_plan_risk)
+        self.assertIn(
+            "behaupte nicht, er sei gesichert oder ungefährdet",
+            daily_fallback_with_raw_plan_risk,
+        )
+        neutral_directive = bridge.momentum_safety_directive(pressure_context(
+            plan_today_state="available"
+        ), now=now)
+        self.assertIn("keinen Verlustdruck", neutral_directive)
+        self.assertIn("keine Trainingsaufforderung zum Erhalt eines Streaks", neutral_directive)
+
     def test_momentum_prompt_appends_server_safety_after_context(self):
         protected = self.momentum_context(protection_reasons=["illness"])
         prompt = bridge.build_prompt("Heute trainieren?", protected, health_context_allowed=True)
@@ -446,9 +693,17 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertIn("Diese Serverregel hat Vorrang", prompt)
         self.assertIn("keinen Verlustdruck", prompt)
 
-        at_risk = self.momentum_context(plan_today_state="atRisk")
-        normal = bridge.momentum_safety_directive(at_risk)
-        self.assertIn("nur bei einem expliziten atRisk-Zustand", normal)
+        now = datetime.now(timezone.utc)
+        at_risk = self.momentum_context(
+            now,
+            action="training",
+            factor="cardio",
+            plan_today_state="atRisk",
+            valid_until=(now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        )
+        pressure = bridge.momentum_safety_directive(at_risk, now=now)
+        self.assertIn("Ausschließlich für den Plan-Trainingsstreak", pressure)
+        self.assertIn("Daily-Momentum-Spur nicht als gefährdet", pressure)
 
     def test_consent_contract_rejects_malformed_momentum_before_hermes(self):
         malformed = self.momentum_context(plan_remaining_minutes=-1)

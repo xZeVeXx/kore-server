@@ -33,7 +33,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = os.environ.get("KORE_BRIDGE_TOKEN", "")
@@ -111,6 +111,10 @@ _MOMENTUM_FIELDS = frozenset((
     "computed_at",
     "valid_until",
 ))
+_MOMENTUM_OPTIONAL_FIELDS = frozenset((
+    "sleep_preparation_phase",
+    "sleep_preparation_opens_at",
+))
 _PLAN_TODAY_STATES = frozenset((
     "secured", "available", "atRisk", "recoveryProtected", "restDay", "unreadable",
 ))
@@ -124,6 +128,12 @@ _MOMENTUM_PROTECTIONS = frozenset((
     "sleepPriority", "illness", "injury", "manualRecoveryDay",
 ))
 _MOMENTUM_SOURCE_STATES = frozenset(("readable", "unreadable", "failed"))
+_MOMENTUM_SLEEP_PREPARATION_PHASES = frozenset((
+    "needsTargetBedtime", "missingCurrentSleep", "laterToday", "available", "closed",
+    "recentlyAwake", "completedForOpportunity",
+))
+_MOMENTUM_MAX_CONTEXT_AGE = timedelta(hours=12)
+_MOMENTUM_MAX_VALIDITY_SPAN = timedelta(hours=26)
 BRIDGE_API_VERSION = 2
 CONSENT_SCOPE_VERSION = 2
 BRIDGE_CAPABILITIES = (
@@ -132,6 +142,7 @@ BRIDGE_CAPABILITIES = (
     "child_env_allowlist_v1",
     "consent_scope_v2",
     "momentum_safety_v1",
+    "momentum_safety_v2",
     "safe_mode_without_health_v1",
     "scoped_sessions_v1",
 )
@@ -446,11 +457,15 @@ def _parse_iso8601(value):
 
 
 def momentum_context_error(context):
-    """Validate the app's minimal canonical projection without accepting a second schema."""
+    """Validate the app's minimal canonical projection and its optional sleep timing."""
     if not isinstance(context, dict) or "kore_momentum" not in context:
         return None
     momentum = context["kore_momentum"]
-    if not isinstance(momentum, dict) or set(momentum) != _MOMENTUM_FIELDS:
+    if (
+        not isinstance(momentum, dict)
+        or not _MOMENTUM_FIELDS.issubset(momentum)
+        or not set(momentum).issubset(_MOMENTUM_FIELDS | _MOMENTUM_OPTIONAL_FIELDS)
+    ):
         return "fields"
     if not _bounded_plain_int(momentum["plan_training_streak_days"], 100_000):
         return "plan_training_streak_days"
@@ -484,6 +499,23 @@ def momentum_context_error(context):
         return "computed_at"
     if _parse_iso8601(momentum["valid_until"]) is None:
         return "valid_until"
+    has_sleep_phase = "sleep_preparation_phase" in momentum
+    has_sleep_opening = "sleep_preparation_opens_at" in momentum
+    if has_sleep_phase and not _known_string(
+        momentum["sleep_preparation_phase"], _MOMENTUM_SLEEP_PREPARATION_PHASES
+    ):
+        return "sleep_preparation_phase"
+    if has_sleep_opening and (
+        not has_sleep_phase
+        or _parse_iso8601(momentum["sleep_preparation_opens_at"]) is None
+    ):
+        return "sleep_preparation_opens_at"
+    if (has_sleep_phase or has_sleep_opening) and (
+        momentum["action"] != "sleep"
+        or momentum["factor"] != "sleep"
+        or "sleepPriority" not in protections
+    ):
+        return "sleep_preparation"
     return None
 
 
@@ -505,7 +537,16 @@ def momentum_safety_state(context, now=None):
         or momentum["plan_today_state"] == "unreadable"
         or momentum["daily_today_state"] == "unreadable"
         or computed_at > reference
+        or computed_at < reference - _MOMENTUM_MAX_CONTEXT_AGE
         or valid_until <= reference
+        or computed_at >= valid_until
+        or valid_until - computed_at > _MOMENTUM_MAX_VALIDITY_SPAN
+    ):
+        return "unclear"
+    if (
+        momentum["plan_completed_today"] != (momentum["plan_today_state"] == "secured")
+        or momentum["daily_completed_today"] != (momentum["daily_today_state"] == "secured")
+        or (momentum["plan_completed_today"] and not momentum["daily_completed_today"])
     ):
         return "unclear"
     if (
@@ -514,7 +555,31 @@ def momentum_safety_state(context, now=None):
         or momentum["daily_today_state"] == "recoveryProtected"
     ):
         return "protected"
-    return "normal"
+    if (
+        momentum["action"] != "training"
+        or momentum["factor"] not in ("strength", "cardio")
+        or momentum["plan_remaining_minutes"] <= 0
+    ):
+        return "no_pressure"
+    try:
+        finishes_at = reference + timedelta(minutes=momentum["plan_remaining_minutes"])
+    except OverflowError:
+        return "no_pressure"
+    if finishes_at >= valid_until:
+        return "no_pressure"
+    if (
+        momentum["plan_today_state"] == "atRisk"
+        and not momentum["plan_completed_today"]
+        and momentum["plan_training_streak_days"] > 0
+    ):
+        return "pressure_plan"
+    if (
+        momentum["daily_today_state"] == "atRisk"
+        and not momentum["daily_completed_today"]
+        and momentum["daily_momentum_streak_days"] > 0
+    ):
+        return "pressure_daily"
+    return "no_pressure"
 
 
 def momentum_safety_directive(context, now=None) -> str:
@@ -537,10 +602,39 @@ def momentum_safety_directive(context, now=None) -> str:
             "Trainingsaufforderung zum Erhalt eines Streaks; priorisiere Recovery, Krankheit, "
             "Verletzung oder Schlaf entsprechend den gelieferten Schutzgründen."
         )
+    if state == "no_pressure":
+        return prefix + (
+            "Es gibt keinen serverseitig bestätigten, noch sicher erfüllbaren atRisk-Streak. "
+            "Erzeuge keinen Verlustdruck und keine Trainingsaufforderung zum Erhalt eines Streaks; "
+            "beschreibe offene, gesicherte oder neutrale Spuren ohne Verfallsbehauptung."
+        )
+    momentum = context["kore_momentum"]
+    if state == "pressure_plan":
+        daily_note = (
+            "Die Daily-Momentum-Spur ist ebenfalls als atRisk gemeldet; priorisiere trotzdem nur "
+            "den Plan und erzeuge keinen zweiten Daily-Verlustappell. Behaupte nicht, Daily sei "
+            "gesichert oder ungefährdet."
+            if momentum["daily_today_state"] == "atRisk"
+            else "Stelle die Daily-Momentum-Spur nicht als gefährdet dar."
+        )
+        return prefix + (
+            "Ausschließlich für den Plan-Trainingsstreak ist Verlustdruck serverseitig freigegeben: "
+            f"{momentum['plan_training_streak_days']} Tage, noch "
+            f"{momentum['plan_remaining_minutes']} Trainingsminuten. Motiviere konkret, aber erfinde "
+            f"keine Deadline und eskaliere die Tagesaktion nicht. {daily_note}"
+        )
+    plan_note = (
+        "Der Plan ist ebenfalls als atRisk gemeldet, erfüllt aber den serverseitigen "
+        "Druckvertrag nicht; richte keinen zweiten Verlustappell darauf und behaupte nicht, er sei "
+        "gesichert oder ungefährdet."
+        if momentum["plan_today_state"] == "atRisk"
+        else "Stelle den Plan-Trainingsstreak nicht als gefährdet dar."
+    )
     return prefix + (
-        "Nutze ausschließlich die gelieferten Zustände. Gefährdungs- oder Verlustsprache ist nur "
-        "bei einem expliziten atRisk-Zustand zulässig; erfinde keine Deadline und eskaliere keine "
-        "Tagesaktion."
+        "Ausschließlich für den Daily-Momentum-Streak ist Verlustdruck serverseitig freigegeben: "
+        f"{momentum['daily_momentum_streak_days']} Tage, noch "
+        f"{momentum['plan_remaining_minutes']} Trainingsminuten. Motiviere konkret, aber erfinde "
+        f"keine Deadline und eskaliere die Tagesaktion nicht. {plan_note}"
     )
 
 
