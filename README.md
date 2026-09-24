@@ -378,7 +378,7 @@ python3 bridge.py                                          # oder: kore-coach-br
 ```
 
 Vertrag, falls du eine eigene Bridge für einen anderen Agenten schreiben willst — die App spricht
-nur dieses kleine Protokoll, kein Streaming:
+nur dieses kleine Protokoll:
 
 - `GET /health`, `GET /capabilities` → Fähigkeitsliste, `api_version: 2`.
 - `POST /coach` mit `{message, conversation_id, session?, context?, health_context_allowed}`.
@@ -387,6 +387,17 @@ nur dieses kleine Protokoll, kein Streaming:
   sie nicht oder kennt Hermes die Session nicht mehr, beginnt der Kontext neu (`context: "reset"`,
   `reset_reason: "invalid"`/`"expired"`) statt eines Fehlers. Ein Gesundheitskontext wird nur
   weitergereicht, wenn `health_context_allowed` wörtlich `true` ist (fail-closed).
+- `POST /coach` mit zusätzlich `client_message_id` (kanonische UUID der Nutzernachricht) startet einen
+  Turn-Auftrag und antwortet sofort `202 {turn_id, status}`; dieselbe `client_message_id` im selben
+  Chat liefert denselben Turn (kein zweiter Lauf). Läuft im Chat schon ein Turn: `409` mit `turn_id`;
+  mehr als zwei gleichzeitig: `429`. Ohne `client_message_id` bleibt `POST /coach` synchron.
+- `GET /coach/turns/{turn_id}/events` → Server-Sent Events mit `id:`; `Last-Event-ID` spielt spätere
+  Ereignisse erneut ab, alle 15 s `: keepalive`. Nur Text-Deltas `{"delta": …}`, am Ende
+  `{"done": true, "used_kore": …, "context": …, "session"?: …}` oder `{"error": …, "code": …}`;
+  Werkzeugaufrufe bleiben in der Bridge.
+- `GET /coach/turns/{turn_id}` → Stand bzw. Ergebnis; ein fertiger Turn wird mit dieser Antwort gelöscht
+  (danach `404 turn_unknown`). `POST /coach/turns/{turn_id}/cancel` beendet Hermes, idempotent.
+  Der Puffer liegt nur im Arbeitsspeicher, höchstens 24 Stunden; ein Neustart der Bridge verliert ihn.
 - `POST /coach/adjust-today` → JSON-Antwort mit dem angepassten Training des Tages.
 - Ohne gültiges `Authorization: Bearer $KORE_BRIDGE_TOKEN`: 401. Eine unfertige Installation ist
   ein Fehler, nie ein offener Zugang: Ist `KORE_BRIDGE_TOKEN`, `KORE_PLAN_ORIGIN_SECRET` oder

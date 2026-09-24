@@ -7,6 +7,8 @@ Ablauf:  App  → POST /coach {message, conversation_id, session?, health_contex
            (Prompt nur ueber stdin; stdout ist JSONL, Session aus dem result-Record)
          → Max-Antwort (Markdown, Absätze erhalten) + signierte Session → JSON zurück an die App.
          POST /coach/adjust-today {session, health_context_allowed, context} → Tages-Anpassung als striktes JSON.
+         0.10: POST /coach mit client_message_id → 202 {turn_id}; Worker im Hintergrund, Puffer nur im RAM;
+         GET /coach/turns/{id}[/events] (SSE) und POST /coach/turns/{id}/cancel.
 Läuft als User `hermes` (systemd). Zero-Dependency (nur Python-Stdlib). Bearer-Auth aus ENV.
 
 Coach-Upgrade 2026-06-10:
@@ -148,6 +150,8 @@ BRIDGE_CAPABILITIES = (
     "conversation_sessions_v2",
     # 0.10: Werkzeuge per -t-Allowlist statt --safe-mode; kore-MCP nur im Health-Scope mit Ticket.
     "app_chat_toolsets_v1",
+    # 0.10: 202 + turn_id, GET, SSE mit Last-Event-ID, Stopp, Idempotenz ueber client_message_id.
+    "detached_turns_v1",
 )
 
 # Werkzeugsatz im App-Chat (Spec C §4.7, Entscheidung 24.09.): eine positive Liste. Ohne -t
@@ -345,6 +349,9 @@ def health_payload() -> dict:
         "ok": True,
         **capabilities_payload(),
         "app_chat_toolsets": {scope: list(names) for scope, names in APP_CHAT_TOOLSETS.items()},
+        "turn_buffer_ttl_hours": TURN_TTL_S // 3600,
+        # Nur eine Zahl: vor einem Neustart pruefen, ob gerade ein Turn laeuft (Spec C §4.12).
+        "active_turns": TURNS.active_count(),
     }
 
 
@@ -1331,6 +1338,371 @@ def turn_outcome_payload(outcome: TurnOutcome) -> dict:
     return payload
 
 
+# ---- Turn-Auftraege (0.10, Spec C §4.2–4.6) -------------------------------------------------
+# Nur RAM: ein Neustart verliert den Puffer (Entscheidung). Ein fertiger Turn liegt hoechstens
+# 24 h und verschwindet mit der ersten vollstaendig ausgelieferten GET-Antwort; SSE loescht nie.
+MAX_BUFFERED_TURNS = 64
+MAX_RUNNING_TURNS = 2
+TURN_TTL_S = 24 * 3600
+KEEPALIVE_S = 15
+SWEEP_INTERVAL_S = 60
+TURN_FINISHED_STATES = frozenset(("done", "failed", "cancelled"))
+_TURN_PATH_RE = re.compile(r"/coach/turns/([0-9a-f-]{36})(/events|/cancel)?\Z")
+_LAST_EVENT_ID_RE = re.compile(r"[0-9]{1,9}\Z")
+TURN_CANCELLED_SENTENCE = "Die Antwort wurde gestoppt."
+# Anfragefehler des Turn-Pfads: (HTTP-Status, Satz). Die Turn-Enden stehen in TURN_ERRORS.
+TURN_REQUEST_ERRORS = {
+    "unauthorized": (401, "unauthorized"),
+    "turn_in_progress": (409, "In diesem Chat antwortet der Coach noch."),
+    "busy": (429, "Die Bridge ist gerade ausgelastet."),
+    "turn_unknown": (404, "Diese Antwort ist nicht mehr abrufbar."),
+    "prompt_too_large": (413, "Coach-Anfrage erzeugt einen zu großen Hermes-Prompt."),
+    "transport_unavailable": (503, "Hermes-Prompt-Transport ist nicht freigegeben."),
+}
+
+
+def turn_deadline_s() -> int:
+    """Sicherheitsnetz des Aufraeum-Threads. Jeder Hermes-Lauf ist schon auf TIMEOUT begrenzt;
+    bei `expired` laufen zwei nacheinander, dazu Zeit fuer das Beenden der Prozessgruppe."""
+    return 2 * TIMEOUT + 30
+
+
+class TurnInProgress(RuntimeError):
+    def __init__(self, turn):
+        super().__init__("a turn is already running in this conversation")
+        self.turn = turn
+
+
+class TurnsBusy(RuntimeError):
+    pass
+
+
+class TurnCancelled(RuntimeError):
+    pass
+
+
+class TicketRedactor:
+    """Schwaerzt das Herkunftsticket in gestreamten Deltas (Spec C §4.6).
+
+    Zurueckgehalten wird nur das laengste Textende, das ein Anfang des Tickets sein kann — also
+    hoechstens len(ticket) − 1 Zeichen. Ein ueber zwei Deltas geteiltes Ticket verlaesst die
+    Bridge so nie, und Text ohne moeglichen Ticketanfang streamt ohne Verzoegerung.
+    """
+
+    def __init__(self, ticket):
+        self._ticket = ticket if isinstance(ticket, str) and ticket else None
+        self._pending = ""
+
+    def feed(self, chunk: str) -> str:
+        if self._ticket is None:
+            return chunk
+        text = redact_plan_origin_ticket(self._pending + chunk, self._ticket)
+        hold = 0
+        for length in range(min(len(self._ticket) - 1, len(text)), 0, -1):
+            if self._ticket.startswith(text[-length:]):
+                hold = length
+                break
+        if hold:
+            text, self._pending = text[:-hold], text[-hold:]
+        else:
+            self._pending = ""
+        return text
+
+    def flush(self) -> str:
+        rest, self._pending = self._pending, ""
+        return rest
+
+
+@dataclass
+class Turn:
+    turn_id: str
+    conversation_id: str
+    client_message_id: str
+    scope: str
+    status: str = "running"  # running | done | failed | cancelled
+    events: list = field(default_factory=list)  # [(n, payload)], n ab 1
+    reply: str = ""
+    used_kore: bool = False
+    session: "str | None" = None
+    context: "str | None" = None
+    reset_reason: "str | None" = None
+    error: "dict | None" = None
+    started_at: float = 0.0
+    ended_at: "float | None" = None
+    pgid: "int | None" = None
+    redactor: TicketRedactor = field(default_factory=lambda: TicketRedactor(None), repr=False)
+    process: object = field(default=None, repr=False)
+
+
+class TurnStore:
+    """Turn-Puffer im RAM. Alle Zustandswechsel laufen unter einer Bedingung, auf die SSE wartet."""
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._cond = threading.Condition()
+        self._turns = {}
+        self._index = {}  # (conversation_id, client_message_id) -> turn_id
+
+    # -- Anlegen und Nachschlagen --
+
+    def create(self, conversation_id, client_message_id, scope, origin_ticket=None):
+        """(turn, is_new). Wiederholung derselben Nachricht → derselbe Turn, kein zweiter Lauf.
+        Wirft TurnInProgress (anderer Turn laeuft im Chat) bzw. TurnsBusy (Laufgrenze)."""
+        with self._cond:
+            existing = self._index.get((conversation_id, client_message_id))
+            if existing is not None:
+                return self._turns[existing], False
+            running = self._running_for(conversation_id)
+            if running is not None:
+                raise TurnInProgress(running)
+            if self._active_count() >= MAX_RUNNING_TURNS:
+                raise TurnsBusy()
+            while len(self._turns) >= MAX_BUFFERED_TURNS:
+                finished = [t for t in self._turns.values() if t.status in TURN_FINISHED_STATES]
+                if not finished:
+                    raise TurnsBusy()
+                self._remove(min(finished, key=lambda t: t.ended_at))
+            turn = Turn(
+                turn_id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
+                client_message_id=client_message_id,
+                scope=scope,
+                started_at=self._clock(),
+                redactor=TicketRedactor(origin_ticket),
+            )
+            self._turns[turn.turn_id] = turn
+            self._index[(conversation_id, client_message_id)] = turn.turn_id
+            return turn, True
+
+    def get(self, turn_id):
+        with self._cond:
+            return self._turns.get(turn_id)
+
+    def running_for(self, conversation_id):
+        with self._cond:
+            return self._running_for(conversation_id)
+
+    def active_count(self) -> int:
+        with self._cond:
+            return self._active_count()
+
+    def payload(self, turn_id):
+        """GET-Antwort als konsistente Momentaufnahme; None fuer unbekannte Turns."""
+        with self._cond:
+            turn = self._turns.get(turn_id)
+            if turn is None:
+                return None
+            body = {
+                "turn_id": turn.turn_id,
+                "conversation_id": turn.conversation_id,
+                "status": turn.status,
+            }
+            if turn.status == "running":
+                return body
+            body["reply"] = turn.reply
+            body["used_kore"] = turn.used_kore
+            for key in ("session", "context", "reset_reason", "error"):
+                if (value := getattr(turn, key)) is not None:
+                    body[key] = dict(value) if isinstance(value, dict) else value
+            return body
+
+    def pop_if_done(self, turn_id):
+        """Nur nach vollstaendig ausgelieferter GET-Antwort auf einen fertigen Turn."""
+        with self._cond:
+            turn = self._turns.get(turn_id)
+            if turn is None or turn.status not in TURN_FINISHED_STATES:
+                return None
+            self._remove(turn)
+            return turn
+
+    def wait_events(self, turn, after: int, timeout: float):
+        """(Ereignisse nach `after`, fertig?). Wartet hoechstens `timeout`, solange nichts Neues da ist."""
+        with self._cond:
+            if not self._events_after(turn, after) and turn.status not in TURN_FINISHED_STATES:
+                self._cond.wait(timeout)
+            return self._events_after(turn, after), turn.status in TURN_FINISHED_STATES
+
+    # -- Worker-Seite --
+
+    def attach_process(self, turn, process) -> None:
+        """on_process-Hook: merkt sich die Prozessgruppe; nach einem Stopp startet nichts mehr."""
+        with self._cond:
+            if turn.status != "running":
+                raise TurnCancelled("turn is no longer running")
+            turn.process = process
+            turn.pgid = process.pid
+
+    def append_delta(self, turn, raw_delta: str) -> None:
+        with self._cond:
+            if turn.status != "running":
+                return
+            self._emit_delta(turn, turn.redactor.feed(raw_delta))
+
+    def finish(self, turn, outcome) -> None:
+        """Ende aus dem Worker. Ein Turn, der schon gestoppt oder abgelaufen ist, bleibt so."""
+        with self._cond:
+            if turn.status != "running":
+                return
+            self._emit_delta(turn, turn.redactor.flush())
+            if outcome is None or outcome.error_code is not None:
+                code = outcome.error_code if outcome is not None else "hermes_failed"
+                if outcome is not None:
+                    turn.context, turn.reset_reason = outcome.context, outcome.reset_reason
+                    turn.used_kore = outcome.used_kore
+                else:
+                    turn.used_kore = turn.scope == "health"
+                self._end(turn, "failed", code, TURN_ERRORS[code][1])
+                return
+            final = outcome.reply
+            if final != turn.reply and final.startswith(turn.reply):
+                # z. B. ein result-Text ohne vorherige Deltas: die App setzt die Antwort aus Deltas zusammen.
+                self._emit_delta(turn, final[len(turn.reply):])
+            turn.reply = final
+            turn.used_kore = outcome.used_kore
+            turn.session = outcome.session
+            turn.context = outcome.context
+            turn.reset_reason = outcome.reset_reason
+            done = {"done": True, "used_kore": turn.used_kore, "context": turn.context}
+            if turn.session is not None:
+                done["session"] = turn.session
+            if turn.reset_reason is not None:
+                done["reset_reason"] = turn.reset_reason
+            self._append(turn, done)
+            turn.status = "done"
+            turn.ended_at = self._clock()
+            turn.process = None
+            self._cond.notify_all()
+
+    # -- Stopp und Aufraeumen --
+
+    def cancel(self, turn_id):
+        """Idempotent. Beendet die Hermes-Prozessgruppe; der bisher gestreamte Text bleibt."""
+        with self._cond:
+            turn = self._turns.get(turn_id)
+            if turn is None:
+                return None
+            if turn.status != "running":
+                return turn
+            self._emit_delta(turn, turn.redactor.flush())
+            # Ein Teiltext aus einem Health-Chat zaehlt als gesundheitsbezogen (fail-closed).
+            turn.used_kore = turn.scope == "health"
+            process = turn.process
+            self._end(turn, "cancelled", "cancelled", TURN_CANCELLED_SENTENCE)
+        if process is not None:
+            _terminate_process_group(process)
+        return turn
+
+    def sweep(self, now=None) -> None:
+        """Minuetlich: abgelaufene fertige Turns loeschen, Laeufe ueber der Frist beenden."""
+        now = self._clock() if now is None else now
+        overdue = []
+        with self._cond:
+            for turn in list(self._turns.values()):
+                if turn.status == "running" and now - turn.started_at > turn_deadline_s():
+                    self._emit_delta(turn, turn.redactor.flush())
+                    turn.used_kore = turn.scope == "health"
+                    overdue.append(turn.process)
+                    self._end(turn, "failed", "timeout", TURN_ERRORS["timeout"][1])
+                elif turn.status in TURN_FINISHED_STATES and now - turn.ended_at >= TURN_TTL_S:
+                    self._remove(turn)
+        for process in overdue:
+            if process is not None:
+                _terminate_process_group(process)
+
+    # -- intern, nur unter self._cond --
+
+    def _running_for(self, conversation_id):
+        for turn in self._turns.values():
+            if turn.conversation_id == conversation_id and turn.status == "running":
+                return turn
+        return None
+
+    def _active_count(self) -> int:
+        return sum(1 for turn in self._turns.values() if turn.status == "running")
+
+    def _remove(self, turn) -> None:
+        self._turns.pop(turn.turn_id, None)
+        if self._index.get((turn.conversation_id, turn.client_message_id)) == turn.turn_id:
+            del self._index[(turn.conversation_id, turn.client_message_id)]
+
+    def _append(self, turn, payload: dict) -> None:
+        turn.events.append((len(turn.events) + 1, payload))
+        self._cond.notify_all()
+
+    def _emit_delta(self, turn, text: str) -> None:
+        if text:
+            turn.reply += text
+            self._append(turn, {"delta": text})
+
+    def _end(self, turn, status: str, code: str, sentence: str) -> None:
+        turn.error = {"code": code, "message": sentence}
+        self._append(turn, {"error": sentence, "code": code})
+        turn.status = status
+        turn.ended_at = self._clock()
+        turn.process = None
+        self._cond.notify_all()
+
+    @staticmethod
+    def _events_after(turn, after: int) -> list:
+        return [event for event in turn.events if event[0] > after]
+
+
+TURNS = TurnStore()
+
+
+def validate_turn_prompt(message: str, scope: str, context, origin_ticket) -> None:
+    """Vor dem 202: dieselben Pruefungen, die run_turn vor dem Start macht, damit 413/503 als
+    Antwort auf den POST kommen und nicht als Turn-Ende."""
+    if PROMPT_TRANSPORT != "stdin":
+        raise PromptTransportUnavailable("the turn path only sends prompts over stdin")
+    health = scope == "health"
+    validate_prompt_payload(
+        build_prompt(message, context if health else None, health, origin_ticket=origin_ticket)
+    )
+
+
+def _turn_worker(store: TurnStore, turn: Turn, *, message, context, session_ref, origin_ticket):
+    """Ein Worker pro Turn. Die App-Verbindung spielt hier keine Rolle; beendet wird Hermes nur
+    durch Stopp, Zeitlimit, Ausgabelimit oder den Aufraeum-Thread."""
+    try:
+        outcome = run_turn(
+            message,
+            scope=turn.scope,
+            conversation_id=turn.conversation_id,
+            session_ref=session_ref,
+            context=context,
+            origin_ticket=origin_ticket,
+            on_delta=lambda delta: store.append_delta(turn, delta),
+            on_process=lambda process: store.attach_process(turn, process),
+        )
+    except Exception:
+        outcome = None
+    store.finish(turn, outcome)
+
+
+def start_turn_worker(store: TurnStore, turn: Turn, **request) -> None:
+    worker = threading.Thread(
+        target=_turn_worker,
+        args=(store, turn),
+        kwargs=request,
+        name=f"kore-turn-{turn.turn_id}",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except RuntimeError:
+        store.finish(turn, None)
+
+
+def _sweep_turns_forever(store: TurnStore) -> None:
+    while True:
+        time.sleep(SWEEP_INTERVAL_S)
+        try:
+            store.sweep()
+        except Exception:
+            pass
+
+
 # ---- Tages-Anpassung ------------------------------------------------------------------------
 
 ADJUST_INSTRUCTION = (
@@ -1462,27 +1834,143 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):
+    def _send_turn_error(self, code: str, **extra):
+        status, sentence = TURN_REQUEST_ERRORS[code]
+        self._send(status, {"error": sentence, "code": code, **extra})
+
+    def _authorized(self) -> bool:
         auth_status = authorization_status(self.headers.get("Authorization"))
-        if auth_status != 200:
-            message = "bridge token not configured" if auth_status == 503 else "unauthorized"
-            self._send(auth_status, {"error": message})
+        if auth_status == 200:
+            return True
+        if auth_status == 503:
+            self._send(503, {"error": "bridge token not configured"})
+        else:
+            self._send_turn_error("unauthorized")
+        return False
+
+    def _turn_route(self):
+        """(turn_id, Unterpfad) nur fuer /coach/turns/<kanonische UUID>[/events|/cancel]."""
+        match = _TURN_PATH_RE.fullmatch(self.path)
+        if match is None or not valid_conversation_id(match.group(1)):
+            return None, None
+        return match.group(1), match.group(2) or ""
+
+    def do_GET(self):
+        if not self._authorized():
             return
+        turn_id, subpath = self._turn_route()
         if self.path == "/health":
             self._send(200, health_payload())
         elif self.path == "/capabilities":
             self._send(200, capabilities_payload())
+        elif turn_id is not None and subpath == "":
+            self._get_turn(turn_id)
+        elif turn_id is not None and subpath == "/events":
+            self._stream_turn(turn_id)
         else:
             self._send(404, {"error": "not found"})
 
+    def _get_turn(self, turn_id: str):
+        payload = TURNS.payload(turn_id)
+        if payload is None:
+            self._send_turn_error("turn_unknown")
+            return
+        self._send(200, payload)
+        # Erst nach vollstaendig geschriebener Antwort; ein laufender Turn bleibt immer liegen.
+        if payload["status"] in TURN_FINISHED_STATES:
+            TURNS.pop_if_done(turn_id)
+
+    def _stream_turn(self, turn_id: str):
+        raw_last_id = self.headers.get("Last-Event-ID")
+        after = 0
+        if raw_last_id is not None:
+            if _LAST_EVENT_ID_RE.fullmatch(raw_last_id.strip()) is None:
+                self._send(400, {"error": "Last-Event-ID ist ungültig"})
+                return
+            after = int(raw_last_id.strip())
+        turn = TURNS.get(turn_id)
+        if turn is None:
+            self._send_turn_error("turn_unknown")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        try:
+            while True:
+                events, finished = TURNS.wait_events(turn, after, KEEPALIVE_S)
+                if events:
+                    chunk = "".join(
+                        f"id: {number}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        for number, payload in events
+                    )
+                    self.wfile.write(chunk.encode("utf-8"))
+                    after = events[-1][0]
+                elif not finished:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                if finished:
+                    return
+        except OSError:
+            # Die App hat die Verbindung geschlossen; der Worker laeuft weiter.
+            return
+
+    def _cancel_turn(self, turn_id: str):
+        turn = TURNS.cancel(turn_id)
+        if turn is None:
+            self._send_turn_error("turn_unknown")
+            return
+        self._send(200, {"turn_id": turn.turn_id, "status": turn.status})
+
+    def _start_turn(self, data: dict):
+        client_message_id = data["client_message_id"]
+        if not valid_conversation_id(client_message_id):
+            self._send(400, {"error": "client_message_id ist keine kanonische kleingeschriebene UUID"})
+            return
+        scope = session_scope(data.get("health_context_allowed") is True)
+        conversation_id = data["conversation_id"]
+        message = data["message"].strip()
+        context = data.get("context")
+        origin_ticket = origin_ticket_for(scope, conversation_id)
+        try:
+            validate_turn_prompt(message, scope, context, origin_ticket)
+        except PromptTransportUnavailable:
+            self._send_turn_error("transport_unavailable")
+            return
+        except HermesPromptTooLarge:
+            self._send_turn_error("prompt_too_large")
+            return
+        try:
+            turn, is_new = TURNS.create(
+                conversation_id, client_message_id, scope, origin_ticket=origin_ticket
+            )
+        except TurnInProgress as error:
+            self._send_turn_error("turn_in_progress", turn_id=error.turn.turn_id)
+            return
+        except TurnsBusy:
+            self._send_turn_error("busy")
+            return
+        if is_new:
+            start_turn_worker(
+                TURNS,
+                turn,
+                message=message,
+                context=context,
+                session_ref=data.get("session"),
+                origin_ticket=origin_ticket,
+            )
+        self._send(202, {"turn_id": turn.turn_id, "status": turn.status})
+
     def do_POST(self):
-        if self.path not in ("/coach", "/coach/adjust-today"):
+        turn_id, subpath = self._turn_route()
+        is_cancel = turn_id is not None and subpath == "/cancel"
+        if self.path not in ("/coach", "/coach/adjust-today") and not is_cancel:
             self._send(404, {"error": "not found"})
             return
-        auth_status = authorization_status(self.headers.get("Authorization"))
-        if auth_status != 200:
-            message = "bridge token not configured" if auth_status == 503 else "unauthorized"
-            self._send(auth_status, {"error": message})
+        if not self._authorized():
+            return
+        if is_cancel:
+            self._cancel_turn(turn_id)
             return
         if self.headers.get("Transfer-Encoding") is not None:
             self._send(400, {"error": "Transfer-Encoding wird nicht unterstützt"})
@@ -1513,6 +2001,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if error := chat_contract_error(data):
                 self._send(*error)
+                return
+            if "client_message_id" in data:
+                self._start_turn(data)
                 return
             scope = session_scope(data.get("health_context_allowed") is True)
             conversation_id = data["conversation_id"]
@@ -1546,5 +2037,8 @@ if __name__ == "__main__":
     if warning := runtime_configuration_warning():
         # stderr, damit die Zeile im journal des Dienstes landet und nicht in einer Antwort.
         print(warning, file=sys.stderr, flush=True)
+    threading.Thread(
+        target=_sweep_turns_forever, args=(TURNS,), name="kore-turn-sweeper", daemon=True
+    ).start()
     port = int(os.environ.get("KORE_BRIDGE_PORT", "8090"))
     ThreadingHTTPServer((validated_bind_host(BIND_HOST), port), Handler).serve_forever()
