@@ -73,6 +73,9 @@ PLAN_ORIGIN_SECRET = os.environ.get("KORE_PLAN_ORIGIN_SECRET", "")
 PLAN_ORIGIN_PRINCIPAL = os.environ.get("KORE_PLAN_ORIGIN_PRINCIPAL", "")
 PLAN_ORIGIN_TTL_SECONDS = _bounded_env_int("KORE_PLAN_ORIGIN_TTL_SECONDS", 180, 30, 300)
 
+# Hermes benennt MCP-Werkzeuge `mcp__<server>__<tool>`; die uebrigen Marker stammen aus
+# aelteren Ausgabeformen.
+USED_KORE_MARKERS = ("mcp__kore__", "mcp_kore", "kore_get_", "propose_training_plan")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _SESSION_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,119}\Z")
 _PLAN_ORIGIN_PRINCIPAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}\Z")
@@ -375,10 +378,23 @@ def runtime_configuration_warning():
     return None
 
 
+def reject_placeholder(name: str, value) -> None:
+    """Startsperre fuer leere Geheimnisse und Beispielwerte; die Meldung nennt nie den Wert."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be configured before the bridge can start")
+    if value.strip().lower().startswith("change-me"):
+        raise ValueError(
+            f"{name} still holds the example value from bridge.env.example; "
+            "generate a real one (openssl rand -hex 32) before starting"
+        )
+
+
 def runtime_configuration_error():
     """Return a non-secret startup error for an unsafe/incomplete deployment."""
-    if not TOKEN:
-        return "KORE_BRIDGE_TOKEN must be configured before the bridge can start"
+    try:
+        reject_placeholder("KORE_BRIDGE_TOKEN", TOKEN)
+    except ValueError as error:
+        return str(error)
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(INSTANCE_ID) is None:
         return "KORE_INSTANCE_ID must be configured as a safe explicit instance identifier"
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(PROFILE) is None:
@@ -387,6 +403,14 @@ def runtime_configuration_error():
         validated_bind_host(BIND_HOST)
     except ValueError as error:
         return str(error)
+    # Origin-Geheimnis und Principal sind Pflicht: ohne sie kann die Bridge keinen Plan-
+    # Vorschlag signieren, und die App verlangt plan_origin_v1.
+    try:
+        reject_placeholder("KORE_PLAN_ORIGIN_SECRET", PLAN_ORIGIN_SECRET)
+    except ValueError as error:
+        return str(error)
+    if not PLAN_ORIGIN_PRINCIPAL:
+        return "KORE_PLAN_ORIGIN_PRINCIPAL must be configured before the bridge can start"
     return plan_origin_configuration_error()
 
 
@@ -998,9 +1022,7 @@ def run_max(message: str, session, context=None, max_turns: str = "6",
         reply = legacy_box_parse(out) or "(keine Antwort von Max erhalten)"
     reply = redact_plan_origin_ticket(reply, origin_ticket)
     used_kore = health_context_allowed and (
-        bool(scoped_context) or any(
-            marker in out + err for marker in ("mcp_kore", "kore_get_", "propose_training_plan")
-        )
+        bool(scoped_context) or any(marker in out + err for marker in USED_KORE_MARKERS)
     )
     result = {
         "reply": reply,

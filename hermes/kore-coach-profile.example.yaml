@@ -1,0 +1,31 @@
+# Ausschnitt aus dem Hermes-Profil deines Trainings-Bots
+# (~/.hermes/profiles/<profil>/config.yaml). Getestet mit Hermes Agent v0.21.4.
+#
+# Trage die Bloecke in genau das Profil ein, das die Bridge ueber
+# KORE_HERMES_PROFILE aufruft (Vorschlag: kore-coach).
+#
+# Das Token steht NICHT hier, sondern in der .env desselben Profils
+# (~/.hermes/profiles/<profil>/.env, chmod 600):
+#
+#   MCP_KORE_API_KEY=<KORE_MCP_TOKEN aus der .env des Servers>
+#
+# Nicht als systemd `Environment=`: Die Bridge startet Hermes mit einer
+# minimalen Umgebung und reicht keine Dienst-Variablen weiter.
+#
+# Pruefen: hermes -p <profil> mcp test kore   ("Connected", "Tools discovered: 8")
+
+mcp_servers:
+  kore:
+    # Adresse, unter der der MCP-Server erreichbar ist (bei Docker Compose die
+    # KORE_BIND_ADDRESS aus der .env). Der abschliessende Schraegstrich hinter /mcp
+    # gehoert dazu.
+    url: http://10.0.0.10:8000/mcp/
+    headers:
+      Authorization: Bearer ${MCP_KORE_API_KEY}
+    enabled: true
+
+auxiliary:
+  # Hermes wuerde sonst jeder Kore-Sitzung per zusaetzlichem Modellaufruf einen
+  # Titel geben; der App-Chat braucht keinen.
+  title_generation:
+    enabled: false

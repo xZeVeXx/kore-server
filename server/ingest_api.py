@@ -14,16 +14,16 @@ import store
 from models import PlanAck, Snapshot
 from origin_guard import OriginGuardMiddleware, allowed_origins_from_env
 from origin_ticket import policy_from_env
+from placeholder_guard import reject_placeholder
 
 
-def _required_env(name: str) -> str:
+def _required_secret(name: str) -> str:
     value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"required environment variable {name} is missing")
+    reject_placeholder(name, value)
     return value
 
 
-INGEST_TOKEN = _required_env("KORE_INGEST_TOKEN")
+INGEST_TOKEN = _required_secret("KORE_INGEST_TOKEN")
 ORIGIN_POLICY = policy_from_env()
 
 ALLOWED_ORIGINS = allowed_origins_from_env()

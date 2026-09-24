@@ -1,12 +1,16 @@
 [Unit]
 Description=Kore MCP Server (FastMCP, Streamable HTTP)
+Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=/opt/kore-server
+# Bindet auf KORE_MCP_HOST aus der .env, Standard 127.0.0.1 (Agent auf demselben Rechner).
 EnvironmentFile=/opt/kore-server/.env
 ExecStart=/opt/kore-server/.venv/bin/python mcp_server.py
 Restart=on-failure
+RestartSec=5
 User=kore
 
 [Install]

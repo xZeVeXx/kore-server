@@ -39,6 +39,7 @@ import store
 from models import TrainingPlanProposal
 from origin_guard import OriginGuardMiddleware, allowed_origins_from_env
 from origin_ticket import policy_from_env, secret_from_env, verify_origin_ticket
+from placeholder_guard import reject_placeholder
 
 
 def _clamp_logger_namespace(namespace: str, minimum_level: int) -> None:
@@ -106,8 +107,15 @@ def _required_env(name: str) -> str:
     return value
 
 
-MCP_TOKEN = _required_env("KORE_MCP_TOKEN")
+def _required_secret(name: str) -> str:
+    value = os.environ.get(name)
+    reject_placeholder(name, value)
+    return value
+
+
+MCP_TOKEN = _required_secret("KORE_MCP_TOKEN")
 MCP_CLIENT_ID = _required_env("KORE_MCP_CLIENT_ID")
+_required_secret("KORE_PLAN_ORIGIN_SECRET")
 ORIGIN_SECRET = secret_from_env()
 ORIGIN_POLICY = policy_from_env()
 

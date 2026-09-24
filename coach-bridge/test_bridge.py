@@ -329,6 +329,19 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertTrue(result["used_kore"])
         self.assertEqual(result["session"], "health:health-session")
 
+    @patch("bridge._run_process_bounded")
+    def test_used_kore_recognizes_hermes_mcp_tool_names(self, run):
+        self.assertIn("mcp__kore__", bridge.USED_KORE_MARKERS)
+        run.return_value = SimpleNamespace(
+            stdout="Deine Erholung liegt heute im Band.\nsession_id: health-session",
+            stderr="┊ mcp__kore__get_recovery_today 0.2s",
+            returncode=0,
+        )
+
+        result = bridge.run_max("Wie steht es?", None, health_context_allowed=True)
+
+        self.assertTrue(result["used_kore"])
+
     def test_adjustment_fails_closed_without_explicit_consent(self):
         code, payload = bridge.adjust_today({
             "session": {"name": "Push"},
@@ -1001,8 +1014,68 @@ class BridgePrivacyTests(unittest.TestCase):
         # /proc-Preisgabe quittieren muss.
         with patch.object(bridge, "TOKEN", "configured"), patch.object(
             bridge, "ALLOW_ARGV_PROMPTS", False
+        ), patch.object(bridge, "PLAN_ORIGIN_SECRET", "s" * 32), patch.object(
+            bridge, "PLAN_ORIGIN_PRINCIPAL", "marius"
         ):
             self.assertIsNone(bridge.runtime_configuration_error())
+
+    def test_reject_placeholder_names_the_key_never_the_value(self):
+        for value in (None, "", "  ", "change-me", "change-me-bridge-token", "Change-Me-x"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as raised:
+                    bridge.reject_placeholder("KORE_BRIDGE_TOKEN", value)
+                self.assertIn("KORE_BRIDGE_TOKEN", str(raised.exception))
+                if value and value.strip():
+                    self.assertNotIn(value, str(raised.exception))
+        self.assertIsNone(bridge.reject_placeholder("KORE_BRIDGE_TOKEN", "a" * 48))
+
+    def test_runtime_configuration_rejects_example_token_and_origin_secret(self):
+        complete = {
+            "TOKEN": "configured",
+            "PLAN_ORIGIN_SECRET": "s" * 32,
+            "PLAN_ORIGIN_PRINCIPAL": "marius",
+        }
+        cases = (
+            ("TOKEN", "change-me-bridge-token", "KORE_BRIDGE_TOKEN"),
+            ("PLAN_ORIGIN_SECRET", "", "KORE_PLAN_ORIGIN_SECRET"),
+            (
+                "PLAN_ORIGIN_SECRET",
+                "change-me-origin-secret-at-least-32-bytes-long",
+                "KORE_PLAN_ORIGIN_SECRET",
+            ),
+            ("PLAN_ORIGIN_PRINCIPAL", "", "KORE_PLAN_ORIGIN_PRINCIPAL"),
+        )
+        for attribute, value, key in cases:
+            config = {**complete, attribute: value}
+            with self.subTest(key=key, value=value), patch.multiple(bridge, **config):
+                error = bridge.runtime_configuration_error()
+                self.assertIsNotNone(error)
+                self.assertIn(key, error)
+                if value:
+                    self.assertNotIn(value, error)
+
+    def test_bridge_process_refuses_to_start_with_example_values(self):
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "KORE_BRIDGE_TOKEN": "change-me-bridge-token",
+            "KORE_BRIDGE_BIND_HOST": "127.0.0.1",
+            "KORE_BRIDGE_PORT": "0",
+            "KORE_INSTANCE_ID": "kore",
+            "KORE_HERMES_PROFILE": "kore-coach",
+            "KORE_PLAN_ORIGIN_PRINCIPAL": "kore",
+            "KORE_PLAN_ORIGIN_SECRET": "change-me-origin-secret-at-least-32-bytes-long",
+        }
+        completed = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(bridge.__file__), "bridge.py")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("KORE_BRIDGE_TOKEN", completed.stderr)
+        self.assertNotIn("change-me", completed.stderr + completed.stdout)
 
     def test_bind_host_accepts_only_concrete_loopback_or_rfc1918_ipv4_addresses(self):
         for address in (

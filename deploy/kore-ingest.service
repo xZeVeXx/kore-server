@@ -1,12 +1,20 @@
 [Unit]
 Description=Kore Ingest API (FastAPI)
+Wants=network-online.target
 After=network-online.target
+# Nie aufgeben: beim Booten kann die LAN-Adresse noch fehlen (Errno 99), dann
+# versucht systemd es alle 5 Sekunden erneut.
+StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=/opt/kore-server
+# Standard nur lokal. Fuer das iPhone im LAN setzt die .env KORE_BIND_ADDRESS auf
+# die LAN-IP dieses Rechners (Werte aus EnvironmentFile ueberschreiben diese Zeile).
+Environment=KORE_BIND_ADDRESS=127.0.0.1
 EnvironmentFile=/opt/kore-server/.env
-ExecStart=/opt/kore-server/.venv/bin/uvicorn ingest_api:app --host 0.0.0.0 --port 8081
+ExecStart=/opt/kore-server/.venv/bin/uvicorn ingest_api:app --host ${KORE_BIND_ADDRESS} --port 8081
 Restart=on-failure
+RestartSec=5
 User=kore
 
 [Install]

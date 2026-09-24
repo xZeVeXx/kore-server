@@ -1,14 +1,22 @@
+# Beispiel-Unit. Vor dem Kopieren nach /etc/systemd/system/ ersetzen:
+#   <HERMES_USER>  der Linux-Nutzer, unter dem dein Hermes-Agent laeuft
+#                  (die Bridge muss dessen ~/.hermes lesen und `hermes` starten duerfen)
+#   <HERMES_HOME>  dessen Home-Verzeichnis, z. B. /home/<HERMES_USER>
+# Das Hermes-Profil steht nicht hier, sondern als KORE_HERMES_PROFILE in bridge.env.
 [Unit]
-Description=Kore Coach Bridge (App -> hermes profile max -> kore MCP)
+Description=Kore Coach Bridge (App -> Hermes-Profil aus KORE_HERMES_PROFILE -> kore MCP)
+Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
-User=hermes
-WorkingDirectory=/home/hermes
-Environment=HOME=/home/hermes
-EnvironmentFile=/home/hermes/kore-coach-bridge/bridge.env
-ExecStart=/usr/bin/python3 /home/hermes/kore-coach-bridge/bridge.py
+User=<HERMES_USER>
+WorkingDirectory=<HERMES_HOME>
+Environment=HOME=<HERMES_HOME>
+EnvironmentFile=<HERMES_HOME>/kore-coach-bridge/bridge.env
+ExecStart=/usr/bin/python3 <HERMES_HOME>/kore-coach-bridge/bridge.py
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

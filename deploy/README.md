@@ -1,6 +1,6 @@
 # Ohne Docker: systemd
 
-Die beiden Units sind der Live-Stand der Referenzinstallation (Debian-12-Container).
+Die beiden Units stammen aus der Referenzinstallation (Debian-12-Container).
 Sie erwarten den Code unter `/opt/kore-server`, ein venv unter `/opt/kore-server/.venv`
 und eine `/opt/kore-server/.env` nach dem Muster der `.env.example` im Repo-Wurzelverzeichnis.
 
@@ -20,10 +20,22 @@ sudo systemctl enable --now kore-ingest kore-mcp
 `KORE_DB_PATH` in der `.env` auf einen absoluten Pfad setzen, den der Nutzer `kore`
 schreiben darf, z. B. `/opt/kore-server/kore.db`.
 
-Die Units binden auf `0.0.0.0`, weil der Container nur im eigenen LAN hängt.
-Wer den Server auf einem Rechner mit öffentlicher Adresse betreibt, muss
-`--host` bzw. `KORE_MCP_HOST` auf die LAN-Adresse setzen und darf die Ports
-nicht im Router weiterleiten.
+Keine Unit bindet auf `0.0.0.0`. Der Ingest lauscht auf `KORE_BIND_ADDRESS` aus der
+`.env`, Standard `127.0.0.1`; damit dein iPhone ihn erreicht, trägst du dort die
+LAN-Adresse dieses Rechners ein (z. B. `KORE_BIND_ADDRESS=10.0.0.10`). Der MCP-Server
+lauscht auf `KORE_MCP_HOST`, Standard `127.0.0.1` — richtig, wenn dein Hermes-Agent auf
+demselben Rechner läuft. Die Ports nie im Router weiterleiten.
+
+Nur **im Docker-Container** lauschen beide Dienste auf `0.0.0.0` (`Dockerfile`,
+`docker-compose.yml`); nach außen veröffentlicht Compose sie ausschließlich auf
+`KORE_BIND_ADDRESS`.
+
+Die Units warten auf `network-online.target` und geben nie auf
+(`StartLimitIntervalSec=0`, `RestartSec=5`): Fehlt beim Booten die LAN-Adresse noch
+(„Cannot assign requested address", Errno 99), startet systemd den Dienst alle fünf
+Sekunden neu, bis sie da ist.
 
 Die `.env` gehört auf `chmod 600` und dem Dienstnutzer. Sie enthält die beiden
-Tokens und das Origin-Geheimnis im Klartext.
+Tokens und das Origin-Geheimnis im Klartext. Solange einer dieser Werte leer ist oder
+noch mit `change-me` aus der `.env.example` beginnt, starten Ingest und MCP nicht;
+die Meldung im Journal nennt den Schlüssel, nie den Wert.
