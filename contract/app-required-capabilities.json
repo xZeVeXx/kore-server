@@ -1,0 +1,14 @@
+[
+  "adjust_today_requires_health_v1",
+  "app_chat_toolsets_v1",
+  "bounded_subprocess_v1",
+  "child_env_allowlist_v1",
+  "consent_scope_v2",
+  "conversation_sessions_v2",
+  "detached_turns_v1",
+  "momentum_safety_v2",
+  "plan_origin_v1",
+  "scoped_sessions_v1",
+  "session_forget_v1",
+  "stdin_prompt_transport_v1"
+]

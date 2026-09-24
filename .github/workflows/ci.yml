@@ -26,3 +26,14 @@ jobs:
       # bridge.py braucht nur die Standardbibliothek.
       - run: pip install pytest
       - run: pytest coach-bridge -q
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # kore-doctor braucht nur die Standardbibliothek.
+      - run: pip install pytest
+      - run: pytest scripts -q

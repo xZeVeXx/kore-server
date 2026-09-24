@@ -9,6 +9,8 @@ Ablauf:  App  → POST /coach {message, conversation_id, session?, health_contex
          POST /coach/adjust-today {session, health_context_allowed, context} → Tages-Anpassung als striktes JSON.
          0.10: POST /coach mit client_message_id → 202 {turn_id}; Worker im Hintergrund, Puffer nur im RAM;
          GET /coach/turns/{id}[/events] (SSE) und POST /coach/turns/{id}/cancel.
+         POST /coach/forget loescht Kore-Sessions (Chat oder Scope); Kore-Sessions verfallen nach
+         KORE_BRIDGE_SESSION_RETENTION_DAYS (hoechstens 30) Tagen Inaktivitaet.
 Läuft als User `hermes` (systemd). Zero-Dependency (nur Python-Stdlib). Bearer-Auth aus ENV.
 
 Coach-Upgrade 2026-06-10:
@@ -76,6 +78,24 @@ PROMPT_TRANSPORT = "argv" if ALLOW_ARGV_PROMPTS else "stdin"
 PLAN_ORIGIN_SECRET = os.environ.get("KORE_PLAN_ORIGIN_SECRET", "")
 PLAN_ORIGIN_PRINCIPAL = os.environ.get("KORE_PLAN_ORIGIN_PRINCIPAL", "")
 PLAN_ORIGIN_TTL_SECONDS = _bounded_env_int("KORE_PLAN_ORIGIN_TTL_SECONDS", 180, 30, 300)
+
+
+def session_retention_days(environ=None) -> int:
+    """Verfall der Kore-Sessions in Tagen (Spec C §4.8): Standard und Obergrenze 30."""
+    source = os.environ if environ is None else environ
+    raw = source.get("KORE_BRIDGE_SESSION_RETENTION_DAYS", "").strip()
+    if not raw:
+        return 30
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise RuntimeError("KORE_BRIDGE_SESSION_RETENTION_DAYS must be an integer") from error
+    if value < 1:
+        raise RuntimeError("KORE_BRIDGE_SESSION_RETENTION_DAYS must be at least 1")
+    return min(value, 30)
+
+
+SESSION_RETENTION_DAYS = session_retention_days()
 
 # Hermes benennt MCP-Werkzeuge `mcp__<server>__<tool>`; die uebrigen Marker stammen aus
 # aelteren Ausgabeformen.
@@ -152,6 +172,8 @@ BRIDGE_CAPABILITIES = (
     "app_chat_toolsets_v1",
     # 0.10: 202 + turn_id, GET, SSE mit Last-Event-ID, Stopp, Idempotenz ueber client_message_id.
     "detached_turns_v1",
+    # 0.10: POST /coach/forget (Referenzen oder Scope) und 30-Tage-Verfall der Kore-Sessions.
+    "session_forget_v1",
 )
 
 # Werkzeugsatz im App-Chat (Spec C §4.7, Entscheidung 24.09.): eine positive Liste. Ohne -t
@@ -350,6 +372,7 @@ def health_payload() -> dict:
         **capabilities_payload(),
         "app_chat_toolsets": {scope: list(names) for scope, names in APP_CHAT_TOOLSETS.items()},
         "turn_buffer_ttl_hours": TURN_TTL_S // 3600,
+        "session_retention_days": SESSION_RETENTION_DAYS,
         # Nur eine Zahl: vor einem Neustart pruefen, ob gerade ein Turn laeuft (Spec C §4.12).
         "active_turns": TURNS.active_count(),
     }
@@ -1592,6 +1615,37 @@ class TurnStore:
             _terminate_process_group(process)
         return turn
 
+    def drop(self, *, conversation_id=None, scope=None) -> int:
+        """/coach/forget: laufende Turns der betroffenen Chats stoppen und alle ihre Puffer loeschen.
+
+        `conversation_id` trifft einen Chat, sonst `scope` ("health" oder "all"). Ein offener
+        SSE-Strom bekommt noch das Ende `cancelled`; der zurueckgehaltene Rest des Redactors wird
+        verworfen, nicht ausgeliefert. Danach ist der Turn unbekannt (404), und dieselbe
+        client_message_id startet einen neuen Lauf. Rueckgabe: Zahl der entfernten Turns.
+        """
+        if conversation_id is None and scope not in ("health", "all"):
+            raise ValueError("drop needs a conversation_id or the scope health/all")
+
+        def affected(turn) -> bool:
+            if conversation_id is not None:
+                return turn.conversation_id == conversation_id
+            return scope == "all" or turn.scope == scope
+
+        processes = []
+        with self._cond:
+            victims = [turn for turn in self._turns.values() if affected(turn)]
+            for turn in victims:
+                if turn.status == "running":
+                    turn.redactor.flush()
+                    turn.used_kore = turn.scope == "health"
+                    processes.append(turn.process)
+                    self._end(turn, "cancelled", "cancelled", TURN_CANCELLED_SENTENCE)
+                self._remove(turn)
+        for process in processes:
+            if process is not None:
+                _terminate_process_group(process)
+        return len(victims)
+
     def sweep(self, now=None) -> None:
         """Minuetlich: abgelaufene fertige Turns loeschen, Laeufe ueber der Frist beenden."""
         now = self._clock() if now is None else now
@@ -1701,6 +1755,295 @@ def _sweep_turns_forever(store: TurnStore) -> None:
             store.sweep()
         except Exception:
             pass
+
+
+# ---- Loeschen und Verfall der Kore-Sessions (0.10, Spec C §4.8) ----------------------------
+# Nur ueber die Hermes-CLI, nur Sessions der Quellen kore-general/kore-health; das Gedaechtnis
+# des Profils (memories/, Honcho) fasst die Bridge nie an.
+# Gate G1 (Hermes v0.21.4): `sessions prune` verweigert, solange ein anderer Prozess (Hermes
+# Desktop, `hermes serve`) die state.db des Profils haelt. Ausgewaehlt wird deshalb nur lesend
+# (`prune --dry-run`, `list`), geloescht jede ID einzeln mit `sessions delete --yes <id>` — das
+# hat diese Sperre nicht. Nie `--force`. `delete` loescht keine Kompressions-Vorgaenger (sie
+# werden verwaist); /coach/forget laeuft die Kette deshalb selbst ab.
+RETENTION_INTERVAL_S = 24 * 3600
+SESSION_CLI_TIMEOUT_S = 60
+FORGET_BUDGET_S = 120
+MAX_FORGET_REFERENCES = 16
+MAX_SESSION_CHAIN = 32
+SESSION_LIST_LIMIT = 5_000
+# Ein Export enthaelt den ganzen Verlauf einer Session; er dient nur dem Lesen von Quelle und
+# Vorgaenger und bleibt im Speicher der Bridge.
+SESSION_EXPORT_MAX_BYTES = 4 * 1_024 * 1_024
+FORGET_SCOPES = {"health": ("health",), "all": ("general", "health")}
+# Genau die Form aus hermes_state_ids.new_session_id (6 Hex bei CLI, 8 Gateway, 12 Import).
+_HERMES_SESSION_ID_RE = re.compile(r"[0-9]{8}_[0-9]{6}_[0-9a-f]{6,12}\Z")
+_SESSION_MAINTENANCE_LOCK = threading.Lock()
+
+
+def _kore_source(scope: str) -> str:
+    return f"kore-{scope}"
+
+
+def run_hermes_sessions(args, output_limit: int = MAX_OUTPUT_BYTES):
+    """`hermes -p <Profil> sessions …` begrenzt; None, wenn der Lauf nicht sauber endete."""
+    try:
+        return _run_process_bounded(
+            [HERMES, "-p", PROFILE, "sessions", *args],
+            cwd=HOME,
+            env=hermes_child_env(),
+            timeout=SESSION_CLI_TIMEOUT_S,
+            output_limit=output_limit,
+        )
+    except (OSError, subprocess.TimeoutExpired, HermesOutputLimitExceeded, HermesInvocationError):
+        return None
+
+
+def _dry_run_session_ids(stdout: str, source: str) -> list:
+    """IDs aus `sessions prune --dry-run`: Zeilen `  <id>  <Datum> <Quelle> …`."""
+    ids = []
+    for line in stdout.splitlines():
+        if not line.startswith("  "):
+            continue
+        tokens = line.split()
+        if tokens and _HERMES_SESSION_ID_RE.fullmatch(tokens[0]) and source in tokens[1:]:
+            ids.append(tokens[0])
+    return ids
+
+
+def _listed_session_ids(stdout: str) -> list:
+    """IDs aus `sessions list --source …`: die ID steht in jeder Tabellenzeile ganz rechts."""
+    ids = []
+    for line in stdout.splitlines():
+        tokens = line.split()
+        if tokens and _HERMES_SESSION_ID_RE.fullmatch(tokens[-1]):
+            ids.append(tokens[-1])
+    return ids
+
+
+def expired_session_ids(scope: str):
+    """Beendete Sessions der Quelle, deren letzte Aktivitaet laenger als die Frist zurueckliegt.
+    Hermes waehlt nach Inaktivitaet aus (`--older-than`); None, wenn Hermes nicht lesbar antwortet."""
+    source = _kore_source(scope)
+    process = run_hermes_sessions([
+        "prune", "--older-than", str(SESSION_RETENTION_DAYS), "--source", source, "--dry-run",
+    ])
+    if process is None or process.returncode != 0:
+        return None
+    return _dry_run_session_ids(process.stdout, source)
+
+
+def scope_session_ids(scope: str):
+    """Alle Sessions der Quelle: beendete (auch Kompressions-Glieder) per `prune --dry-run`
+    ohne Altersgrenze, offene (z. B. nach einem Stopp) per `list`. None bei Lesefehler."""
+    source = _kore_source(scope)
+    listed = run_hermes_sessions(["list", "--source", source, "--limit", str(SESSION_LIST_LIMIT)],
+                                 output_limit=SESSION_EXPORT_MAX_BYTES)
+    ended = run_hermes_sessions(["prune", "--source", source, "--dry-run"],
+                                output_limit=SESSION_EXPORT_MAX_BYTES)
+    if listed is None or ended is None or listed.returncode != 0 or ended.returncode != 0:
+        return None
+    ids = []
+    for sid in _dry_run_session_ids(ended.stdout, source) + _listed_session_ids(listed.stdout):
+        if sid not in ids:
+            ids.append(sid)
+    return ids
+
+
+def _session_record(hermes_session_id: str):
+    """Kopfdaten einer Session aus `sessions export - --session-id <id>`: dict, "not_found"
+    oder None (nicht lesbar). Vom Verlauf wird nichts behalten."""
+    process = run_hermes_sessions(["export", "-", "--session-id", hermes_session_id],
+                                  output_limit=SESSION_EXPORT_MAX_BYTES)
+    if process is None or process.returncode != 0:
+        return None
+    for line in process.stdout.splitlines():
+        if line.startswith("{"):
+            try:
+                record = strict_json_loads(line)
+            except ValueError:
+                return None
+            if not isinstance(record, dict):
+                return None
+            if record.get("id") != hermes_session_id:
+                # Hermes loest auch eindeutige Praefixe auf; eine andere Session ist nicht diese.
+                return "not_found"
+            return {key: record.get(key) for key in ("id", "source", "parent_session_id", "end_reason")}
+        if line.startswith(f"No session '{hermes_session_id}'"):
+            return "not_found"
+    return None
+
+
+def session_chain(hermes_session_id: str, scope: str):
+    """Die Session und ihre Kompressions-Vorgaenger derselben Kore-Quelle, Spitze zuerst.
+
+    "not_found", wenn Hermes die Session nicht kennt; "foreign", wenn sie nicht aus der
+    Kore-Quelle dieses Scopes stammt; None, wenn sie nicht lesbar ist. Die Kette endet an jedem
+    Glied, das kein Kompressions-Vorgaenger derselben Quelle ist."""
+    source = _kore_source(scope)
+    record = _session_record(hermes_session_id)
+    if record is None or record == "not_found":
+        return record
+    if record["source"] != source:
+        return "foreign"
+    chain = [hermes_session_id]
+    current = record
+    while len(chain) < MAX_SESSION_CHAIN:
+        parent_id = current.get("parent_session_id")
+        if not isinstance(parent_id, str) or not _HERMES_SESSION_ID_RE.fullmatch(parent_id):
+            break
+        if parent_id in chain:
+            break
+        parent = _session_record(parent_id)
+        if (
+            not isinstance(parent, dict)
+            or parent["source"] != source
+            or parent["end_reason"] != "compression"
+        ):
+            break
+        chain.append(parent_id)
+        current = parent
+    return chain
+
+
+def delete_hermes_session(hermes_session_id: str) -> str:
+    """`sessions delete --yes <id>` → "deleted" | "not_found" | "failed"."""
+    if not _HERMES_SESSION_ID_RE.fullmatch(hermes_session_id):
+        return "failed"
+    process = run_hermes_sessions(["delete", "--yes", hermes_session_id])
+    if process is None:
+        return "failed"
+    if process.returncode == 0 and f"Deleted session '{hermes_session_id}'." in process.stdout:
+        return "deleted"
+    if process.returncode == 1 and f"No session '{hermes_session_id}'" in process.stdout:
+        return "not_found"
+    return "failed"
+
+
+def _forget_counts() -> dict:
+    return {"deleted": 0, "not_found": 0, "failed": 0}
+
+
+def forget(*, conversation_id=None, sessions=None, scope=None, store=None) -> dict:
+    """POST /coach/forget. Entweder ein Chat (`conversation_id` + signierte Referenzen) oder ein
+    Scope ("health" | "all"). Zuerst stoppen die laufenden Turns der betroffenen Chats und ihre
+    Puffer verschwinden, dann loescht die Bridge die Hermes-Sessions.
+
+    Zaehlt Hermes-Sessions: `deleted`; `not_found` (schon weg); `failed` (Signatur passt nicht,
+    fremde Quelle, Hermes nicht lesbar, Zeitbudget erschoepft). Nur `failed == 0` ist eine
+    Bestaetigung — alles andere verfaellt spaetestens nach SESSION_RETENTION_DAYS Tagen.
+    """
+    store = TURNS if store is None else store
+    counts = _forget_counts()
+    deadline = time.monotonic() + FORGET_BUDGET_S
+    if scope is not None:
+        store.drop(scope=scope)
+        with _SESSION_MAINTENANCE_LOCK:
+            for kore_scope in FORGET_SCOPES[scope]:
+                if time.monotonic() > deadline:
+                    counts["failed"] += 1
+                    continue
+                ids = scope_session_ids(kore_scope)
+                if ids is None:
+                    counts["failed"] += 1
+                    continue
+                for position, sid in enumerate(ids):
+                    if time.monotonic() > deadline:
+                        counts["failed"] += len(ids) - position
+                        break
+                    counts[delete_hermes_session(sid)] += 1
+        return counts
+
+    store.drop(conversation_id=conversation_id)
+    with _SESSION_MAINTENANCE_LOCK:
+        for ref in dict.fromkeys(sessions or ()):
+            if time.monotonic() > deadline:
+                counts["failed"] += 1
+                continue
+            ref_scope = ref.partition(":")[0]
+            hermes_session_id = verify_session(ref, ref_scope, conversation_id)
+            if hermes_session_id is None:
+                counts["failed"] += 1
+                continue
+            chain = session_chain(hermes_session_id, ref_scope)
+            if chain in ("not_found", "foreign"):
+                counts["not_found" if chain == "not_found" else "failed"] += 1
+                continue
+            if chain is None:
+                # Nicht lesbar: die signierte Session selbst trotzdem loeschen, aber ohne
+                # Bestaetigung, denn ihre Vorgaenger sind unbekannt.
+                counts["failed"] += 1
+                chain = [hermes_session_id]
+            for sid in chain:
+                counts[delete_hermes_session(sid)] += 1
+    return counts
+
+
+def prune_expired(store=None):
+    """Verfall: loescht Kore-Sessions beider Quellen nach SESSION_RETENTION_DAYS Tagen
+    Inaktivitaet. Laeuft nur ohne laufenden Turn; beginnt einer mittendrin, bricht der Lauf ab.
+    Rueckgabe: Zaehler oder None (uebersprungen, wird bald erneut versucht)."""
+    store = TURNS if store is None else store
+    counts = _forget_counts()
+    with _SESSION_MAINTENANCE_LOCK:
+        if store.active_count():
+            return None
+        for scope in ("general", "health"):
+            ids = expired_session_ids(scope)
+            if ids is None:
+                counts["failed"] += 1
+                continue
+            for sid in ids:
+                if store.active_count():
+                    return None
+                counts[delete_hermes_session(sid)] += 1
+    return counts
+
+
+class RetentionSchedule:
+    """Beim Start und danach taeglich; ein wegen laufender Turns uebersprungener Lauf wird beim
+    naechsten Takt (jede Minute) nachgeholt."""
+
+    def __init__(self):
+        self.last_run = None
+
+    def tick(self, now: float, store=None) -> bool:
+        if self.last_run is not None and now - self.last_run < RETENTION_INTERVAL_S:
+            return False
+        if prune_expired(store) is None:
+            return False
+        self.last_run = now
+        return True
+
+
+def _retention_forever(store: TurnStore) -> None:
+    schedule = RetentionSchedule()
+    while True:
+        try:
+            schedule.tick(time.monotonic(), store)
+        except Exception:
+            pass
+        time.sleep(SWEEP_INTERVAL_S)
+
+
+def forget_request_error(data):
+    """400-Antwort fuer einen ungueltigen /coach/forget-Body, sonst None."""
+    if not isinstance(data, dict):
+        return 400, {"error": "JSON muss ein Objekt sein"}
+    keys = set(data)
+    if keys == {"scope"}:
+        if data["scope"] not in FORGET_SCOPES:
+            return 400, {"error": "scope muss health oder all sein"}
+        return None
+    if keys != {"conversation_id", "sessions"}:
+        return 400, {"error": "erwartet {scope} oder {conversation_id, sessions}"}
+    if not valid_conversation_id(data["conversation_id"]):
+        return 400, {"error": "conversation_id ist keine kanonische kleingeschriebene UUID"}
+    refs = data["sessions"]
+    if not isinstance(refs, list) or len(refs) > MAX_FORGET_REFERENCES:
+        return 400, {"error": f"sessions muss eine Liste mit höchstens {MAX_FORGET_REFERENCES} Referenzen sein"}
+    if any(ref is None or not valid_scoped_session(ref) for ref in refs):
+        return 400, {"error": "Session-Referenz ist ungültig"}
+    return None
 
 
 # ---- Tages-Anpassung ------------------------------------------------------------------------
@@ -1964,7 +2307,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         turn_id, subpath = self._turn_route()
         is_cancel = turn_id is not None and subpath == "/cancel"
-        if self.path not in ("/coach", "/coach/adjust-today") and not is_cancel:
+        if self.path not in ("/coach", "/coach/adjust-today", "/coach/forget") and not is_cancel:
             self._send(404, {"error": "not found"})
             return
         if not self._authorized():
@@ -1995,6 +2338,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "JSON muss ein Objekt sein"})
             return
         try:
+            if self.path == "/coach/forget":
+                if error := forget_request_error(data):
+                    self._send(*error)
+                    return
+                self._send(200, forget(
+                    conversation_id=data.get("conversation_id"),
+                    sessions=data.get("sessions"),
+                    scope=data.get("scope"),
+                ))
+                return
             if self.path == "/coach/adjust-today":
                 code, obj = adjust_today(data)
                 self._send(code, obj)
@@ -2039,6 +2392,9 @@ if __name__ == "__main__":
         print(warning, file=sys.stderr, flush=True)
     threading.Thread(
         target=_sweep_turns_forever, args=(TURNS,), name="kore-turn-sweeper", daemon=True
+    ).start()
+    threading.Thread(
+        target=_retention_forever, args=(TURNS,), name="kore-session-retention", daemon=True
     ).start()
     port = int(os.environ.get("KORE_BRIDGE_PORT", "8090"))
     ThreadingHTTPServer((validated_bind_host(BIND_HOST), port), Handler).serve_forever()

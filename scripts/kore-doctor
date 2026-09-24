@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""kore-doctor — prueft eine kore-server-Installation samt Coach-Bridge, nur mit der Standardbibliothek.
+
+    python3 scripts/kore-doctor [--bridge-env PATH] [--server-env PATH] [--ingest-url URL] [--bridge-only]
+
+Prueft (Spec E S6, Spec C §4.9):
+- Ingest `/health` antwortet 200, mit fremdem Origin 403.
+- MCP auf 127.0.0.1 weist ohne Token ab (401) und ist ueber die LAN-Adresse nicht erreichbar.
+- Bridge laeuft und weist ohne Token ab (401); `/health` mit Token meldet jede Faehigkeit aus
+  contract/app-required-capabilities.json, `prompt_transport == stdin` und unter
+  `app_chat_toolsets` weder Terminal-, Datei-, Code-, Cron-, Computer- noch Browser-Werkzeuge.
+- Origin-Geheimnis (per Hash), KORE_INSTANCE_ID und KORE_PLAN_ORIGIN_PRINCIPAL sind in Server und
+  Bridge gleich.
+- Das Profil aus KORE_HERMES_PROFILE existiert, `hermes -p <Profil> mcp test kore` gelingt;
+  `hermes --version` wird ausgegeben.
+
+`--bridge-only` prueft nur Bridge und Hermes (z. B. wenn Ingest/MCP woanders laufen oder die
+Server-.env einem anderen Nutzer gehoert). `--ingest-url` setzt die Ingest-Adresse, wenn sie nicht
+aus KORE_BIND_ADDRESS folgt.
+
+Gibt nie einen Geheimwert aus. Exit 0 nur ohne jede Abweichung, sonst 1.
+"""
+import argparse
+import hashlib
+import hmac
+import ipaddress
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+CONTRACT = REPO / "contract" / "app-required-capabilities.json"
+PROFILE_EXAMPLE = "hermes/kore-coach-profile.example.yaml"
+DEFAULT_BRIDGE_ENV = Path.home() / "kore-coach-bridge" / "bridge.env"
+DEFAULT_SERVER_ENV = REPO / ".env"
+INGEST_PORT = 8081
+DEFAULT_MCP_PORT = 8000
+BRIDGE_API_VERSION = 2
+FORBIDDEN_TOOLSETS = ("terminal", "file", "code_execution", "cronjob", "computer_use", "browser")
+FOREIGN_ORIGIN = "http://kore-doctor.invalid"
+HTTP_TIMEOUT_S = 5
+HERMES_TIMEOUT_S = 60
+_SECRET_KEY_RE = re.compile(r"(TOKEN|SECRET|KEY|PASSWORD)", re.IGNORECASE)
+_PLACEHOLDER_KEYS = {
+    "bridge": ("KORE_BRIDGE_TOKEN", "KORE_PLAN_ORIGIN_SECRET"),
+    "server": ("KORE_INGEST_TOKEN", "KORE_MCP_TOKEN", "KORE_PLAN_ORIGIN_SECRET"),
+}
+_TOOLS_DISCOVERED_RE = re.compile(r"Tools discovered: ([0-9]{1,4})")
+
+
+def read_env_file(path) -> dict:
+    """KEY=VALUE wie systemd/Compose; Kommentare und Leerzeilen zaehlen nicht, Anfuehrungszeichen fallen weg."""
+    values = {}
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def secret_values(*envs) -> list:
+    return [value for env in envs for key, value in env.items() if _SECRET_KEY_RE.search(key) and value]
+
+
+class Report:
+    """Sammelt Ergebnisse. Jede Zeile laeuft durch `clean`, das bekannte Geheimwerte schwaerzt —
+    ein Sicherheitsnetz; die Pruefungen selbst geben nie einen Wert aus."""
+
+    def __init__(self, secrets_to_hide=(), stream=None):
+        self.secrets = sorted({s for s in secrets_to_hide if s}, key=len, reverse=True)
+        self.stream = stream if stream is not None else sys.stdout
+        self.failures = 0
+
+    def add_secrets(self, values) -> None:
+        self.secrets = sorted(set(self.secrets) | {s for s in values if s}, key=len, reverse=True)
+
+    def clean(self, text: str) -> str:
+        for secret in self.secrets:
+            text = text.replace(secret, "[verborgen]")
+        return text
+
+    def _line(self, tag: str, text: str) -> None:
+        print(self.clean(f"{tag:<9}{text}"), file=self.stream)
+
+    def ok(self, text: str) -> None:
+        self._line("[OK]", text)
+
+    def info(self, text: str) -> None:
+        self._line("[INFO]", text)
+
+    def skip(self, text: str) -> None:
+        self._line("[--]", text)
+
+    def fail(self, text: str, hint: str = None) -> None:
+        self.failures += 1
+        self._line("[FEHLER]", text)
+        if hint:
+            self._line("", f"-> {hint}")
+
+
+def http_get(url: str, headers=None):
+    """(Status, Body-Bytes) oder None, wenn keine Verbindung zustande kam. Ohne Proxy."""
+    request = urllib.request.Request(url, headers=dict(headers or {}), method="GET")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=HTTP_TIMEOUT_S) as response:
+            return response.status, response.read(1_048_576)
+    except urllib.error.HTTPError as error:
+        return error.code, error.read(1_048_576)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def can_connect(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=3):
+            return True
+    except OSError:
+        return False
+
+
+def _json_object(body: bytes):
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _concrete_lan_ip(value):
+    try:
+        address = ipaddress.ip_address(value)
+    except (TypeError, ValueError):
+        return None
+    if address.is_loopback or address.is_unspecified:
+        return None
+    return str(address)
+
+
+def lan_hosts(bind_address, ingest_url) -> list:
+    """Konkrete Nicht-Loopback-Adressen, unter denen der MCP NICHT erreichbar sein darf."""
+    hosts = []
+    candidates = [bind_address]
+    if ingest_url:
+        candidates.append(urllib.parse.urlsplit(ingest_url).hostname)
+    for candidate in candidates:
+        host = _concrete_lan_ip(candidate)
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def check_placeholders(report: Report, env: dict, kind: str, label: str) -> None:
+    for key in _PLACEHOLDER_KEYS[kind]:
+        value = env.get(key, "")
+        if not value.strip():
+            report.fail(f"{label}: {key} ist leer.")
+        elif value.strip().lower().startswith("change-me"):
+            report.fail(f"{label}: {key} steht noch auf dem Beispielwert.",
+                        "Echten Wert erzeugen: openssl rand -hex 32")
+
+
+# ---- Bridge ----------------------------------------------------------------------------------
+
+def check_bridge(report: Report, bridge_env: dict, contract: list) -> None:
+    host = bridge_env.get("KORE_BRIDGE_BIND_HOST") or "127.0.0.1"
+    port = bridge_env.get("KORE_BRIDGE_PORT") or "8090"
+    base = f"http://{host}:{port}"
+    token = bridge_env.get("KORE_BRIDGE_TOKEN", "")
+
+    anonymous = http_get(f"{base}/health")
+    if anonymous is None:
+        report.fail(f"Bridge unter {base} nicht erreichbar.",
+                    "systemctl status kore-coach-bridge; KORE_BRIDGE_BIND_HOST/KORE_BRIDGE_PORT in bridge.env pruefen.")
+        return
+    if anonymous[0] == 401:
+        report.ok(f"Bridge unter {base} laeuft und weist ohne Token ab (401).")
+    elif anonymous[0] == 503:
+        report.fail("Bridge laeuft ohne eingerichtetes Token (503).", "KORE_BRIDGE_TOKEN in bridge.env setzen.")
+    else:
+        report.fail(f"Bridge antwortet ohne Token mit {anonymous[0]} statt 401.",
+                    "Zeigt die Adresse wirklich auf kore-coach-bridge?")
+
+    answer = http_get(f"{base}/health", {"Authorization": f"Bearer {token}"})
+    if answer is None:
+        report.fail("Bridge-/health mit Token nicht erreichbar.")
+        return
+    if answer[0] != 200:
+        report.fail(f"Bridge-/health mit Token: {answer[0]} statt 200.",
+                    "KORE_BRIDGE_TOKEN in bridge.env ist nicht das Token der laufenden Bridge (Dienst neu gestartet?).")
+        return
+    health = _json_object(answer[1])
+    if health is None:
+        report.fail("Bridge-/health liefert kein JSON-Objekt.")
+        return
+
+    if health.get("api_version") == BRIDGE_API_VERSION:
+        report.ok(f"Bridge api_version {BRIDGE_API_VERSION}.")
+    else:
+        report.fail(f"Bridge api_version ist {health.get('api_version')!r}, noetig {BRIDGE_API_VERSION}.",
+                    "kore-server aktualisieren und die Bridge neu starten.")
+
+    capabilities = health.get("capabilities")
+    capabilities = set(capabilities) if isinstance(capabilities, list) else set()
+    missing = [name for name in contract if name not in capabilities]
+    if missing:
+        report.fail("Bridge meldet nicht alle Faehigkeiten, die Kore verlangt: " + ", ".join(missing),
+                    "kore-server aktualisieren; fehlt plan_origin_v1, KORE_PLAN_ORIGIN_SECRET und "
+                    "KORE_PLAN_ORIGIN_PRINCIPAL in bridge.env pruefen.")
+    else:
+        report.ok(f"Bridge meldet alle {len(contract)} Faehigkeiten aus contract/app-required-capabilities.json.")
+
+    if health.get("prompt_transport") == "stdin":
+        report.ok("prompt_transport == stdin.")
+    else:
+        report.fail(f"prompt_transport ist {health.get('prompt_transport')!r} statt stdin.",
+                    "KORE_HERMES_ALLOW_ARGV_PROMPTS aus bridge.env entfernen und die Bridge neu starten.")
+
+    toolsets = health.get("app_chat_toolsets")
+    if not isinstance(toolsets, dict) or not toolsets or not all(
+        isinstance(names, list) and all(isinstance(name, str) for name in names)
+        for names in toolsets.values()
+    ):
+        report.fail("Bridge meldet keine app_chat_toolsets.", "kore-server auf v0.10 aktualisieren.")
+    else:
+        forbidden = sorted({
+            name for names in toolsets.values() for name in names
+            if name in FORBIDDEN_TOOLSETS or name.startswith("hermes-")
+        })
+        if forbidden:
+            report.fail("app_chat_toolsets enthaelt gesperrte Werkzeuge: " + ", ".join(forbidden))
+        else:
+            summary = "; ".join(f"{scope}: {','.join(names)}" for scope, names in sorted(toolsets.items()))
+            report.ok(f"app_chat_toolsets ohne Terminal/Datei/Code/Cron/Computer/Browser ({summary}).")
+
+    for key in ("session_retention_days", "turn_buffer_ttl_hours", "active_turns"):
+        value = health.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            report.info(f"{key}: {value}")
+
+
+# ---- Hermes ----------------------------------------------------------------------------------
+
+def _hermes_env(home: str) -> dict:
+    env = {key: value for key, value in os.environ.items() if key in ("PATH", "LANG", "LC_ALL", "TZ")}
+    env["HOME"] = home
+    return env
+
+
+def check_hermes(report: Report, bridge_env: dict) -> None:
+    hermes = bridge_env.get("KORE_HERMES_BIN", "")
+    home = bridge_env.get("KORE_HERMES_HOME") or str(Path.home())
+    profile = bridge_env.get("KORE_HERMES_PROFILE", "")
+    if not hermes or not os.access(hermes, os.X_OK):
+        report.fail("KORE_HERMES_BIN zeigt auf keine ausfuehrbare Datei.",
+                    "Standard: <HERMES_HOME>/.hermes/hermes-agent/venv/bin/hermes")
+        return
+    try:
+        version = subprocess.run([hermes, "--version"], capture_output=True, text=True,
+                                 timeout=HERMES_TIMEOUT_S, env=_hermes_env(home), cwd=home)
+    except (OSError, subprocess.TimeoutExpired):
+        version = None
+    if version is None or version.returncode != 0 or not version.stdout.strip():
+        report.fail("hermes --version laeuft nicht.")
+    else:
+        report.info(f"Hermes: {version.stdout.strip().splitlines()[0][:120]}")
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}", profile):
+        report.fail("KORE_HERMES_PROFILE fehlt oder ist kein gueltiger Profilname.")
+        return
+    profile_dir = Path(home) / ".hermes" / ("" if profile == "default" else f"profiles/{profile}")
+    if profile_dir.is_dir():
+        report.ok(f"Hermes-Profil {profile} existiert.")
+    else:
+        report.fail(f"Hermes-Profil {profile} existiert nicht unter {home}/.hermes.",
+                    f"{hermes} profile create {profile} (ohne --clone), dann {PROFILE_EXAMPLE} eintragen.")
+        return
+
+    try:
+        test = subprocess.run([hermes, "-p", profile, "mcp", "test", "kore"], capture_output=True,
+                              text=True, timeout=HERMES_TIMEOUT_S, env=_hermes_env(home), cwd=home)
+    except (OSError, subprocess.TimeoutExpired):
+        test = None
+    # Die Ausgabe von `mcp test` wird nie weitergegeben; sie kann Header-Teile enthalten.
+    if test is None:
+        report.fail(f"hermes -p {profile} mcp test kore lief nicht zu Ende.",
+                    f"MCP-Eintrag nach {PROFILE_EXAMPLE} pruefen.")
+    elif test.returncode == 0:
+        match = _TOOLS_DISCOVERED_RE.search(test.stdout)
+        tools = f", {match.group(1)} Werkzeuge" if match else ""
+        report.ok(f"hermes -p {profile} mcp test kore erfolgreich{tools}.")
+    elif test.returncode == 3:
+        report.fail(f"Im Profil {profile} ist kein MCP-Server kore eingetragen.",
+                    f"Block mcp_servers.kore aus {PROFILE_EXAMPLE} in ~/.hermes/profiles/{profile}/config.yaml uebernehmen.")
+    else:
+        report.fail(f"hermes -p {profile} mcp test kore fehlgeschlagen (Exit {test.returncode}).",
+                    f"URL und MCP_KORE_API_KEY in der Profil-.env nach {PROFILE_EXAMPLE} pruefen; laeuft der MCP?")
+
+
+# ---- Server ----------------------------------------------------------------------------------
+
+def check_ingest(report: Report, ingest_url: str) -> None:
+    base = ingest_url.rstrip("/")
+    answer = http_get(f"{base}/health")
+    if answer is None:
+        report.fail(f"Ingest unter {base} nicht erreichbar.",
+                    "docker compose ps; KORE_BIND_ADDRESS pruefen oder --ingest-url angeben.")
+        return
+    health = _json_object(answer[1])
+    if answer[0] == 200 and health is not None and health.get("ok") is True:
+        report.ok(f"Ingest {base}/health antwortet 200.")
+    else:
+        report.fail(f"Ingest {base}/health antwortet {answer[0]} statt 200 mit ok=true.")
+    foreign = http_get(f"{base}/health", {"Origin": FOREIGN_ORIGIN})
+    if foreign is not None and foreign[0] == 403:
+        report.ok("Ingest weist einen fremden Origin ab (403).")
+    else:
+        status = "keine Antwort" if foreign is None else foreign[0]
+        report.fail(f"Ingest mit fremdem Origin: {status} statt 403.",
+                    "KORE_MCP_ALLOWED_ORIGINS in .env leer lassen.")
+
+
+def check_mcp_local(report: Report, port: int) -> None:
+    answer = http_get(f"http://127.0.0.1:{port}/mcp")
+    if answer is None:
+        report.fail(f"MCP auf 127.0.0.1:{port} nicht erreichbar.", "docker compose ps")
+    elif answer[0] == 401:
+        report.ok(f"MCP auf 127.0.0.1:{port} weist ohne Token ab (401).")
+    else:
+        report.fail(f"MCP auf 127.0.0.1:{port} antwortet ohne Token mit {answer[0]} statt 401.")
+
+
+def check_mcp_not_on_lan(report: Report, hosts, port: int) -> None:
+    if not hosts:
+        report.skip("MCP im LAN: keine LAN-Adresse konfiguriert (KORE_BIND_ADDRESS ist Loopback).")
+        return
+    for host in hosts:
+        if can_connect(host, port):
+            report.fail(f"MCP ist ueber {host}:{port} erreichbar; er gehoert nur auf 127.0.0.1.",
+                        "docker-compose.override.yml: mcp.ports !override [\"127.0.0.1:8000:8000\"]")
+        else:
+            report.ok(f"MCP ist ueber {host}:{port} nicht erreichbar.")
+
+
+def check_origin(report: Report, bridge_env: dict, server_env: dict) -> None:
+    def digest(value: str) -> bytes:
+        return hashlib.sha256(value.encode("utf-8")).digest()
+
+    bridge_secret = bridge_env.get("KORE_PLAN_ORIGIN_SECRET", "")
+    server_secret = server_env.get("KORE_PLAN_ORIGIN_SECRET", "")
+    if bridge_secret and hmac.compare_digest(digest(bridge_secret), digest(server_secret)):
+        report.ok("KORE_PLAN_ORIGIN_SECRET in Server und Bridge gleich (Hash-Vergleich).")
+    else:
+        report.fail("KORE_PLAN_ORIGIN_SECRET in Server und Bridge verschieden.",
+                    "Denselben Wert in .env und bridge.env eintragen, beide Dienste neu starten.")
+    for key in ("KORE_INSTANCE_ID", "KORE_PLAN_ORIGIN_PRINCIPAL"):
+        if bridge_env.get(key) and bridge_env.get(key) == server_env.get(key):
+            report.ok(f"{key} in Server und Bridge gleich.")
+        else:
+            report.fail(f"{key} in Server und Bridge verschieden oder leer.")
+
+
+# ---- Ablauf ----------------------------------------------------------------------------------
+
+def _load_env(report: Report, path: Path, label: str, hint: str):
+    try:
+        env = read_env_file(path)
+    except (OSError, UnicodeDecodeError):
+        report.fail(f"{label} nicht lesbar: {path}", hint)
+        return None
+    report.add_secrets(secret_values(env))
+    return env
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="kore-doctor", description=__doc__.split("\n\n")[0])
+    parser.add_argument("--bridge-env", type=Path, default=DEFAULT_BRIDGE_ENV,
+                        help=f"bridge.env der Coach-Bridge (Standard: {DEFAULT_BRIDGE_ENV})")
+    parser.add_argument("--server-env", type=Path, default=DEFAULT_SERVER_ENV,
+                        help=f".env von Ingest und MCP (Standard: {DEFAULT_SERVER_ENV})")
+    parser.add_argument("--ingest-url", help="Ingest-Adresse, z. B. http://10.0.0.10:8081 "
+                        "(Standard: http://<KORE_BIND_ADDRESS>:8081)")
+    parser.add_argument("--bridge-only", action="store_true",
+                        help="nur Bridge und Hermes pruefen (ohne Ingest, MCP und Server-.env)")
+    args = parser.parse_args(argv)
+
+    report = Report()
+    print("kore-doctor: Pruefung der Installation (gibt keine Geheimwerte aus)")
+    try:
+        contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        contract = None
+    if not isinstance(contract, list) or not all(isinstance(name, str) for name in contract):
+        report.fail(f"Vertrag {CONTRACT} fehlt oder ist unlesbar.")
+        contract = None
+
+    bridge_env = _load_env(report, args.bridge_env, "bridge.env",
+                           "Pfad mit --bridge-env angeben; als Nutzer der Bridge ausfuehren.")
+    if bridge_env is not None:
+        check_placeholders(report, bridge_env, "bridge", "bridge.env")
+        if contract is not None:
+            check_bridge(report, bridge_env, contract)
+        check_hermes(report, bridge_env)
+
+    if args.bridge_only:
+        report.skip("Ingest, MCP und Server-.env: uebersprungen (--bridge-only).")
+    else:
+        server_env = _load_env(report, args.server_env, "Server-.env",
+                               "Pfad mit --server-env angeben, oder --bridge-only, wenn Ingest/MCP "
+                               "woanders laufen bzw. die .env einem anderen Nutzer gehoert.")
+        bind_address = (server_env or {}).get("KORE_BIND_ADDRESS") or "127.0.0.1"
+        ingest_url = args.ingest_url or (
+            f"http://{bind_address}:{INGEST_PORT}" if server_env is not None else None
+        )
+        if ingest_url:
+            check_ingest(report, ingest_url)
+        if server_env is not None:
+            check_placeholders(report, server_env, "server", "Server-.env")
+            try:
+                mcp_port = int(server_env.get("KORE_MCP_PORT") or DEFAULT_MCP_PORT)
+            except ValueError:
+                mcp_port = DEFAULT_MCP_PORT
+            check_mcp_local(report, mcp_port)
+            check_mcp_not_on_lan(report, lan_hosts(bind_address, ingest_url), mcp_port)
+            if bridge_env is not None:
+                check_origin(report, bridge_env, server_env)
+
+    if report.failures:
+        print(f"Ergebnis: {report.failures} Abweichung(en).")
+        return 1
+    print("Ergebnis: alles in Ordnung.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -399,6 +399,17 @@ nur dieses kleine Protokoll:
   (danach `404 turn_unknown`). `POST /coach/turns/{turn_id}/cancel` beendet Hermes, idempotent.
   Der Puffer liegt nur im Arbeitsspeicher, höchstens 24 Stunden; ein Neustart der Bridge verliert ihn.
 - `POST /coach/adjust-today` → JSON-Antwort mit dem angepassten Training des Tages.
+- `POST /coach/forget` mit `{conversation_id, sessions: [<signierte Referenz>, …]}` (ein Chat, höchstens
+  16 Referenzen) oder `{scope: "health" | "all"}`. Stoppt laufende Turns der betroffenen Chats, löscht
+  ihre Puffer und dann die Hermes-Sessions samt Kompressions-Vorgängern. Antwort
+  `{deleted, not_found, failed}`; bestätigt ist das Löschen nur bei `failed: 0`. Die Referenz wird vorher
+  geprüft (Signatur, Scope, Chat); gelöscht werden nur Sessions der Quellen `kore-general`/`kore-health`.
+- Verfall: Kore-Sessions ohne Aktivität seit `KORE_BRIDGE_SESSION_RETENTION_DAYS` Tagen (Standard und
+  Obergrenze 30, `/health` meldet `session_retention_days`) löscht die Bridge beim Start und danach
+  täglich, nie während ein Turn läuft. Sie wählt nur lesend aus (`sessions prune --dry-run`) und löscht
+  jede Session einzeln mit `sessions delete --yes`, weil Hermes `prune` verweigert, solange ein anderer
+  Hermes-Prozess (etwa Hermes Desktop) die Datenbank des Profils offen hat. Das Gedächtnis des Profils
+  (`memory`, externe Anbieter) fasst die Bridge nie an.
 - Ohne gültiges `Authorization: Bearer $KORE_BRIDGE_TOKEN`: 401. Eine unfertige Installation ist
   ein Fehler, nie ein offener Zugang: Ist `KORE_BRIDGE_TOKEN`, `KORE_PLAN_ORIGIN_SECRET` oder
   `KORE_PLAN_ORIGIN_PRINCIPAL` leer oder steht noch auf `change-me…`, startet die Bridge nicht und
@@ -407,6 +418,31 @@ nur dieses kleine Protokoll:
   allgemein `web,skills,memory`, im Gesundheits-Chat mit Herkunftsticket dazu `kore`. Ohne Ticket
   kein kore-MCP. Nie Terminal, Dateien, Code-Ausführung, Cronjobs, Computer- oder Browser-Steuerung.
 
+### Installation prüfen: `kore-doctor`
+
+```bash
+python3 scripts/kore-doctor            # als Nutzer der Bridge, Standardpfade:
+                                       #   ~/kore-coach-bridge/bridge.env und <repo>/.env
+python3 scripts/kore-doctor --bridge-env /pfad/bridge.env --server-env /pfad/.env \
+                            --ingest-url http://10.0.0.10:8081
+python3 scripts/kore-doctor --bridge-only   # nur Bridge und Hermes
+```
+
+Das Skript braucht nur die Standardbibliothek und gibt nie einen Geheimwert aus. Es prüft: Ingest
+`/health` 200 und mit fremdem Origin 403; MCP auf `127.0.0.1` ohne Token 401 und über die LAN-Adresse
+nicht erreichbar; Bridge ohne Token 401; Bridge-`/health` mit Token meldet jede Fähigkeit aus
+[`contract/app-required-capabilities.json`](contract/app-required-capabilities.json) (genau die Liste,
+die Kore ab 0.10 verlangt), `prompt_transport: stdin` und `app_chat_toolsets` ohne Terminal-, Datei-,
+Code-, Cron-, Computer- und Browser-Werkzeuge; `KORE_PLAN_ORIGIN_SECRET` (per Hash),
+`KORE_INSTANCE_ID` und `KORE_PLAN_ORIGIN_PRINCIPAL` sind in Server und Bridge gleich; das Profil aus
+`KORE_HERMES_PROFILE` existiert und `hermes -p <profil> mcp test kore` gelingt (Vorlage:
+[`hermes/kore-coach-profile.example.yaml`](hermes/kore-coach-profile.example.yaml)). Die
+Hermes-Version steht in der Ausgabe. Exit 0 nur ohne jede Abweichung.
+
+`--bridge-only` lässt Ingest, MCP und Server-`.env` weg, etwa wenn sie auf einem anderen Rechner
+laufen oder die `.env` einem anderen Nutzer gehört. `--ingest-url` setzt die Ingest-Adresse, wenn sie
+nicht `http://<KORE_BIND_ADDRESS>:8081` ist.
+
 ---
 
 ## Tests
@@ -414,7 +450,7 @@ nur dieses kleine Protokoll:
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r server/requirements.txt pytest
-pytest server/tests server/integration_tests coach-bridge
+pytest server/tests server/integration_tests coach-bridge scripts
 ```
 
 Dieselben Läufe stehen in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
