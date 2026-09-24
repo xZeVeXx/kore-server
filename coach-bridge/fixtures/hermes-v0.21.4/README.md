@@ -50,3 +50,14 @@ printf 'Antworte nur mit OK' | hermes -p <profil> chat -Q --format stream-json -
 - Kompression ließ sich in v0.21.4 pro Aufruf nicht erzwingen (kein Schalter; `/compress` wirkt im
   Einmal-Modus nicht, die Anfrage ginge als Text ans Modell). Eine Fixture mit abweichender ID in
   `init`/`result` muss synthetisch abgeleitet und als solche markiert werden.
+
+## Ergänzt in Task 8 (Bridge-Runner)
+
+- `stream-resume-unknown.stderr.txt`: die stderr-Zeilen des Laufs `stream-resume-unknown.jsonl`, wörtlich
+  aus dem Abschnitt oben übernommen (echte Ausgabe). Die Bridge nutzt stderr **nur** zur Erkennung
+  „unbekannte Session" und gibt nichts davon an die App.
+- **SYNTHETISCH** (nicht von Hermes erzeugt, nach `hermes_cli/stream_json.py` v0.21.4 gebaut):
+  - `synthetic-stream-compressed.jsonl`: abweichende `session_id` in `init` und `result`, wie nach einer
+    Kompression (`_sync_cli_session_id_from_agent`). Kompression ließ sich in G1 nicht erzwingen.
+  - `synthetic-stream-tool-use.jsonl`: ein `tool_use`-/`tool_result`-Paar (kore-MCP-Name, Ticket im
+    `input`, Tool-Ausgabe). Die G1-Probe-Turns riefen kein Werkzeug auf.

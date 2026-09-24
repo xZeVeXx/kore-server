@@ -2,9 +2,10 @@
 """Kore Coach Bridge — verbindet den App-Coach-Tab mit dem self-hosted Agenten Max.
 Ablauf:  App  → POST /coach {message, conversation_id, session?, health_context_allowed, context?}
          → diese Bridge
-         → `hermes -p <explicit-profile> chat -Q --query-file - [--resume <session>]`
-           (Prompt ueber stdin; argv-Weg nur mit KORE_HERMES_ALLOW_ARGV_PROMPTS=1)
-         → Max-Antwort (Markdown, Absätze erhalten) → JSON zurück an die App.
+         → `hermes -p <KORE_HERMES_PROFILE> chat -Q --format stream-json --query-file -
+            --max-turns N --source kore-<scope> -t <Allowlist> --run-budget <s> [--resume <id>]`
+           (Prompt nur ueber stdin; stdout ist JSONL, Session aus dem result-Record)
+         → Max-Antwort (Markdown, Absätze erhalten) + signierte Session → JSON zurück an die App.
          POST /coach/adjust-today {session, health_context_allowed, context} → Tages-Anpassung als striktes JSON.
 Läuft als User `hermes` (systemd). Zero-Dependency (nur Python-Stdlib). Bearer-Auth aus ENV.
 
@@ -33,6 +34,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -76,13 +78,8 @@ PLAN_ORIGIN_TTL_SECONDS = _bounded_env_int("KORE_PLAN_ORIGIN_TTL_SECONDS", 180, 
 # Hermes benennt MCP-Werkzeuge `mcp__<server>__<tool>`; die uebrigen Marker stammen aus
 # aelteren Ausgabeformen.
 USED_KORE_MARKERS = ("mcp__kore__", "mcp_kore", "kore_get_", "propose_training_plan")
-_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _SESSION_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,119}\Z")
 _PLAN_ORIGIN_PRINCIPAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}\Z")
-_SESSION_PATTERNS = (
-    re.compile(r"^session_id:\s*([A-Za-z0-9][A-Za-z0-9._~-]{0,119})\s*$", re.MULTILINE),
-    re.compile(r"^Session:\s*([A-Za-z0-9][A-Za-z0-9._~-]{0,119})\s*$", re.MULTILINE),
-)
 _SESSION_SCOPES = frozenset(("general", "health"))
 _ALLOWED_BIND_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "127.0.0.0/8",
@@ -146,9 +143,27 @@ BRIDGE_CAPABILITIES = (
     "consent_scope_v2",
     "momentum_safety_v1",
     "momentum_safety_v2",
-    "safe_mode_without_health_v1",
     "scoped_sessions_v1",
+    # 0.10: Session aus dem result-Record, signierte Referenz, context/reset_reason statt 502.
+    "conversation_sessions_v2",
+    # 0.10: Werkzeuge per -t-Allowlist statt --safe-mode; kore-MCP nur im Health-Scope mit Ticket.
+    "app_chat_toolsets_v1",
 )
+
+# Werkzeugsatz im App-Chat (Spec C §4.7, Entscheidung 24.09.): eine positive Liste. Ohne -t
+# nimmt Hermes die Plattform-Toolsets des Profils, mit -t nur diese. `session_search` fehlt
+# bewusst (kein Wissen ueber Chats und Kanaele hinweg). Erweitern heisst: Konstante aendern und
+# Gate G1 erneut.
+APP_CHAT_TOOLSETS = {
+    "general": ("web", "skills", "memory"),
+    "health": ("web", "skills", "memory", "kore"),
+}
+FORBIDDEN_TOOLSETS = ("terminal", "file", "code_execution", "cronjob", "computer_use", "browser")
+_APP_CHAT_TOOLSET_NAMES = frozenset(name for names in APP_CHAT_TOOLSETS.values() for name in names)
+# Hermes soll vor dem harten Kill der Bridge selbst abschliessen koennen (A5).
+RUN_BUDGET_MARGIN_S = 15
+_SESSION_SIGNATURE_CONTEXT = b"kore-conversation-session-v1"
+_SESSION_SIGNATURE_LENGTH = 22
 
 
 class PromptTransportUnavailable(RuntimeError):
@@ -326,7 +341,11 @@ def capabilities_payload() -> dict:
 
 
 def health_payload() -> dict:
-    return {"ok": True, **capabilities_payload()}
+    return {
+        "ok": True,
+        **capabilities_payload(),
+        "app_chat_toolsets": {scope: list(names) for scope, names in APP_CHAT_TOOLSETS.items()},
+    }
 
 
 def authorization_status(authorization_header) -> int:
@@ -360,20 +379,19 @@ def validated_bind_host(value) -> str:
 
 
 def runtime_configuration_warning():
-    """Ein Start, der laeuft, aber schlechter geschuetzt ist als der Standard, muss sich melden.
+    """Ein Start, der laeuft, aber nicht chatten kann, muss sich melden.
 
-    Der argv-Weg ist ein bewusster Rueckschritt: er legt den kompletten Prompt — beim
-    Gesundheits-Chat also den Gesundheitskontext — fuer jeden lokalen Nutzer in
-    /proc/<pid>/cmdline ab, solange der Aufruf laeuft. Er bleibt waehlbar fuer aeltere
-    Hermes-Staende ohne --query-file, aber nie stillschweigend.
+    Der argv-Weg legte den kompletten Prompt — beim Gesundheits-Chat also den
+    Gesundheitskontext — fuer jeden lokalen Nutzer in /proc/<pid>/cmdline ab. Seit 0.10 braucht
+    die Bridge stream-json (Hermes >= v0.21.4), und jeder solche Stand liest den Prompt von
+    stdin. Der argv-Weg wird deshalb nicht mehr benutzt, sondern jeder Coach-Aufruf abgelehnt.
     """
     if ALLOW_ARGV_PROMPTS:
         return (
-            "WARNUNG: KORE_HERMES_ALLOW_ARGV_PROMPTS=1 — der Prompt inklusive Gesundheitskontext "
-            "steht waehrend jedes Coach-Aufrufs in der Prozessliste (/proc/<pid>/cmdline) und ist "
-            "fuer jeden lokalen Nutzer lesbar. Ohne diese Variable benutzt die Bridge stdin "
-            "(hermes chat --query-file -) und der Prompt taucht nirgends auf. Nur setzen, wenn "
-            "der Hermes-Stand --query-file nicht kennt (vor v0.21.2)."
+            "WARNUNG: KORE_HERMES_ALLOW_ARGV_PROMPTS=1 — diese Bridge lehnt damit jeden "
+            "Coach-Aufruf ab (503). Der argv-Weg legte den Prompt in die Prozessliste "
+            "(/proc/<pid>/cmdline); die Bridge reicht ihn nur noch ueber stdin weiter "
+            "(hermes chat --query-file -, Hermes >= v0.21.4). Variable entfernen."
         )
     return None
 
@@ -701,21 +719,109 @@ def session_scope(health_context_allowed: bool) -> str:
     return "health" if health_context_allowed else "general"
 
 
-def resume_session_id(session, health_context_allowed: bool):
-    """Akzeptiert ausschließlich eine gültige Session aus demselben Consent-Scope."""
-    if not valid_scoped_session(session):
+def origin_ticket_for(scope: str, conversation_id):
+    """Herkunftsticket nur fuer einen Health-Chat mit Chat-ID und vollstaendiger Konfiguration."""
+    if scope != "health" or conversation_id is None or not plan_origin_configured():
         return None
-    if session is None:
-        return None
-    value = session
-    prefix, separator, raw = value.partition(":")
-    return (raw or None) if separator and prefix == session_scope(health_context_allowed) else None
+    return create_plan_origin_ticket(conversation_id)
 
 
-def scoped_session_id(session, health_context_allowed: bool):
-    if not valid_session_token(session):
+def toolsets_for(scope: str, has_origin_ticket: bool) -> tuple:
+    """-t-Liste pro Turn: kore-MCP nur im Health-Scope mit Ticket, sonst die allgemeine Liste."""
+    if scope not in _SESSION_SCOPES:
+        raise ValueError("scope is invalid")
+    if scope == "health" and has_origin_ticket:
+        return APP_CHAT_TOOLSETS["health"]
+    return APP_CHAT_TOOLSETS["general"]
+
+
+def _turn_limit(max_turns) -> int:
+    if isinstance(max_turns, bool):
+        raise ValueError("max_turns must be an integer")
+    try:
+        limit = int(max_turns)
+    except (TypeError, ValueError) as error:
+        raise ValueError("max_turns must be an integer") from error
+    if not 1 <= limit <= 12:
+        raise ValueError("max_turns is outside the bridge limit")
+    return limit
+
+
+def hermes_args(*, profile: str, scope: str, toolsets: tuple, run_budget_s: int,
+                max_turns: str, resume_id=None) -> list:
+    """Genau ein Aufrufmuster fuer Chat und Tages-Anpassung. Nie --safe-mode, nie
+    --ignore-rules (SOUL.md und Gedaechtnis des Profils bleiben), nie ein argv-Prompt."""
+    if not isinstance(profile, str) or _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(profile) is None:
+        raise ValueError("profile is invalid")
+    if scope not in _SESSION_SCOPES:
+        raise ValueError("scope is invalid")
+    if (
+        not toolsets
+        or any(name not in _APP_CHAT_TOOLSET_NAMES for name in toolsets)
+        or any(name in FORBIDDEN_TOOLSETS or name.startswith("hermes-") for name in toolsets)
+    ):
+        raise ValueError("toolsets are outside the app-chat allowlist")
+    if type(run_budget_s) is not int or run_budget_s < 1:
+        raise ValueError("run_budget_s must be a positive integer")
+    if resume_id is not None and not valid_session_token(resume_id):
+        raise ValueError("resume_id is invalid")
+    args = [
+        HERMES, "-p", profile, "chat", "-Q", "--format", "stream-json", "--query-file", "-",
+        "--max-turns", str(_turn_limit(max_turns)), "--source", f"kore-{scope}",
+        "-t", ",".join(toolsets), "--run-budget", str(run_budget_s),
+    ]
+    if resume_id is not None:
+        args += ["--resume", resume_id]
+    return args
+
+
+def _session_signature(scope: str, conversation_id: str, hermes_session_id: str) -> str:
+    key = hmac.new(TOKEN.encode("utf-8"), _SESSION_SIGNATURE_CONTEXT, hashlib.sha256).digest()
+    # NUL trennt die Teile eindeutig; keiner der drei Werte darf NUL enthalten.
+    message = "\x00".join((scope, conversation_id, hermes_session_id)).encode("utf-8")
+    digest = hmac.new(key, message, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")[:_SESSION_SIGNATURE_LENGTH]
+
+
+def sign_session(scope: str, conversation_id: str, hermes_session_id: str) -> str:
+    """`<scope>:<hermes-id>.<sig>` im App-Format (`general:`/`health:` + <= 120 Zeichen).
+
+    Die Bridge speichert keine Zuordnung Chat → Session; die Signatur bindet die Hermes-Session an
+    Scope und Chat. Ein Token-Wechsel macht alle Referenzen ungueltig.
+    """
+    if not TOKEN:
+        raise RuntimeError("bridge token is not configured")
+    if scope not in _SESSION_SCOPES:
+        raise ValueError("scope is invalid")
+    if not valid_conversation_id(conversation_id):
+        raise ValueError("conversation_id is invalid")
+    if not valid_session_token(hermes_session_id):
+        raise ValueError("hermes session id is invalid")
+    raw = f"{hermes_session_id}.{_session_signature(scope, conversation_id, hermes_session_id)}"
+    if not valid_session_token(raw):
+        raise ValueError("hermes session id is too long for a signed reference")
+    return f"{scope}:{raw}"
+
+
+def verify_session(ref, scope: str, conversation_id) -> "str | None":
+    """Hermes-Session-ID nur bei passender Signatur, passendem Scope und passender Chat-ID."""
+    if not TOKEN or ref is None or scope not in _SESSION_SCOPES:
         return None
-    return f"{session_scope(health_context_allowed)}:{session}"
+    if not valid_conversation_id(conversation_id) or not valid_scoped_session(ref):
+        return None
+    prefix, _, raw = ref.partition(":")
+    hermes_session_id, dot, signature = raw.rpartition(".")
+    if (
+        prefix != scope
+        or not dot
+        or len(signature) != _SESSION_SIGNATURE_LENGTH
+        or not valid_session_token(hermes_session_id)
+    ):
+        return None
+    expected = _session_signature(scope, conversation_id, hermes_session_id)
+    if not hmac.compare_digest(signature.encode("ascii"), expected.encode("ascii")):
+        return None
+    return hermes_session_id
 
 
 def plan_origin_directive(origin_ticket=None) -> str:
@@ -820,12 +926,17 @@ def _terminate_process_group(process) -> bool:
     return wait_for_group_exit(1)
 
 
-def _run_process_bounded(args, *, cwd, env, timeout, output_limit, input_bytes=None):
+def _run_process_bounded(args, *, cwd, env, timeout, output_limit, input_bytes=None,
+                         on_stdout_line=None, on_process=None):
     """Run one isolated process with a combined, in-memory stdout/stderr ceiling.
 
     `input_bytes` feeds stdin from a writer thread and closes it. A blocking write in the
     main thread would deadlock as soon as the prompt outgrows the pipe buffer (64 KiB on
     Linux) while nobody drains stdout — and the coach prompt routinely does.
+
+    `on_stdout_line` bekommt jede vollstaendige stdout-Zeile (ohne Zeilenende), sobald sie da ist —
+    fuer stream-json-Deltas. Das Ausgabelimit gilt unveraendert fuer die Rohbytes.
+    `on_process` bekommt den gestarteten Prozess (Prozessgruppe = pid), z. B. fuer einen Abbruch.
     """
     process = subprocess.Popen(
         args,
@@ -836,6 +947,17 @@ def _run_process_bounded(args, *, cwd, env, timeout, output_limit, input_bytes=N
         env=env,
         start_new_session=True,
     )
+    if on_process is not None:
+        try:
+            on_process(process)
+        except Exception as error:
+            _terminate_process_group(process)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except (AttributeError, OSError, ValueError):
+                    pass
+            raise HermesInvocationError("Hermes process could not be registered") from error
     writer = None
     if input_bytes is not None:
         def write_stdin():
@@ -859,12 +981,17 @@ def _run_process_bounded(args, *, cwd, env, timeout, output_limit, input_bytes=N
     overflow = threading.Event()
     reader_failure = threading.Event()
 
-    def read_stream(name, stream):
+    def read_stream(name, stream, line_callback=None):
         nonlocal total_bytes
+        pending = b""
         try:
             while True:
-                chunk = stream.read(8_192)
+                # read1 liefert, sobald Daten da sind; read(n) wartete auf n Bytes oder EOF und
+                # haelte gestreamte Zeilen bis zum Prozessende zurueck.
+                chunk = stream.read1(8_192)
                 if not chunk:
+                    if line_callback is not None and pending:
+                        line_callback(pending.decode("utf-8", errors="replace"))
                     return
                 with lock:
                     if total_bytes + len(chunk) > output_limit:
@@ -872,12 +999,19 @@ def _run_process_bounded(args, *, cwd, env, timeout, output_limit, input_bytes=N
                         return
                     total_bytes += len(chunk)
                     chunks[name].append(chunk)
+                if line_callback is not None:
+                    pending += chunk
+                    *lines, pending = pending.split(b"\n")
+                    for line in lines:
+                        line_callback(line.decode("utf-8", errors="replace"))
         except Exception:
             # A silently failed reader would make a partial response look complete.
             reader_failure.set()
 
     readers = [
-        threading.Thread(target=read_stream, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(
+            target=read_stream, args=("stdout", process.stdout, on_stdout_line), daemon=True
+        ),
         threading.Thread(target=read_stream, args=("stderr", process.stderr), daemon=True),
     ]
     for reader in readers:
@@ -947,122 +1081,254 @@ def _run_process_bounded(args, *, cwd, env, timeout, output_limit, input_bytes=N
     return result
 
 
-def run_max(message: str, session, context=None, max_turns: str = "6",
-            health_context_allowed: bool = False, conversation_id=None) -> dict:
-    if PROMPT_TRANSPORT not in ("stdin", "argv"):
-        raise PromptTransportUnavailable("no usable Hermes prompt transport is configured")
+@dataclass
+class StreamResult:
+    deltas: list
+    reply: "str | None"
+    session_id: "str | None"
+    used_kore: bool
+    error_text: "str | None"
+    # Der rohe result-Record, nur fuer die Fehlerklassifikation in der Bridge.
+    result_record: "dict | None" = field(default=None, repr=False)
+
+
+def _stream_record(line):
+    """Ein stream-json-Record oder None. Alles andere auf stdout wird ignoriert, nie angezeigt."""
+    if isinstance(line, bytes):
+        line = line.decode("utf-8", errors="replace")
+    if not isinstance(line, str):
+        return None
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        record = strict_json_loads(line)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _text_delta(record):
+    if record is None or record.get("type") != "text":
+        return None
+    text = record.get("text")
+    return text if isinstance(text, str) and text else None
+
+
+def parse_stream_json(lines) -> StreamResult:
+    """Nur `text` und `result` tragen nach aussen. `tool_use`/`tool_result` (Ticket im input,
+    bis 5.000 Zeichen Tool-Ausgabe) bleiben in der Bridge; ihre Namen setzen nur used_kore.
+    Die Session steht im result-Record — nach einer Kompression weicht sie vom init-Record ab."""
+    deltas = []
+    used_kore = False
+    result = None
+    for line in lines:
+        record = _stream_record(line)
+        if record is None:
+            continue
+        if (delta := _text_delta(record)) is not None:
+            deltas.append(delta)
+        elif record.get("type") == "tool_use":
+            name = record.get("name")
+            if isinstance(name, str) and any(marker in name for marker in USED_KORE_MARKERS):
+                used_kore = True
+        elif record.get("type") == "result":
+            result = record
+    if result is None:
+        return StreamResult(deltas, None, None, used_kore, None, None)
+    session_id = result.get("session_id")
+    reply = result.get("text")
+    error_text = result.get("error")
+    return StreamResult(
+        deltas=deltas,
+        reply=reply if isinstance(reply, str) else None,
+        session_id=session_id if valid_session_token(session_id) else None,
+        used_kore=used_kore,
+        error_text=error_text if isinstance(error_text, str) else None,
+        result_record=result,
+    )
+
+
+def _result_succeeded(record) -> bool:
+    return isinstance(record, dict) and type(record.get("exit_code")) is int and (
+        record["exit_code"] == 0
+    )
+
+
+def is_unknown_session_error(result_record, stderr: str, resume_id: str) -> bool:
+    """Hermes v0.21.4 kennt die fortzusetzende Session nicht mehr (Gate G1).
+
+    Der result-Record sagt dann nur „credentials or agent init failed" — derselbe Text wie bei
+    gescheiterter Anmeldung. Eindeutig ist allein die stderr-Zeile `Session not found: <id>`
+    (hermes_cli/cli_agent_setup_mixin.py). stderr dient nur dieser Klassifikation; kein Zeichen
+    davon verlaesst die Bridge.
+    """
+    if _result_succeeded(result_record) or not isinstance(stderr, str):
+        return False
+    if not valid_session_token(resume_id):
+        return False
+    expected = f"Session not found: {resume_id}"
+    return any(line.strip() == expected for line in stderr.splitlines())
+
+
+@dataclass
+class TurnOutcome:
+    reply: str
+    used_kore: bool
+    session: "str | None"
+    context: str  # "new" | "continued" | "reset"
+    reset_reason: "str | None"  # "invalid" | "expired"
+    error_code: "str | None"  # None | "timeout" | "output_limit" | "hermes_failed"
+
+
+# Antworttexte fuer Turn-Enden (heutige Saetze); HTTP-Status nur fuer den synchronen Pfad.
+TURN_ERRORS = {
+    "timeout": (504, "Max hat zu lange gebraucht (Timeout)."),
+    "output_limit": (502, "Max hat zu viele Ausgabedaten geliefert."),
+    "hermes_failed": (502, "Max konnte keine sichere Antwort liefern."),
+}
+_NO_REPLY = "(keine Antwort von Max erhalten)"
+
+
+def run_budget_seconds() -> int:
+    return max(1, TIMEOUT - RUN_BUDGET_MARGIN_S)
+
+
+def _run_hermes_once(args, prompt_bytes, on_delta, on_process):
+    """Ein Hermes-Lauf: (Prozess, StreamResult, Fehlercode, bisher gestreamte Deltas)."""
+    streamed = []
+
+    def on_line(line):
+        if (delta := _text_delta(_stream_record(line))) is not None:
+            streamed.append(delta)
+            if on_delta is not None:
+                on_delta(delta)
+
+    try:
+        process = _run_process_bounded(
+            args,
+            cwd=HOME,
+            env=hermes_child_env(),
+            timeout=TIMEOUT,
+            output_limit=MAX_OUTPUT_BYTES,
+            input_bytes=prompt_bytes,
+            on_stdout_line=on_line,
+            on_process=on_process,
+        )
+    except subprocess.TimeoutExpired:
+        return None, None, "timeout", streamed
+    except HermesOutputLimitExceeded:
+        return None, None, "output_limit", streamed
+    except HermesInvocationError:
+        return None, None, "hermes_failed", streamed
+    stream = parse_stream_json(process.stdout.splitlines())
+    if process.returncode != 0 or not _result_succeeded(stream.result_record):
+        return process, stream, "hermes_failed", streamed
+    return process, stream, None, streamed
+
+
+def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
+             origin_ticket, on_delta=None, max_turns: str = "6",
+             on_process=None) -> TurnOutcome:
+    """Ein Coach-Turn ueber stream-json, fuer den synchronen Pfad und (Task 10) fuer Worker.
+
+    - `origin_ticket` erzeugt der Aufrufer (`origin_ticket_for`); nur mit Ticket kommt `kore` in -t.
+    - `on_delta` bekommt die ROHEN text-Deltas (ungeschwaerzt); wer sie ausliefert, schwaerzt das
+      Ticket selbst gepuffert. `reply` im Ergebnis ist geschwaerzt.
+    - `on_process` bekommt jeden gestarteten Hermes-Prozess (bei „expired" zwei).
+    - Laufzeitfehler kommen als `error_code` zurueck, der bisher gestreamte Text als `reply`.
+    """
+    if PROMPT_TRANSPORT != "stdin":
+        raise PromptTransportUnavailable("the turn path only sends prompts over stdin")
     if not isinstance(message, str) or not message.strip():
         raise ValueError("message must be a non-empty string")
-    if type(health_context_allowed) is not bool:
-        raise ValueError("health_context_allowed must be a boolean")
+    if scope not in _SESSION_SCOPES:
+        raise ValueError("scope is invalid")
     if conversation_id is not None and not valid_conversation_id(conversation_id):
         raise ValueError("conversation_id is invalid")
-    if not valid_scoped_session(session):
+    if not valid_scoped_session(session_ref):
         raise ValueError("session is invalid")
-    if isinstance(max_turns, bool):
-        raise ValueError("max_turns must be an integer")
-    try:
-        turn_limit = int(max_turns)
-    except (TypeError, ValueError) as error:
-        raise ValueError("max_turns must be an integer") from error
-    if not 1 <= turn_limit <= 12:
-        raise ValueError("max_turns is outside the bridge limit")
-    scoped_context = context if health_context_allowed else None
-    resume_id = resume_session_id(session, health_context_allowed)
-    origin_ticket = None
-    if health_context_allowed and conversation_id is not None and plan_origin_configured():
-        origin_ticket = create_plan_origin_ticket(conversation_id)
-    args = [HERMES, "-p", PROFILE, "chat", "-Q"]
-    if origin_ticket is None:
-        # Harte Tool-Grenze statt alleiniger Prompt-Regel: Ohne Bridge-signiertes Herkunftsticket
-        # darf auch ein Health-Chat kein Legacy-MCP zum originlosen Plan-Schreiben erreichen.
-        args.append("--safe-mode")
-    prompt = build_prompt(
-        message,
-        scoped_context,
-        health_context_allowed,
-        origin_ticket=origin_ticket,
-    )
+    if origin_ticket is not None and (scope != "health" or not isinstance(origin_ticket, str)):
+        raise ValueError("an origin ticket belongs only to the health scope")
+    turn_limit = str(_turn_limit(max_turns))
+    health = scope == "health"
+    scoped_context = context if health else None
+    prompt = build_prompt(message, scoped_context, health, origin_ticket=origin_ticket)
     # Der tatsaechlich uebergebene Prompt wird bytegenau geprueft. Request- oder Kontextlimits
     # allein reichen nicht, weil JSON-Huelle, Sicherheitsdirektiven und Session gemeinsam in
-    # genau einer Nutzlast landen — auf dem argv-Weg zusaetzlich in genau einem Linux-argv-Element.
+    # genau einer Nutzlast landen.
     validate_prompt_payload(prompt)
-    prompt_bytes = None
-    if PROMPT_TRANSPORT == "argv":
-        args += ["-q", prompt]
+    # `--query-file -` liest stdin vollstaendig; der Gesundheitskontext beruehrt weder die
+    # Prozessliste noch die Platte.
+    prompt_bytes = prompt.encode("utf-8")
+    toolsets = toolsets_for(scope, origin_ticket is not None)
+
+    if session_ref is None:
+        resume_id, context_state, reset_reason = None, "new", None
     else:
-        # `--query-file -` liest stdin vollstaendig und setzt daraus die einzige Query. Der
-        # Gesundheitskontext beruehrt damit weder die Prozessliste noch die Platte.
-        args += ["--query-file", "-"]
-        prompt_bytes = prompt.encode("utf-8")
-    args += ["--max-turns", str(turn_limit)]
-    if resume_id:
-        args += ["--resume", resume_id]
-    p = _run_process_bounded(
-        args,
-        cwd=HOME,
-        env=hermes_child_env(),
-        timeout=TIMEOUT,
-        output_limit=MAX_OUTPUT_BYTES,
-        input_bytes=prompt_bytes,
+        resume_id = verify_session(session_ref, scope, conversation_id)
+        context_state, reset_reason = ("continued", None) if resume_id else ("reset", "invalid")
+
+    def run(resume):
+        return _run_hermes_once(
+            hermes_args(
+                profile=PROFILE,
+                scope=scope,
+                toolsets=toolsets,
+                run_budget_s=run_budget_seconds(),
+                max_turns=turn_limit,
+                resume_id=resume,
+            ),
+            prompt_bytes,
+            on_delta,
+            on_process,
+        )
+
+    process, stream, error_code, streamed = run(resume_id)
+    if (
+        error_code == "hermes_failed"
+        and resume_id is not None
+        and process is not None
+        and is_unknown_session_error(stream.result_record, process.stderr, resume_id)
+    ):
+        # Verfall oder Loeschen: im selben Turn neu beginnen statt 502.
+        context_state, reset_reason = "reset", "expired"
+        process, stream, error_code, streamed = run(None)
+
+    if error_code is not None:
+        return TurnOutcome(
+            reply=redact_plan_origin_ticket("".join(streamed), origin_ticket),
+            used_kore=health and bool(scoped_context),
+            session=None,
+            context=context_state,
+            reset_reason=reset_reason,
+            error_code=error_code,
+        )
+    reply = stream.reply or "".join(stream.deltas) or _NO_REPLY
+    session = None
+    if conversation_id is not None and stream.session_id is not None:
+        try:
+            session = sign_session(scope, conversation_id, stream.session_id)
+        except ValueError:
+            session = None
+    return TurnOutcome(
+        reply=redact_plan_origin_ticket(reply, origin_ticket),
+        used_kore=health and (bool(scoped_context) or stream.used_kore),
+        session=session,
+        context=context_state,
+        reset_reason=reset_reason,
+        error_code=None,
     )
-    if p.returncode != 0:
-        raise HermesInvocationError("Hermes exited unsuccessfully")
-    out = _ANSI.sub("", p.stdout)
-    err = _ANSI.sub("", p.stderr)
-    sess = None
-    for pat in _SESSION_PATTERNS:
-        m = pat.search(out)
-        if m:
-            sess = m.group(1)
-            break
-    reply = clean_reply(out)
-    if not reply:
-        # stderr is diagnostic-only and may contain provider details. It never crosses the API.
-        reply = legacy_box_parse(out) or "(keine Antwort von Max erhalten)"
-    reply = redact_plan_origin_ticket(reply, origin_ticket)
-    used_kore = health_context_allowed and (
-        bool(scoped_context) or any(marker in out + err for marker in USED_KORE_MARKERS)
-    )
-    result = {
-        "reply": reply,
-        "used_kore": used_kore,
-    }
-    if scoped_session := scoped_session_id(sess or resume_id, health_context_allowed):
-        result["session"] = scoped_session
-    return result
 
 
-def clean_reply(out: str) -> str:
-    """-Q-Ausgabe: finale Antwort + Session-Info. Meta-Zeilen raus, Absätze ERHALTEN."""
-    drop = ("session_id:", "Resume this", "Session:", "Duration:", "Messages:", "Query:", "Initializing", "Goodbye")
-    lines = []
-    for ln in out.splitlines():
-        s = ln.strip()
-        if s.startswith(drop):
-            continue
-        if s and re.fullmatch(r"[─╭╰╮╯┊│⚕\s]+", ln):
-            continue
-        lines.append(re.sub(r"^[│┊]\s?", "", ln.rstrip()))
-    return "\n".join(lines).strip()
-
-
-def legacy_box_parse(out: str) -> str:
-    """Fallback: altes Box-Parsing (╭…╰), falls hermes doch dekoriert ausgibt."""
-    reply_lines, in_box = [], False
-    for ln in out.splitlines():
-        s = ln.strip()
-        if s.startswith("╭"):
-            in_box = True
-            continue
-        if s.startswith("╰"):
-            in_box = False
-            continue
-        if in_box:
-            t = s.strip("│ ").strip()
-            if t and not t.startswith("⚕") and not t.startswith("─"):
-                reply_lines.append(t)
-    return "\n".join(reply_lines).strip()
+def turn_outcome_payload(outcome: TurnOutcome) -> dict:
+    """JSON des synchronen Pfads fuer einen erfolgreichen Turn."""
+    payload = {"reply": outcome.reply, "used_kore": outcome.used_kore, "context": outcome.context}
+    if outcome.session is not None:
+        payload["session"] = outcome.session
+    if outcome.reset_reason is not None:
+        payload["reset_reason"] = outcome.reset_reason
+    return payload
 
 
 # ---- Tages-Anpassung ------------------------------------------------------------------------
@@ -1161,9 +1427,14 @@ def adjust_today(data) -> tuple:
     prompt = ADJUST_INSTRUCTION + "\n\nSESSION:\n" + json.dumps(
         session_json, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     )
-    res = run_max(prompt, None, data.get("context"), max_turns="4",
-                  health_context_allowed=True)
-    raw = res["reply"]
+    # Health-Scope wie im Chat: --source kore-health, Werkzeugliste nach toolsets_for. Ohne
+    # Chat-ID gibt es kein Herkunftsticket, also auch kein kore-Toolset.
+    outcome = run_turn(prompt, scope="health", conversation_id=None, session_ref=None,
+                       context=data.get("context"), origin_ticket=None, max_turns="4")
+    if outcome.error_code is not None:
+        status, sentence = TURN_ERRORS[outcome.error_code]
+        return status, {"error": sentence}
+    raw = outcome.reply
     start, end = raw.find("{"), raw.rfind("}")
     if start < 0 or end <= start:
         return 502, {"error": "Max hat kein JSON geliefert"}
@@ -1243,19 +1514,21 @@ class Handler(BaseHTTPRequestHandler):
             if error := chat_contract_error(data):
                 self._send(*error)
                 return
-            msg = data["message"].strip()
-            health_context_allowed = data.get("health_context_allowed") is True
-            self._send(200, run_max(msg,
-                                    data.get("session"),
-                                    data.get("context"),
-                                    health_context_allowed=health_context_allowed,
-                                    conversation_id=data["conversation_id"]))
-        except subprocess.TimeoutExpired:
-            self._send(504, {"error": "Max hat zu lange gebraucht (Timeout)."})
-        except HermesOutputLimitExceeded:
-            self._send(502, {"error": "Max hat zu viele Ausgabedaten geliefert."})
-        except HermesInvocationError:
-            self._send(502, {"error": "Max konnte keine sichere Antwort liefern."})
+            scope = session_scope(data.get("health_context_allowed") is True)
+            conversation_id = data["conversation_id"]
+            outcome = run_turn(
+                data["message"].strip(),
+                scope=scope,
+                conversation_id=conversation_id,
+                session_ref=data.get("session"),
+                context=data.get("context"),
+                origin_ticket=origin_ticket_for(scope, conversation_id),
+            )
+            if outcome.error_code is not None:
+                status, sentence = TURN_ERRORS[outcome.error_code]
+                self._send(status, {"error": sentence})
+                return
+            self._send(200, turn_outcome_payload(outcome))
         except PromptTransportUnavailable:
             self._send(503, {"error": "Hermes-Prompt-Transport ist nicht freigegeben."})
         except HermesPromptTooLarge:

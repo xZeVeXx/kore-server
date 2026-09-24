@@ -1,0 +1,2 @@
+Session not found: 20260924_085115_defa4e
+Use a session ID from a previous CLI run (hermes sessions list).
