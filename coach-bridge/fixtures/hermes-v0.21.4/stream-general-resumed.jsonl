@@ -1,0 +1,3 @@
+{"type": "system", "subtype": "init", "model": "z-ai/glm-5.3-flash", "session_id": "20260924_085115_defa4e", "timestamp": 1790239921710}
+{"type": "text", "text": "OK", "timestamp": 1790239926786}
+{"type": "result", "session_id": "20260924_085115_defa4e", "exit_code": 0, "text": "OK", "tokens": {"input": 12052, "output": 3, "total": 12055, "cache_read": 0, "cache_write": 0}, "duration_ms": 5111, "timestamp": 1790239926822}

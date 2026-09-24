@@ -1,0 +1,16 @@
+# Hermes v0.21.4, Profil <profil>, -t web,skills,memory
+# Quelle: model_tools.get_tool_definitions(enabled_toolsets=["web","skills","memory"]) mit HERMES_HOME=<Profil-Home>, nur lesend (24.09.2026)
+memory
+skill_manage
+skill_view
+skills_list
+web_extract
+web_search
+# Zur Laufzeit zusätzlich (nicht aus get_tool_definitions): das Toolset memory bringt die Werkzeuge des
+# externen Gedächtnis-Providers des Profils mit (agent/agent_init.py, inject_memory_provider_tools).
+# Im Probe-Profil ist memory.provider = honcho; der Probe-Turn nannte:
+# honcho_profile
+# honcho_search
+# honcho_context
+# honcho_reasoning
+# honcho_conclude

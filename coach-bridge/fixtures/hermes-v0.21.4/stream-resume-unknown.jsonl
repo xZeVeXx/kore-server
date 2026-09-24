@@ -1,0 +1,2 @@
+{"type": "system", "subtype": "init", "model": "z-ai/glm-5.3-flash", "session_id": "20260924_085115_defa4e", "timestamp": 1790240208130}
+{"type": "result", "session_id": "20260924_085115_defa4e", "exit_code": 1, "text": "", "tokens": {"input": 0, "output": 0, "total": 0, "cache_read": 0, "cache_write": 0}, "duration_ms": 366, "error": "credentials or agent init failed", "timestamp": 1790240208497}
