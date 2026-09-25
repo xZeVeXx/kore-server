@@ -10,9 +10,7 @@ Netz, unter deinen eigenen Tokens — es gibt keinen Dienst dahinter, den jemand
 Zielgruppe sind Menschen, die zuhause ohnehin einen Agenten betreiben. Wer das nicht tut, braucht
 dieses Repo nicht: Kore funktioniert ohne Server vollständig.
 
-> **Noch nicht öffentlich.** kore-server wird unter MIT veröffentlicht, sobald Marius die Umsetzung
-> freigibt. Bis dahin ist das Repo privat, und Kore blendet Einrichtungsprompt und „Anleitung
-> öffnen" aus.
+Sicherheitslücken bitte privat melden, siehe [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -88,12 +86,33 @@ Kore spricht mit genau **einem** Hermes-Profil, dem Trainings-Bot. Welches das i
   kämen API-Keys, MCP-Server und Erinnerungen deines Hauptagenten mit. Modell und Anbieter-Key
   richtest du selbst im Terminal ein; den Key gibst du nur dort ein.
 - **Ein normaler Hermes-Bot.** Das Profil behält Gedächtnis, Skills, Websuche und eine eigene
-  Persönlichkeit (`SOUL.md`). Den Kore-Abschnitt dafür hängst du aus
-  [`hermes/kore-app-chat-soul.md`](hermes/kore-app-chat-soul.md) an die `SOUL.md` des Profils an.
+  Persönlichkeit (`SOUL.md`). Den Kore-Abschnitt dafür nimmst du aus
+  [`hermes/kore-app-chat-soul.md`](hermes/kore-app-chat-soul.md). Steht in der `SOUL.md` schon ein
+  Abschnitt `## Kore-App-Chat`, **ersetzt** du ihn bis zur nächsten `## `-Überschrift, statt einen
+  zweiten anzuhängen — ein alter Abschnitt mit veraltetem Plan-Schema sorgt sonst dafür, dass die
+  App Vorschläge still verwirft. Nur wenn es keinen gibt, hängst du ihn an. Mit Sicherung, als
+  Nutzer des Agenten:
+
+  ```bash
+  cd ~/.hermes/profiles/<profil> && cp SOUL.md SOUL.md.bak-$(date +%Y%m%d) && python3 - <<'EOF'
+  from pathlib import Path
+  soul, new = Path("SOUL.md"), Path("<repo>/hermes/kore-app-chat-soul.md").read_text()
+  text = soul.read_text()
+  start = text.find("## Kore-App-Chat")
+  if start < 0:
+      soul.write_text(text.rstrip("\n") + "\n\n" + new)
+  else:
+      end = text.find("\n## ", start + 1)
+      soul.write_text(text[:start] + new + ("" if end < 0 else text[end + 1:]))
+  EOF
+  ```
+
+  `scripts/kore-doctor` meldet einen fehlenden oder veralteten Abschnitt.
 - **Kore-Einträge im Profil:** der MCP-Server `kore` und `auxiliary.title_generation.enabled:
   false` — beides steht in [`hermes/kore-coach-profile.example.yaml`](hermes/kore-coach-profile.example.yaml).
 - Nutzt du dasselbe Profil auch außerhalb von Kore (etwa per Telegram), gilt dort seine eigene
-  Konfiguration.
+  Konfiguration — und sein Gedächtnis ist dasselbe. Was das für Health-Chats heißt, steht unter
+  [Was bleibt](#was-bleibt-restrisiken).
 
 > **Was dein Coach sagt, ist keine Kore-Aussage.** Er ist eine fremde KI. Kore hat seine Sätze weder
 > geschrieben noch nachgerechnet und prüft an einem Plan nur Form und Grenzen, nie den Inhalt.
@@ -106,7 +125,7 @@ Kore spricht mit genau **einem** Hermes-Profil, dem Trainings-Bot. Welches das i
 | **Kore** | Version 0.10.0 oder neuer (Einstellungen → ganz unten steht die Version) |
 | **Ein Rechner, der läuft** | NAS, Mini-PC, Homeserver, Raspberry Pi 5 — irgendetwas im selben WLAN wie dein iPhone |
 | **Docker mit Compose** *oder* **Python 3.12** | Compose ist der kürzere Weg; ohne Docker gibt es systemd-Units in [`deploy/`](deploy/) |
-| **Ein Hermes-Agent** | getestet mit **Hermes Agent v0.21.2 (2026.9.11)**. Nur für den Chat nötig — ohne ihn kann dein Coach lesen und Pläne vorschlagen, nur nicht mit dir reden |
+| **Ein Hermes-Agent** | **v0.21.4 oder neuer** (die Bridge braucht `--format stream-json`; getestet mit v0.21.4 und v0.21.5). Nur für den Chat nötig — ohne ihn kann dein Coach lesen und Pläne vorschlagen, nur nicht mit dir reden |
 
 Du brauchst **keine** öffentliche Adresse, **keine** Domain und **kein** HTTPS-Zertifikat. Alles
 bleibt im Heimnetz. Genau das ist der Punkt.
@@ -239,29 +258,93 @@ Was ausdrücklich **nicht** geliefert wird, weil es gar nicht erst auf dem Serve
 
 ### Sicherheit
 
-Die sieben Punkte oben unter [Sicherheitsprinzipien](#sicherheitsprinzipien) sind die vollständige
-Fassung. Die vier, die beim Einrichten am häufigsten schiefgehen:
+Die sieben Punkte oben unter [Sicherheitsprinzipien](#sicherheitsprinzipien) sind die Annahmen des
+Codes. Hier die Praxis: wo der Server stehen darf, wie du Tokens tauschst, was die Bridge darf und
+was trotzdem bleibt. Schwachstellen meldest du privat, siehe [SECURITY.md](SECURITY.md).
+
+#### Nur Heimnetz oder VPN, nie das offene Internet
 
 - **Kein Port-Forward. Niemals.** Was du freigäbst, ist ein Gesundheitsverlauf mit einem einzigen
   Bearer-Token davor. Von unterwegs heran geht über ein VPN (WireGuard, Tailscale) — das ist der
   vorgesehene Weg, nicht die Ausnahme. In Kore trägst du dabei immer die **LAN-Adresse** ein
   (`10.x`, `172.16–31.x`, `192.168.x`): Tailscale nur als Subnet-Router in dein Heimnetz, nicht mit
   einer `100.x`-Adresse oder einem `*.ts.net`-Namen. Die Coach-Bridge nimmt Kore nur unter einer
-  lokalen Adresse an, und die Bridge selbst lauscht nur auf Loopback- oder RFC-1918-Adressen.
-- **Zwei Tokens, und du rotierst sie.** Neuer Wert in `.env`, Dienste neu starten, Wert in Kore und
-  im Agenten-Profil nachziehen. Tu das, wenn du den Agenten wechselst, einen Rechner abgibst oder
-  einen Token irgendwo eingefügt hast, wo er nicht hingehörte — auch in ein Chatfenster.
+  lokalen Adresse an, und die Bridge selbst lauscht nur auf Loopback- oder RFC-1918-Adressen, nie
+  auf `0.0.0.0` oder einem Hostnamen. Ingest und MCP lauschen ohne eigene Einstellung nur auf
+  `127.0.0.1`.
+- **Klartext-HTTP.** Alle drei Dienste sprechen HTTP ohne TLS. Wer in deinem Netz mitlesen kann,
+  sieht Tokens und Inhalte. Deshalb nur in einem Netz, dem du vertraust; Gäste und fremde Geräte
+  gehören in ein eigenes WLAN.
 - **`Origin` bleibt leer.** `KORE_MCP_ALLOWED_ORIGINS` nur füllen, wenn du wirklich eine eigene
   Weboberfläche davorhängst; leer heißt „gar kein Browser".
 - **Tool Poisoning.** In dem Profil, das `kore` sieht, nur Werkzeug-Server, deren Quelle du kennst.
   Ein fremder MCP-Server kann in seiner Werkzeug-*Beschreibung* Anweisungen für deinen Agenten
   verstecken.
+- **Geheimnisse liegen im Klartext.** `.env`, `bridge.env` und die `.env` des Profils: `chmod 600`,
+  dem Dienstnutzer gehörend, nie in ein Backup, das anderswo landet, nie in ein Git-Repo, einen
+  Screenshot oder ein Chatfenster. Die `.gitignore` hält `*.env`, `.env.*`, Datenbanken, `*.bak*`
+  und Schlüsseldateien aus Git, die `.dockerignore` aus dem Docker-Image.
 
-Dazu die **Prozessliste**: Die Bridge reicht den Prompt über stdin weiter
-(`hermes chat --query-file -`), er steht also weder in `/proc/<pid>/cmdline` noch auf der Platte.
-Mit `KORE_HERMES_ALLOW_ARGV_PROMPTS=1` lehnt die Bridge seit 0.10 jeden Coach-Aufruf ab, statt den
-Prompt in die Prozessliste zu legen. Und: `.env` und `bridge.env` sind Klartext — `chmod 600`, dem Dienstnutzer gehörend, nie
-in ein Backup, das anderswo landet.
+#### Tokens tauschen
+
+| Geheimnis | Wo | Wer es sonst noch braucht |
+| --- | --- | --- |
+| `KORE_INGEST_TOKEN` | `.env` des Servers | Kore → Feld „Ingest-Token" |
+| `KORE_MCP_TOKEN` | `.env` des Servers | `.env` des Profils als `MCP_KORE_API_KEY` |
+| `KORE_BRIDGE_TOKEN` | `bridge.env` | Kore → Feld „Coach-Token" |
+| `KORE_PLAN_ORIGIN_SECRET` | `.env` des Servers **und** `bridge.env` (gleicher Wert) | niemand sonst |
+
+Neu erzeugen (`openssl rand -hex 24`, für das Origin-Geheimnis `-hex 32`), eintragen, Dienste neu
+starten (`docker compose up -d`, `systemctl restart kore-coach-bridge`), Gegenstelle nachziehen,
+danach `scripts/kore-doctor`. Tu das, wenn du den Agenten wechselst, einen Rechner abgibst, ein
+Token irgendwo gelandet ist, wo es nicht hingehört, oder du einen Verdacht hast. Ein neues
+`KORE_BRIDGE_TOKEN` macht zusätzlich alle Chat-Referenzen ungültig: Jeder Chat beginnt mit „Kontext
+neu begonnen", die alten Hermes-Sessions verfallen nach 30 Tagen.
+
+#### Was die Bridge darf — und was nicht
+
+| Sie darf | Sie darf nicht |
+| --- | --- |
+| `hermes` für genau das eine Profil aus `KORE_HERMES_PROFILE` starten, als ihr Dienstnutzer, mit dem Prompt über stdin | im App-Chat Terminal, Dateien, Code-Ausführung, Cronjobs, Computer- oder Browser-Steuerung freigeben — die Werkzeuge kommen aus einer festen Liste (`-t`), nicht aus einer Sperrliste |
+| im allgemeinen Chat `web,skills,memory` erlauben, im Health-Chat mit Herkunftsticket zusätzlich `kore` | Dienst-Geheimnisse an Hermes vererben: das Kind bekommt nur `HOME`, `PATH` und sieben Schlüssel wie `LANG`/`TZ` |
+| Sessions der Quellen `kore-general`/`kore-health` lesen, um Titel und Vorgänger zu finden, und sie auf Wunsch oder nach 30 Tagen löschen | Sessions anderer Quellen anfassen, das Gedächtnis oder die Konfiguration des Profils ändern |
+| einen fehlgeschlagenen Turn mit einer Zeile `kore-turn-failed` (Klasse, Code, Exit) ins Journal schreiben | Prompt, Antwort, Token, Health-Werte oder Hermes-stderr ins Journal oder an die App geben |
+| höchstens 2 Turns gleichzeitig ausführen und 64 Antworten bis zu 24 Stunden im Arbeitsspeicher halten | ohne Token, Origin-Geheimnis und Principal starten, auf einer öffentlichen Adresse lauschen oder per `sudo`/setuid mehr Rechte bekommen (`NoNewPrivileges=yes` in der Unit) |
+
+Dazu feste Grenzen: Anfrage höchstens 256 KiB, Prompt 120 KiB, Hermes-Ausgabe 512 KiB, Laufzeit
+150 s, 30 s Socket-Timeout gegen hängende Verbindungen; der Ingest nimmt höchstens 16 MiB an, so viel
+wie Kore selbst für einen Snapshot zulässt. Ingest und Bridge vergleichen das Token zeitkonstant.
+
+#### Was bleibt (Restrisiken)
+
+Kore schickt Health-Kontext nur in Chats mit Health-Freigabe, und die Bridge gibt das kore-MCP nur
+dort frei. Was dein Bot danach damit tut, steuert Kore nicht:
+
+- **Dein Modell-Anbieter sieht alles, was im Prompt steht**, im Health-Chat also den
+  Health-Kontext. Welcher Anbieter das ist, bestimmst du im Profil.
+- **Gedächtnis:** Der Bot kann sich mit `memory` etwas aus einem Health-Chat notieren. Solche
+  Notizen fließen in jede spätere Session des Profils ein, auch in allgemeine App-Chats und in andere
+  Kanäle desselben Profils (etwa Telegram). Löschen und Verfall in Kore erreichen sie nicht; dieses
+  Gedächtnis verwaltest du in Hermes.
+- **Externer Gedächtnis-Anbieter:** Nutzt das Profil einen (etwa Honcho), bringt `memory` dessen
+  Werkzeuge mit, und Turns samt Health-Kontext können dorthin gehen. Prüfen mit
+  `hermes -p <profil> memory status`.
+- **Skills:** `skill_manage` gehört zu `skills`. Der Bot kann damit Skills des Profils anlegen oder
+  ändern — auch, wenn ihn ein Text aus der Websuche dazu verleitet. Ein solcher Skill wirkt in allen
+  Kanälen des Profils weiter. Sieh dir neue oder geänderte Skills an, wenn dir etwas seltsam vorkommt.
+- **Suche in früheren Chats:** Im App-Chat fehlt `session_search`. Andere Kanäle desselben Profils
+  können Kore-Sessions mit ihrer eigenen Suche aber finden, bis sie gelöscht oder verfallen sind.
+  Ein eigenes Profil nur für Kore vermeidet das.
+- **Gestoppte oder verworfene Anfragen:** Ein Stopp beendet Hermes, aber was bis dahin beim
+  Anbieter und in der Session angekommen ist, bleibt dort bis zum Löschen oder Verfall (30 Tage).
+- **Auto-Titel:** Ist `auxiliary.title_generation` an, sieht das Titel-Modell die erste Nachricht
+  samt Health-Kontext; der Titel liegt in der Session. Die Beispiel-Konfiguration schaltet ihn aus.
+- **Plugins, Hooks und `SOUL.md` des Profils** laufen mit (kein `--safe-mode`). Sie sind deine
+  Konfiguration, nicht die des Chats; die Werkzeuge bleiben trotzdem durch die `-t`-Liste begrenzt.
+- **Ein neues Hermes-Werkzeugset** könnte nach einem Update unter einen erlaubten Namen fallen.
+  Nach jedem Hermes-Update `scripts/kore-doctor` laufen lassen: Er meldet jedes Terminal-, Datei-,
+  Code-, Cron-, Computer- oder Browser-Werkzeug in den App-Chat-Listen als Fehler. Dein Agent sollte
+  ohnehin nicht als root, nicht mit `sudo` ohne Passwort und nicht in der `docker`-Gruppe laufen.
 
 ### Ohne eigenen Agenten: Claude Desktop
 
@@ -366,7 +449,7 @@ Unterprozess aufruft (`hermes -p <profil> chat -Q --format stream-json --query-f
 kore-<scope> -t <Werkzeugliste> --run-budget <s> [--resume <id>]`) und deren Antwort als JSON
 zurückgibt. Der Prompt geht über stdin (Sicherheitsprinzip 6), nicht über `-q`.
 
-Sie ist bewusst Hermes-spezifisch. Getestet gegen **Hermes Agent v0.21.4 (2026.9.21)**. Die Bridge
+Sie ist bewusst Hermes-spezifisch. Getestet gegen **Hermes Agent v0.21.4 (2026.9.21)** und v0.21.5. Die Bridge
 liest das stream-json von stdout; Antwort und Session kommen aus dem `result`-Record, nie von stderr.
 Die Fixtures in `coach-bridge/fixtures/hermes-v0.21.4/` stammen aus echten Läufen — nach einem
 Hermes-Update `test_bridge.py` und `test_runner_stream_json.py` laufen lassen.
@@ -376,6 +459,15 @@ cd coach-bridge
 cp bridge.env.example bridge.env && chmod 600 bridge.env   # Werte setzen
 python3 bridge.py                                          # oder: kore-coach-bridge.service
 ```
+
+Die Bridge startet Hermes mit einer minimalen Umgebung: `HOME` = `KORE_HERMES_HOME`, `PATH` =
+`KORE_HERMES_CHILD_PATH` (Standard `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`)
+und nur sieben unkritische Schlüssel wie `LANG` und `TZ`; kein Token und keine Dienst-Variable geht
+an Hermes weiter. Braucht der Modell-Anbieter deines Profils ein **eigenes Programm** — etwa `claude`
+beim Claude-Abo, das meist unter `~/.local/bin` liegt —, trägst du dessen Ordner vorn in
+`KORE_HERMES_CHILD_PATH` ein, z. B. `KORE_HERMES_CHILD_PATH=/home/<nutzer>/.local/bin:/usr/local/bin:/usr/bin:/bin`.
+Sonst scheitert jeder Chat mit `hermes_failed`, obwohl `hermes` in deiner Shell läuft.
+`scripts/kore-doctor` prüft genau das.
 
 Vertrag, falls du eine eigene Bridge für einen anderen Agenten schreiben willst — die App spricht
 nur dieses kleine Protokoll:
@@ -393,8 +485,13 @@ nur dieses kleine Protokoll:
   mehr als zwei gleichzeitig: `429`. Ohne `client_message_id` bleibt `POST /coach` synchron.
 - `GET /coach/turns/{turn_id}/events` → Server-Sent Events mit `id:`; `Last-Event-ID` spielt spätere
   Ereignisse erneut ab, alle 15 s `: keepalive`. Nur Text-Deltas `{"delta": …}`, am Ende
-  `{"done": true, "used_kore": …, "context": …, "session"?: …}` oder `{"error": …, "code": …}`;
-  Werkzeugaufrufe bleiben in der Bridge.
+  `{"done": true, "used_kore": …, "context": …, "session"?: …, "title"?: …}` oder
+  `{"error": …, "code": …}`; Werkzeugaufrufe bleiben in der Bridge. `title` ist der bereinigte
+  Hermes-Titel der Session (einzeilig, höchstens 60 Zeichen, Capability `turn_titles_v1`) und fehlt,
+  wenn das Profil keinen Titel erzeugt.
+- Scheitert ein Turn, schreibt die Bridge genau eine Zeile ins Journal
+  (`journalctl -u kore-coach-bridge | grep kore-turn-failed`, Suche nach der `turn_id`), nur mit
+  Zeit, Turn-ID, Scope, Fehlercode, Klasse und Exit-Code.
 - `GET /coach/turns/{turn_id}` → Stand bzw. Ergebnis; ein fertiger Turn wird mit dieser Antwort gelöscht
   (danach `404 turn_unknown`). `POST /coach/turns/{turn_id}/cancel` beendet Hermes, idempotent.
   Der Puffer liegt nur im Arbeitsspeicher, höchstens 24 Stunden; ein Neustart der Bridge verliert ihn.
@@ -454,10 +551,14 @@ nicht `http://<KORE_BIND_ADDRESS>:8081` ist.
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r server/requirements.txt pytest
-pytest server/tests server/integration_tests coach-bridge scripts
+pytest coach-bridge -q
+pytest scripts -q
+pytest server/tests server/integration_tests -q
 ```
 
-Dieselben Läufe stehen in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Drei getrennte Läufe, genau wie in [`.github/workflows/ci.yml`](.github/workflows/ci.yml): Die
+Server-Tests laden ihre Module mit eigener Umgebung neu und vertragen sich nicht mit den übrigen
+Suiten in einem einzigen `pytest`-Prozess.
 
 ---
 

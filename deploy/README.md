@@ -39,3 +39,11 @@ Die `.env` gehört auf `chmod 600` und dem Dienstnutzer. Sie enthält die beiden
 Tokens und das Origin-Geheimnis im Klartext. Solange einer dieser Werte leer ist oder
 noch mit `change-me` aus der `.env.example` beginnt, starten Ingest und MCP nicht;
 die Meldung im Journal nennt den Schlüssel, nie den Wert.
+
+Alle drei Units setzen `NoNewPrivileges=yes`: Weder die Dienste noch ein von der Bridge
+gestartetes Hermes können per `sudo` oder setuid mehr Rechte bekommen als ihr Dienstnutzer.
+Wer weiter härten will, ergänzt für Ingest und MCP `PrivateTmp=yes`, `ProtectSystem=full` und
+`ProtectHome=yes` (die Datenbank muss dann außerhalb von `/usr`, `/etc` und `/home` liegen, etwa
+unter `/opt/kore-server`). Diese drei brauchen Mount-Namespaces; in einem unprivilegierten
+LXC-Container klappt das nur mit aktivierter Verschachtelung (`nesting`), sonst startet der Dienst
+mit `226/NAMESPACE` nicht.
