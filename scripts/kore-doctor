@@ -13,6 +13,11 @@ Prueft (Spec E S6, Spec C §4.9):
   Bridge gleich.
 - Das Profil aus KORE_HERMES_PROFILE existiert, `hermes -p <Profil> mcp test kore` gelingt;
   `hermes --version` wird ausgegeben.
+- Hermes laeuft dabei mit GENAU dem Kind-Env der Bridge (HOME, PATH aus KORE_HERMES_CHILD_PATH,
+  sonst dem Standard-PATH der Bridge). Der Modell-Anbieter des Profils findet dort seine Programme
+  (z. B. `claude` fuer claude-subscription-directsdk-*) — ohne Modellaufruf, nur `--version` und
+  der PATH-Abgleich.
+- Die SOUL.md des Profils enthaelt hermes/kore-app-chat-soul.md in der aktuellen Fassung.
 
 `--bridge-only` prueft nur Bridge und Hermes (z. B. wenn Ingest/MCP woanders laufen oder die
 Server-.env einem anderen Nutzer gehoert). `--ingest-url` setzt die Ingest-Adresse, wenn sie nicht
@@ -27,6 +32,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -53,6 +59,18 @@ _PLACEHOLDER_KEYS = {
     "server": ("KORE_INGEST_TOKEN", "KORE_MCP_TOKEN", "KORE_PLAN_ORIGIN_SECRET"),
 }
 _TOOLS_DISCOVERED_RE = re.compile(r"Tools discovered: ([0-9]{1,4})")
+SOUL_SECTION = REPO / "hermes" / "kore-app-chat-soul.md"
+# Wie coach-bridge/bridge.py (CHILD_PATH, _SAFE_CHILD_ENV_KEYS); test_kore_doctor.py vergleicht beides.
+DEFAULT_CHILD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_SAFE_CHILD_ENV_KEYS = (
+    "LANG", "LC_ALL", "LC_CTYPE", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR", "SSL_CERT_FILE", "TZ",
+)
+# Modell-Anbieter, die ein lokales Programm starten (Praefix des Anbieternamens → Programm).
+PROVIDER_PROGRAMS = (("claude-subscription", "claude"),)
+# Hermes meldet ein fehlendes Anbieter-Programm beim Start auf stderr, z. B.
+# "Claude Code is not installed (no `claude` on PATH)". Nur der Programmname wird gelesen.
+_MISSING_PROGRAM_RE = re.compile(r"no `([A-Za-z0-9._+-]{1,64})` on PATH")
+_PROVIDER_RE = re.compile(r"[A-Za-z0-9._:/-]{1,80}")
 
 
 def read_env_file(path) -> dict:
@@ -257,31 +275,122 @@ def check_bridge(report: Report, bridge_env: dict, contract: list) -> None:
 
 # ---- Hermes ----------------------------------------------------------------------------------
 
-def _hermes_env(home: str) -> dict:
-    env = {key: value for key, value in os.environ.items() if key in ("PATH", "LANG", "LC_ALL", "TZ")}
-    env["HOME"] = home
-    return env
+def hermes_child_env(bridge_env: dict, parent_env=None) -> dict:
+    """Genau das Env, mit dem die Bridge Hermes startet (bridge.py: hermes_child_env).
+
+    Die Bridge liest ihre Werte aus dem eigenen Prozess-Env, also aus bridge.env und dem, was
+    systemd mitgibt; der Doctor nimmt bridge.env und ersatzweise sein eigenes Env.
+    """
+    source = os.environ if parent_env is None else parent_env
+    child = {
+        "HOME": bridge_env.get("KORE_HERMES_HOME", source.get("HOME", "/home/hermes")),
+        "PATH": bridge_env.get("KORE_HERMES_CHILD_PATH", DEFAULT_CHILD_PATH),
+    }
+    for key in _SAFE_CHILD_ENV_KEYS:
+        value = bridge_env.get(key, source.get(key))
+        if isinstance(value, str) and value:
+            child[key] = value
+    return child
+
+
+def profile_model_provider(config_path: Path):
+    """`model.provider` aus der config.yaml des Profils (nur diese eine Zeile) oder None."""
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    in_model = False
+    for line in lines:
+        if line and not line[0].isspace():
+            in_model = line.split("#", 1)[0].strip() == "model:"
+            continue
+        if in_model:
+            key, sep, value = line.strip().partition(":")
+            if sep and key == "provider":
+                value = value.split("#", 1)[0].strip().strip("\"'")
+                return value if _PROVIDER_RE.fullmatch(value) else None
+    return None
+
+
+def _path_hint(program: str) -> str:
+    found = shutil.which(program)
+    folder = os.path.dirname(found) if found else f"<Ordner mit {program}>"
+    return (f"Ordner von `{program}` vorn in KORE_HERMES_CHILD_PATH in bridge.env eintragen, z. B. "
+            f"KORE_HERMES_CHILD_PATH={folder}:{DEFAULT_CHILD_PATH}, dann die Bridge neu starten.")
+
+
+def check_provider_programs(report: Report, profile_dir: Path, child_env: dict, reported: set) -> None:
+    provider = profile_model_provider(profile_dir / "config.yaml")
+    if provider is None:
+        report.skip("Modell-Anbieter: in config.yaml des Profils nicht lesbar.")
+        return
+    program = next((name for prefix, name in PROVIDER_PROGRAMS if provider.startswith(prefix)), None)
+    if program is None:
+        report.info(f"Modell-Anbieter des Profils: {provider}.")
+    elif shutil.which(program, path=child_env["PATH"]):
+        report.ok(f"Modell-Anbieter {provider}: `{program}` liegt auf dem Kind-PATH der Bridge.")
+    elif program not in reported:
+        report.fail(f"Modell-Anbieter {provider} braucht `{program}`, das auf dem Kind-PATH der "
+                    "Bridge fehlt.", _path_hint(program))
+
+
+def _normalized(text: str) -> str:
+    return " ".join(text.split())
+
+
+def check_soul(report: Report, profile_dir: Path, profile: str) -> None:
+    try:
+        expected = SOUL_SECTION.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        report.skip("SOUL-Abgleich: hermes/kore-app-chat-soul.md liegt nicht neben dem Doctor.")
+        return
+    try:
+        actual = (profile_dir / "SOUL.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        actual = ""
+    if _normalized(expected) in _normalized(actual):
+        report.ok(f"SOUL.md von {profile} enthaelt hermes/kore-app-chat-soul.md in der aktuellen Fassung.")
+    elif "## Kore-App-Chat" in actual:
+        report.fail(f"SOUL.md von {profile} enthaelt einen veralteten Kore-Abschnitt.",
+                    "Abschnitt ab `## Kore-App-Chat` bis zur naechsten `## `-Ueberschrift durch "
+                    "hermes/kore-app-chat-soul.md ersetzen. Sonst schreibt der Coach kore-plan-Bloecke "
+                    "im alten Schema, und die App zeigt keine Vorschlagskarte.")
+    else:
+        report.fail(f"SOUL.md von {profile} hat keinen Kore-Abschnitt.",
+                    f"cat hermes/kore-app-chat-soul.md >> {profile_dir}/SOUL.md")
 
 
 def check_hermes(report: Report, bridge_env: dict) -> None:
     hermes = bridge_env.get("KORE_HERMES_BIN", "")
-    home = bridge_env.get("KORE_HERMES_HOME") or str(Path.home())
+    child_env = hermes_child_env(bridge_env)
+    home = child_env["HOME"]
     profile = bridge_env.get("KORE_HERMES_PROFILE", "")
+    profile_valid = re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}", profile) is not None
     if not hermes or not os.access(hermes, os.X_OK):
         report.fail("KORE_HERMES_BIN zeigt auf keine ausfuehrbare Datei.",
                     "Standard: <HERMES_HOME>/.hermes/hermes-agent/venv/bin/hermes")
         return
+    source = "KORE_HERMES_CHILD_PATH" if "KORE_HERMES_CHILD_PATH" in bridge_env else "Standard der Bridge"
+    report.info(f"Hermes laeuft hier mit dem Kind-Env der Bridge (PATH: {source}).")
     try:
-        version = subprocess.run([hermes, "--version"], capture_output=True, text=True,
-                                 timeout=HERMES_TIMEOUT_S, env=_hermes_env(home), cwd=home)
+        version = subprocess.run([hermes, *(["-p", profile] if profile_valid else []), "--version"],
+                                 capture_output=True, text=True, timeout=HERMES_TIMEOUT_S,
+                                 env=child_env, cwd=home)
     except (OSError, subprocess.TimeoutExpired):
         version = None
+    reported = set()
     if version is None or version.returncode != 0 or not version.stdout.strip():
-        report.fail("hermes --version laeuft nicht.")
+        report.fail("hermes --version laeuft mit dem Kind-Env der Bridge nicht.",
+                    "KORE_HERMES_BIN, KORE_HERMES_HOME und KORE_HERMES_CHILD_PATH in bridge.env pruefen.")
     else:
         report.info(f"Hermes: {version.stdout.strip().splitlines()[0][:120]}")
+    # stderr wird nie ausgegeben; nur der Name eines fehlenden Programms zaehlt.
+    for program in dict.fromkeys(_MISSING_PROGRAM_RE.findall(version.stderr if version else "")):
+        reported.add(program)
+        report.fail(f"Hermes findet mit dem Kind-PATH der Bridge `{program}` nicht "
+                    "(vom Modell-Anbieter des Profils gebraucht).", _path_hint(program))
 
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}", profile):
+    if not profile_valid:
         report.fail("KORE_HERMES_PROFILE fehlt oder ist kein gueltiger Profilname.")
         return
     profile_dir = Path(home) / ".hermes" / ("" if profile == "default" else f"profiles/{profile}")
@@ -291,10 +400,12 @@ def check_hermes(report: Report, bridge_env: dict) -> None:
         report.fail(f"Hermes-Profil {profile} existiert nicht unter {home}/.hermes.",
                     f"{hermes} profile create {profile} (ohne --clone), dann {PROFILE_EXAMPLE} eintragen.")
         return
+    check_provider_programs(report, profile_dir, child_env, reported)
+    check_soul(report, profile_dir, profile)
 
     try:
         test = subprocess.run([hermes, "-p", profile, "mcp", "test", "kore"], capture_output=True,
-                              text=True, timeout=HERMES_TIMEOUT_S, env=_hermes_env(home), cwd=home)
+                              text=True, timeout=HERMES_TIMEOUT_S, env=child_env, cwd=home)
     except (OSError, subprocess.TimeoutExpired):
         test = None
     # Die Ausgabe von `mcp test` wird nie weitergegeben; sie kann Header-Teile enthalten.

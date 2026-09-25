@@ -436,7 +436,11 @@ die Kore ab 0.10 verlangt), `prompt_transport: stdin` und `app_chat_toolsets` oh
 Code-, Cron-, Computer- und Browser-Werkzeuge; `KORE_PLAN_ORIGIN_SECRET` (per Hash),
 `KORE_INSTANCE_ID` und `KORE_PLAN_ORIGIN_PRINCIPAL` sind in Server und Bridge gleich; das Profil aus
 `KORE_HERMES_PROFILE` existiert und `hermes -p <profil> mcp test kore` gelingt (Vorlage:
-[`hermes/kore-coach-profile.example.yaml`](hermes/kore-coach-profile.example.yaml)). Die
+[`hermes/kore-coach-profile.example.yaml`](hermes/kore-coach-profile.example.yaml)). Hermes läuft
+dabei mit genau dem Env, mit dem die Bridge es startet (`KORE_HERMES_CHILD_PATH`); braucht der
+Modell-Anbieter des Profils ein Programm (etwa `claude` beim Claude-Abo), muss es auf diesem PATH
+liegen. Die `SOUL.md` des Profils muss [`hermes/kore-app-chat-soul.md`](hermes/kore-app-chat-soul.md)
+in der aktuellen Fassung enthalten; einen älteren Kore-Abschnitt ersetzt du, statt anzuhängen. Die
 Hermes-Version steht in der Ausgabe. Exit 0 nur ohne jede Abweichung.
 
 `--bridge-only` lässt Ingest, MCP und Server-`.env` weg, etwa wenn sie auf einem anderen Rechner

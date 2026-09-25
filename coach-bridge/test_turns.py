@@ -4,7 +4,9 @@
 Keepalive, Stopp, Idempotenz ueber client_message_id. Hermes ist gestubbt; die HTTP-Tests laufen
 gegen einen echten ThreadingHTTPServer auf 127.0.0.1, damit Streaming und Verbindungsabbruch echt sind.
 """
+import contextlib
 import http.client
+import io
 import json
 import threading
 import time
@@ -22,6 +24,7 @@ from test_runner_stream_json import (
     result_record,
     stream_lines,
 )
+from test_journal_title import journal_lines
 
 THIRD_CONVERSATION = "123e4567-e89b-42d3-a456-426614174888"
 TICKET = "TICKET-" + "a1b2c3d4" * 4
@@ -673,6 +676,92 @@ class TurnEndpointTests(unittest.TestCase):
 
         self.assertEqual((code, payload["status"]), (200, "done"))
         self.assertEqual(fake.terminated, [])
+
+    # ---- Journal und Titel (0.10 Task 24c) -----------------------------------------------------
+
+    def capture_journal(self):
+        stderr = io.StringIO()
+        redirect = contextlib.redirect_stderr(stderr)
+        redirect.__enter__()
+        self.addCleanup(redirect.__exit__, None, None, None)
+        return stderr
+
+    def test_failed_turn_writes_one_journal_line_without_any_content(self):
+        journal = self.capture_journal()
+        self.use_hermes(FakeHermes(
+            before=records(text("Teilantwort"), result_record(
+                "", SESSION_ID, exit_code=1, error="credentials or agent init failed")),
+            block=False, stderr="provider secret: top-secret", returncode=1,
+        ))
+        _, started = self.start(message="Meine geheime Frage")
+        self.wait_finished(started["turn_id"])
+
+        lines = journal_lines(journal.getvalue())
+        self.assertEqual(lines, [(started["turn_id"], "general", "hermes_failed", "hermes_init_failed", "1")])
+        for secret in ("Meine geheime Frage", "Teilantwort", "top-secret", TEST_TOKEN, SESSION_ID):
+            self.assertNotIn(secret, journal.getvalue())
+
+    def test_cancel_is_journaled_as_cancelled(self):
+        journal = self.capture_journal()
+        fake = self.use_hermes(FakeHermes(before=records(text("Bisher"))))
+        _, started = self.start()
+        fake.started.wait(2)
+        self.json_request("POST", f"/coach/turns/{started['turn_id']}/cancel")
+        self.assertEqual(journal_lines(journal.getvalue()),
+                         [(started["turn_id"], "general", "cancelled", "cancelled", "-")])
+
+    def test_a_successful_turn_writes_no_journal_line(self):
+        journal = self.capture_journal()
+        self.use_hermes(FakeHermes(before=records(text("OK"), result_record("OK", SESSION_ID)), block=False))
+        _, started = self.start()
+        self.wait_finished(started["turn_id"])
+        self.assertEqual(journal_lines(journal.getvalue()), [])
+
+    def test_the_synchronous_path_journals_without_a_turn_id(self):
+        journal = self.capture_journal()
+        self.use_hermes(FakeHermes(before=records(result_record(
+            "", SESSION_ID, exit_code=1, error="credentials or agent init failed")),
+            block=False, returncode=1))
+        code, _ = self.json_request("POST", "/coach", {
+            "message": "Hallo", "conversation_id": CONVERSATION, "health_context_allowed": False,
+        })
+        self.assertEqual(code, 502)
+        self.assertEqual(journal_lines(journal.getvalue()),
+                         [("-", "general", "hermes_failed", "hermes_init_failed", "1")])
+
+    def test_a_worker_exception_is_journaled_with_its_type_only(self):
+        journal = self.capture_journal()
+        with patch("bridge.run_turn", side_effect=ValueError("Inhalt, der nie ins Journal darf")):
+            _, started = self.start()
+            self.wait_finished(started["turn_id"])
+        self.assertEqual(journal_lines(journal.getvalue()), [(
+            started["turn_id"], "general", "hermes_failed", "bridge_exception:ValueError", "-",
+        )])
+        self.assertNotIn("Inhalt", journal.getvalue())
+
+    def test_done_event_and_get_carry_the_title_when_hermes_has_one(self):
+        self.use_hermes(FakeHermes(before=records(text("OK"), result_record("OK", SESSION_ID)), block=False))
+        with patch.object(bridge, "lookup_session_title", return_value="Schlaf\tund Training\x07"):
+            _, started = self.start()
+            self.wait_finished(started["turn_id"])
+
+        _, body = self.sse(started["turn_id"])
+        done = self.sse_events(body)[-1][1]
+        _, payload = self.json_request("GET", f"/coach/turns/{started['turn_id']}")
+
+        self.assertEqual(done["title"], "Schlaf und Training")
+        self.assertEqual(payload["title"], "Schlaf und Training")
+
+    def test_without_a_title_done_and_get_have_no_title_key(self):
+        self.use_hermes(FakeHermes(before=records(text("OK"), result_record("OK", SESSION_ID)), block=False))
+        _, started = self.start()
+        self.wait_finished(started["turn_id"])
+
+        _, body = self.sse(started["turn_id"])
+        _, payload = self.json_request("GET", f"/coach/turns/{started['turn_id']}")
+
+        self.assertNotIn("title", self.sse_events(body)[-1][1])
+        self.assertNotIn("title", payload)
 
     # ---- /health -----------------------------------------------------------------------------
 

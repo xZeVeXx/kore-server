@@ -277,6 +277,21 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertIn("kore-plan-Codeblock", prompt)
         self.assertNotIn("origin_ticket=", prompt)
 
+    def test_every_prompt_forbids_announcing_a_card_that_never_comes(self):
+        # Befund 25.09. (Task 24c): Karte angekuendigt, aber kein bzw. ein unvollstaendiger Block.
+        prompts = [
+            bridge.build_prompt("Plan?", None, health_context_allowed=False),
+            bridge.build_prompt("Plan?", {"plans_scope": {"complete": True}}, True),
+            bridge.build_prompt("Plan?", {"plans_scope": {"complete": True}}, True, origin_ticket="tkt.sig"),
+        ]
+        for prompt in prompts:
+            directive = prompt.split("[KORE-PLANVORSCHLAG — BRIDGE-AUTORITATIV]", 1)[1]
+            self.assertIn("Kündige nie eine Karte oder einen Vorschlag an", directive)
+            for field in ("replaces_plan_id", "base_plan_fingerprint", "removed_session_ids",
+                          "removed_exercise_ids", "plans_scope.complete"):
+                self.assertIn(field, directive)
+            self.assertIn("sag das offen und nenne den Grund", directive)
+
     def test_denied_context_is_not_added_to_prompt(self):
         prompt = bridge.build_prompt(
             "Hallo", {"readiness": {"score": 87}}, health_context_allowed=False

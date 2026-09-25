@@ -23,6 +23,8 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 DOCTOR = SCRIPTS / "kore-doctor"
 CONTRACT = SCRIPTS.parent / "contract" / "app-required-capabilities.json"
+SOUL = SCRIPTS.parent / "hermes" / "kore-app-chat-soul.md"
+BRIDGE_DIR = SCRIPTS.parent / "coach-bridge"
 HEX_SECRET = re.compile(r"[0-9a-fA-F]{32,}")
 
 
@@ -67,11 +69,18 @@ class StubServer:
 
 FAKE_HERMES = textwrap.dedent("""\
     #!{python}
-    import json, sys
+    import json, os, shutil, sys
     from pathlib import Path
     config = json.loads((Path(__file__).resolve().parent / "fake-hermes.json").read_text())
     args = sys.argv[1:]
-    if args == ["--version"]:
+    # Wie Hermes v0.21.5 mit dem Anbieter claude-subscription-directsdk-experimental: fehlt das
+    # Programm auf dem PATH des Prozesses, steht beim Start eine Warnung auf stderr.
+    if config.get("needs") and shutil.which(config["needs"]) is None:
+        print("Claude Subscription DirectSDK (Experimental): Claude Code is not installed "
+              "(no `" + config["needs"] + "` on PATH).", file=sys.stderr)
+    with open(Path(__file__).resolve().parent / "fake-hermes-env.json", "w") as handle:
+        json.dump(dict(os.environ), handle)
+    if args in (["--version"], ["-p", config["profile"], "--version"]):
         print("Hermes Agent v0.21.4 (2026.9.21)")
         print("Project: /home/hermes/.hermes/hermes-agent")
         sys.exit(0)
@@ -137,13 +146,26 @@ class DoctorTestCase(unittest.TestCase):
             self.addCleanup(server.close)
 
         self.home = root / "home"
-        (self.home / ".hermes" / "profiles" / "kore-coach").mkdir(parents=True)
+        self.profile_dir = self.home / ".hermes" / "profiles" / "kore-coach"
+        self.profile_dir.mkdir(parents=True)
+        (self.profile_dir / "config.yaml").write_text(
+            "model:\n  default: sonnet\n  provider: claude-subscription-directsdk-experimental\n"
+            "  base_url: ''\nauxiliary:\n  title_generation:\n    provider: auto\n"
+        )
+        (self.profile_dir / "SOUL.md").write_text("## Coach\n\nAllgemeines.\n\n" + SOUL.read_text())
+        # `claude` liegt in einem eigenen Ordner, der nur ueber KORE_HERMES_CHILD_PATH dazukommt.
+        self.claude_dir = root / "claude-bin"
+        self.claude_dir.mkdir()
+        claude = self.claude_dir / "claude"
+        claude.write_text("#!/bin/sh\nexit 0\n")
+        claude.chmod(0o755)
         bin_dir = root / "bin"
         bin_dir.mkdir()
         self.hermes = bin_dir / "hermes"
         self.hermes.write_text(FAKE_HERMES.format(python=sys.executable))
         self.hermes.chmod(0o755)
-        self.hermes_config = {"profile": "kore-coach", "mcp_exit": 0, "leak": self.mcp_token}
+        self.hermes_config = {"profile": "kore-coach", "mcp_exit": 0, "leak": self.mcp_token,
+                              "needs": "claude"}
         self.write_hermes_config()
 
         self.bridge_env_values = {
@@ -152,6 +174,7 @@ class DoctorTestCase(unittest.TestCase):
             "KORE_BRIDGE_PORT": str(self.bridge.port),
             "KORE_HERMES_BIN": str(self.hermes),
             "KORE_HERMES_HOME": str(self.home),
+            "KORE_HERMES_CHILD_PATH": f"{self.claude_dir}:/usr/bin:/bin",
             "KORE_HERMES_PROFILE": "kore-coach",
             "KORE_INSTANCE_ID": "kore",
             "KORE_PLAN_ORIGIN_PRINCIPAL": "kore",
@@ -180,7 +203,7 @@ class DoctorTestCase(unittest.TestCase):
             lines = ["# Beispiel", ""] + [f"{key}={value}" for key, value in values.items()]
             path.write_text("\n".join(lines) + "\n")
 
-    def run_doctor(self, *extra, bridge_only=False, ingest_url=True):
+    def run_doctor(self, *extra, bridge_only=False, ingest_url=True, own_path_prefix=None):
         args = [sys.executable, str(DOCTOR), "--bridge-env", str(self.bridge_env)]
         if bridge_only:
             args.append("--bridge-only")
@@ -191,6 +214,8 @@ class DoctorTestCase(unittest.TestCase):
         args += list(extra)
         env = {key: value for key, value in os.environ.items()
                if not key.lower().endswith("_proxy")}
+        if own_path_prefix is not None:
+            env["PATH"] = f"{own_path_prefix}:{env.get('PATH', '')}"
         process = subprocess.run(args, capture_output=True, text=True, timeout=60, env=env)
         output = process.stdout + process.stderr
         for value in (self.bridge_token, self.ingest_token, self.mcp_token, self.origin_secret):
@@ -280,6 +305,90 @@ class DoctorEndToEndTests(DoctorTestCase):
         self.assertIn("KORE_BRIDGE_TOKEN", output)
 
 
+class DoctorHermesChildEnvTests(DoctorTestCase):
+    """Befund 25.09.: `claude` lag nur auf dem PATH der Shell, nicht auf dem Kind-PATH der Bridge."""
+
+    def hermes_env(self) -> dict:
+        return json.loads((self.hermes.parent / "fake-hermes-env.json").read_text())
+
+    def test_healthy_run_names_the_provider_and_uses_exactly_the_child_env(self):
+        code, output = self.run_doctor(bridge_only=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("claude-subscription-directsdk-experimental", output)
+        env = self.hermes_env()
+        self.assertEqual(env["PATH"], f"{self.claude_dir}:/usr/bin:/bin")
+        self.assertEqual(env["HOME"], str(self.home))
+        self.assertNotIn("KORE_BRIDGE_TOKEN", env)
+        allowed = {"HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "REQUESTS_CA_BUNDLE",
+                   "SSL_CERT_DIR", "SSL_CERT_FILE"}
+        # macOS setzt __CF_USER_TEXT_ENCODING in jedem Prozess selbst.
+        self.assertEqual(set(env) - allowed - {"__CF_USER_TEXT_ENCODING"}, set())
+
+    def test_program_only_on_the_doctors_own_path_is_a_deviation(self):
+        for name, child_path in (("eigener Kind-PATH", "/usr/bin:/bin"), ("Standard der Bridge", None)):
+            with self.subTest(name):
+                self.setUp()
+                if child_path is None:
+                    self.bridge_env_values.pop("KORE_HERMES_CHILD_PATH")
+                else:
+                    self.bridge_env_values["KORE_HERMES_CHILD_PATH"] = child_path
+                self.write_envs()
+
+                code, output = self.run_doctor(bridge_only=True, own_path_prefix=str(self.claude_dir))
+
+                self.assertNotEqual(code, 0, output)
+                self.assertIn("`claude`", output)
+                self.assertIn("KORE_HERMES_CHILD_PATH", output)
+                # Der Hinweis nennt den Ordner, in dem der Doctor `claude` selbst findet.
+                self.assertIn(f"KORE_HERMES_CHILD_PATH={self.claude_dir}:", output)
+
+    def test_missing_program_without_a_hermes_warning_is_found_from_the_config(self):
+        self.hermes_config["needs"] = None
+        self.write_hermes_config()
+        self.bridge_env_values["KORE_HERMES_CHILD_PATH"] = "/usr/bin:/bin"
+        self.write_envs()
+
+        code, output = self.run_doctor(bridge_only=True)
+
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("braucht `claude`", output)
+
+    def test_a_provider_without_local_program_is_only_named(self):
+        (self.profile_dir / "config.yaml").write_text("model:\n  provider: openrouter\n")
+        self.hermes_config["needs"] = None
+        self.write_hermes_config()
+
+        code, output = self.run_doctor(bridge_only=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("Modell-Anbieter des Profils: openrouter", output)
+
+
+class DoctorSoulTests(DoctorTestCase):
+    """Befund 25.09.: Die SOUL.md des Profils trug noch den Kore-Abschnitt vom Juni (kore-plan ohne
+    Plan-ID, Fingerabdruck und Removal-Listen); die App verwarf den Block ohne Karte."""
+
+    def test_an_outdated_kore_section_is_a_deviation(self):
+        (self.profile_dir / "SOUL.md").write_text(
+            "## Coach\n\n## Kore-App-Chat (Coach-Tab) — Formatierung, Daten, Pläne\n\nalt\n")
+        code, output = self.run_doctor(bridge_only=True)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("veralteten Kore-Abschnitt", output)
+
+    def test_a_missing_kore_section_is_a_deviation(self):
+        (self.profile_dir / "SOUL.md").unlink()
+        code, output = self.run_doctor(bridge_only=True)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("keinen Kore-Abschnitt", output)
+
+    def test_rewrapped_whitespace_still_counts_as_current(self):
+        wrapped = " \n".join(SOUL.read_text().split(" "))
+        (self.profile_dir / "SOUL.md").write_text(wrapped)
+        code, output = self.run_doctor(bridge_only=True)
+        self.assertEqual(code, 0, output)
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -314,6 +423,46 @@ class DoctorUnitTests(unittest.TestCase):
             handle.write('# Kommentar\n\nA=1\nB="zwei"\nC=\'drei\'\nexport D=4\nkaputt\n')
         self.addCleanup(os.unlink, handle.name)
         self.assertEqual(self.doctor.read_env_file(handle.name), {"A": "1", "B": "zwei", "C": "drei", "D": "4"})
+
+    def test_child_env_matches_the_bridge_exactly(self):
+        parent = {"HOME": "/home/andere", "PATH": "/eigener/pfad", "LANG": "de_DE.UTF-8",
+                  "TZ": "Europe/Berlin", "KORE_BRIDGE_TOKEN": "t" * 48, "SECRET_SOMETHING": "x"}
+        cases = {
+            "leer": {},
+            "alles gesetzt": {"KORE_HERMES_HOME": "/srv/hermes", "KORE_HERMES_CHILD_PATH": "/a:/b",
+                              "LC_ALL": "C.UTF-8"},
+            "leerer Kind-PATH": {"KORE_HERMES_CHILD_PATH": ""},
+        }
+        for name, bridge_env in cases.items():
+            with self.subTest(name):
+                process = subprocess.run(
+                    [sys.executable, "-c",
+                     "import json, bridge; print(json.dumps(bridge.hermes_child_env()))"],
+                    capture_output=True, text=True, timeout=30, cwd=BRIDGE_DIR,
+                    env={**parent, **bridge_env, "PYTHONPATH": str(BRIDGE_DIR)},
+                )
+                self.assertEqual(process.returncode, 0, process.stderr)
+                expected = json.loads(process.stdout)
+                self.assertEqual(self.doctor.hermes_child_env(bridge_env, parent), expected)
+
+    def test_provider_is_read_only_from_the_model_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            config.write_text("auxiliary:\n  provider: auto\nmodel:\n  default: sonnet\n"
+                              "  provider: 'claude-subscription-directsdk-experimental' # Abo\n"
+                              "toolsets:\n  - web\n")
+            self.assertEqual(self.doctor.profile_model_provider(config),
+                             "claude-subscription-directsdk-experimental")
+            config.write_text("model:\n  provider: $(rm -rf /)\n")
+            self.assertIsNone(self.doctor.profile_model_provider(config))
+            self.assertIsNone(self.doctor.profile_model_provider(Path(tmp) / "fehlt.yaml"))
+
+    def test_without_the_soul_file_next_to_the_doctor_the_check_is_skipped(self):
+        report = self.doctor.Report(secrets_to_hide=(), stream=open(os.devnull, "w"))
+        self.addCleanup(report.stream.close)
+        self.doctor.SOUL_SECTION = Path("/nirgends/kore-app-chat-soul.md")
+        self.doctor.check_soul(report, Path("/nirgends"), "max")
+        self.assertEqual(report.failures, 0)
 
     def test_report_hides_known_secrets_even_in_unexpected_text(self):
         secret = secrets.token_hex(24)
