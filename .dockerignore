@@ -1,0 +1,21 @@
+# Only server/ is copied into the image; keep secrets, data and local state out of the build
+# context entirely, so a stray file cannot end up in an image layer.
+.git
+.github
+.venv
+venv
+coach-bridge
+scripts
+hermes
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/*.env
+**/.env
+**/.env.*
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.bak*
+**/*.pem
+**/*.key

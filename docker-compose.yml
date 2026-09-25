@@ -18,6 +18,11 @@ services:
     volumes:
       - kore-db:/data
     restart: unless-stopped
+    # Kein Prozess im Container braucht Root-Rechte oder Capabilities (Port > 1024, Nutzer kore).
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   mcp:
     build: .
@@ -33,6 +38,11 @@ services:
     volumes:
       - kore-db:/data
     restart: unless-stopped
+    # Kein Prozess im Container braucht Root-Rechte oder Capabilities (Port > 1024, Nutzer kore).
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
   kore-db:

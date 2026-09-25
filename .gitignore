@@ -6,11 +6,23 @@ venv/
 
 # Never commit real configuration or data.
 *.env
-!*.env.example
 .env
+.env.*
+!.env.example
+!*.env.example
 *.db
 *.db-shm
 *.db-wal
+
+# Never commit backups (they carry the real values of what they back up) or key material.
+*.bak*
+*.orig
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
 
 .DS_Store
 ._*

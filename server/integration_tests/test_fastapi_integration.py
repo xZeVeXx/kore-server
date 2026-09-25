@@ -747,6 +747,26 @@ class FastAPIIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(accepted.status_code, 200, accepted.text)
 
+    def test_non_ascii_authorization_is_a_plain_401_not_a_server_error(self) -> None:
+        # Header kommen als latin-1 an; ein str-Vergleich mit Nicht-ASCII warf in compare_digest.
+        for value in (b"Bearer \xe9", b"Bearer " + self.token.encode()[:-1] + b"\xff"):
+            with self.subTest(value=value):
+                response = self.client.get("/plan/pending", headers={"Authorization": value})
+                self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            self.client.get("/plan/pending", headers=self.authorization()).status_code, 200
+        )
+
+    def test_oversized_body_is_rejected_before_parsing_or_token_check(self) -> None:
+        from body_limit import MAX_BODY_BYTES
+
+        response = self.client.post(
+            "/ingest",
+            content=b"{" + b" " * MAX_BODY_BYTES + b"}",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 413)
+
 
 if __name__ == "__main__":
     unittest.main()

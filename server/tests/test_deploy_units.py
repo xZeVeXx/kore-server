@@ -42,6 +42,11 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("--host ${KORE_BIND_ADDRESS}", service["ExecStart"])
         self.assertEqual(service.get("Environment"), "KORE_BIND_ADDRESS=127.0.0.1")
 
+    def test_no_unit_allows_privilege_escalation(self) -> None:
+        for path in UNITS:
+            with self.subTest(unit=path.name):
+                self.assertEqual(_read_unit(path)["Service"].get("NoNewPrivileges"), "yes")
+
     def test_bridge_unit_names_no_concrete_user_home_or_profile(self) -> None:
         text = UNITS[2].read_text(encoding="utf-8")
         for concrete in ("User=hermes", "/home/hermes", "profile max"):

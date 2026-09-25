@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 import store
+from body_limit import BodyLimitMiddleware
 from models import PlanAck, Snapshot
 from origin_guard import OriginGuardMiddleware, allowed_origins_from_env
 from origin_ticket import policy_from_env
@@ -29,6 +30,8 @@ ORIGIN_POLICY = policy_from_env()
 ALLOWED_ORIGINS = allowed_origins_from_env()
 
 app = FastAPI(title="Kore Ingest API", version="1.0")
+# Inside the origin guard: caps the body before FastAPI buffers it for parsing and the token check.
+app.add_middleware(BodyLimitMiddleware)
 # Outermost layer on purpose: a rejected origin must not reach routing, validation or the
 # token check, so a probing page learns nothing from response shape or timing. /health is
 # covered too — it is the cheapest existence oracle on the box.
@@ -51,8 +54,10 @@ def startup() -> None:
 
 
 def require_ingest_token(authorization: str = Header(default="")) -> None:
-    expected = f"Bearer {INGEST_TOKEN}"
-    if not hmac.compare_digest(authorization, expected):
+    # Bytes, not str: compare_digest raises on non-ASCII str, and headers arrive as latin-1.
+    supplied = authorization.encode("utf-8", "surrogatepass")
+    expected = f"Bearer {INGEST_TOKEN}".encode("utf-8")
+    if not hmac.compare_digest(supplied, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized",

@@ -11,6 +11,8 @@ EnvironmentFile=/opt/kore-server/.env
 ExecStart=/opt/kore-server/.venv/bin/python mcp_server.py
 Restart=on-failure
 RestartSec=5
+# Keine Rechteausweitung per sudo/setuid. Weitere Haertung siehe deploy/README.md.
+NoNewPrivileges=yes
 User=kore
 
 [Install]

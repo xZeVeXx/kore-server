@@ -386,7 +386,9 @@ def authorization_status(authorization_header) -> int:
         return 503
     if not isinstance(authorization_header, str):
         return 401
-    return 200 if hmac.compare_digest(authorization_header, f"Bearer {TOKEN}") else 401
+    # Bytes, not str: compare_digest raises on non-ASCII str, and headers arrive as latin-1.
+    supplied = authorization_header.encode("utf-8", "surrogatepass")
+    return 200 if hmac.compare_digest(supplied, f"Bearer {TOKEN}".encode("utf-8")) else 401
 
 
 def validated_bind_host(value) -> str:
@@ -2308,6 +2310,11 @@ def adjust_today(data) -> tuple:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Socket-Timeout je Lese-/Schreibvorgang: Eine Verbindung, die nichts (mehr) schickt, belegt
+    # keinen Thread auf Dauer. Laenger als der SSE-Keepalive (15 s); das Warten auf Hermes beruehrt
+    # den Socket nicht und ist davon nicht betroffen.
+    timeout = 30
+
     def _send(self, code: int, obj: dict):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)

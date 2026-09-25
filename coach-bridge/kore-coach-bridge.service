@@ -17,6 +17,9 @@ EnvironmentFile=<HERMES_HOME>/kore-coach-bridge/bridge.env
 ExecStart=/usr/bin/python3 <HERMES_HOME>/kore-coach-bridge/bridge.py
 Restart=on-failure
 RestartSec=5
+# Keine Rechteausweitung: weder die Bridge noch ein von ihr gestartetes Hermes kann per
+# sudo/setuid mehr Rechte bekommen, als <HERMES_USER> hat.
+NoNewPrivileges=yes
 
 [Install]
 WantedBy=multi-user.target
