@@ -179,7 +179,7 @@ die `config.yaml` **genau des Profils** eintragen, das dein Coach benutzt
 ```yaml
 mcp_servers:
   kore:
-    url: http://10.0.0.10:8000/mcp/      # der abschließende Schrägstrich gehört dazu
+    url: http://127.0.0.1:8000/mcp/      # MCP lauscht nur lokal (Hermes auf demselben Host); der abschließende Schrägstrich gehört dazu
     headers:
       Authorization: Bearer ${MCP_KORE_API_KEY}
     enabled: true
