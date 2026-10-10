@@ -15,7 +15,7 @@ description = "Platzhalter 'change-me…' aus den Vorlagen und Tests"
 condition = "AND"
 paths = [
   '''(^|/)[^/]*\.env\.example$''',
-  '''^README\.md$''',
+  '''^README(\.de)?\.md$''',
   '''^deploy/README\.md$''',
   '''(^|/)test_[^/]*\.py$''',
 ]

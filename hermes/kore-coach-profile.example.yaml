@@ -22,6 +22,12 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_KORE_API_KEY}
     enabled: true
+    # Nur Werkzeuge: keine MCP-Ressourcen/-Prompts; der Server darf das Modell des Profils nicht per Sampling aufrufen.
+    tools:
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
 
 auxiliary:
   # Hermes wuerde sonst jeder Kore-Sitzung per zusaetzlichem Modellaufruf einen
