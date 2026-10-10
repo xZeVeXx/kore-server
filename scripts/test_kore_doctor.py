@@ -628,6 +628,15 @@ class PairLinkTests(PairingCliCase):
         self.assertEqual(query["bridge"], ["https://172.16.4.2:8443"])
         self.assertEqual(query["ingest"], ["http://10.1.2.3:9999"])
 
+    def test_tailnet_https_urls_pass_through_to_the_link(self):
+        code, out, err = self.run_cli("pair", "--bridge-url", "https://my-host.tail1234.ts.net:8443",
+                                      "--ingest-url", "https://my-host.tail1234.ts.net",
+                                      "--state-dir", str(self.state_dir))
+        self.assertEqual(code, 0, err)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        self.assertEqual(query["bridge"], ["https://my-host.tail1234.ts.net:8443"])
+        self.assertEqual(query["ingest"], ["https://my-host.tail1234.ts.net"])
+
     def test_flags_work_without_any_env_file(self):
         code, out, err = self.run_cli("pair", "--bridge-url", "http://10.0.0.10:8090",
                                       "--ingest-url", "http://10.0.0.10:8081",
@@ -645,7 +654,8 @@ class PairLinkTests(PairingCliCase):
                "http://172.32.0.1:8090", "http://100.128.0.1:8090", "http://100.63.255.1:8090",
                "ftp://10.0.0.10", "javascript:alert(1)", "http://user:pw@10.0.0.10:8090",
                "http://10.0.0.10:8090/path", "http://10.0.0.10:8090/?x=1", "http://10.0.0.10:99999",
-               "", "10.0.0.10:8090"]
+               "", "10.0.0.10:8090", "http://my-host.tail1234.ts.net:8090", "https://example.com:8443",
+               "https://my-host.tail1234.ts.net.example.com"]
         for url in bad:
             for flag in ("--bridge-url", "--ingest-url"):
                 with self.subTest(url=url, flag=flag):
@@ -859,6 +869,23 @@ class PairingContractUnitTests(unittest.TestCase):
         self.assertEqual(accept("http://100.127.255.255"), "http://100.127.255.255")
         self.assertEqual(accept("http://100.64.0.10"), "http://100.64.0.10")
         self.assertEqual(self.doctor.validated_link_url("http://10.0.0.10", "x", 8081), "http://10.0.0.10:8081")
+
+    def test_tailnet_https_hostnames_are_accepted(self):
+        accept = lambda url, *a: self.doctor.validated_link_url(url, "x", *a)  # noqa: E731
+        self.assertEqual(accept("https://my-host.tail1234.ts.net"), "https://my-host.tail1234.ts.net")
+        self.assertEqual(accept("https://my-host.tail1234.ts.net:8443/"), "https://my-host.tail1234.ts.net:8443")
+        self.assertEqual(accept("HTTPS://My-Host.Tail1234.TS.net", 443), "https://my-host.tail1234.ts.net:443")
+
+    def test_other_hostnames_and_http_on_names_are_rejected(self):
+        for url in ("http://my-host.tail1234.ts.net", "https://example.com", "https://ts.net",
+                    "https://evil-ts.net", "https://my-host.tail1234.ts.net.example.com",
+                    "https://my-host.tail1234.ts.net.", "https://-bad.tail1234.ts.net",
+                    "https://user:pw@my-host.tail1234.ts.net", "https://my-host.tail1234.ts.net/path",
+                    "https://my-host.tail1234.ts.net?x=1", "https://localhost", "https://8.8.8.8",
+                    "https://127.0.0.1", "http://[::1]", "ftp://my-host.tail1234.ts.net", "my-host.tail1234.ts.net"):
+            with self.subTest(url=url):
+                with self.assertRaises(self.doctor.PairingError):
+                    self.doctor.validated_link_url(url, "x")
 
     def test_state_dir_resolution_order(self):
         resolve = self.doctor.resolve_state_dir

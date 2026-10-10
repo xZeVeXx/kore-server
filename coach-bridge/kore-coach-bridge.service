@@ -1,8 +1,14 @@
-# Beispiel-Unit. Vor dem Kopieren nach /etc/systemd/system/ ersetzen:
-#   <HERMES_USER>  der Linux-Nutzer, unter dem dein Hermes-Agent laeuft
-#                  (die Bridge muss dessen ~/.hermes lesen und `hermes` starten duerfen)
-#   <HERMES_HOME>  dessen Home-Verzeichnis, z. B. /home/<HERMES_USER>
+# Gehaertete Beispiel-Unit. Vor dem Kopieren nach /etc/systemd/system/ ersetzen:
+#   <USER>   der Linux-Nutzer, unter dem dein Hermes-Agent laeuft
+#            (die Bridge muss dessen ~/.hermes lesen und `hermes` starten duerfen)
+#   <GROUP>  dessen Gruppe; dieselbe Gruppe steht als KORE_STATE_GID in der .env
+#   <HOME>   dessen Home-Verzeichnis, z. B. /home/<USER>
+# bridge.py laeuft aus dem Repo-Checkout (<HOME>/kore-server); pairing.py liegt daneben.
 # Das Hermes-Profil steht nicht hier, sondern als KORE_HERMES_PROFILE in bridge.env.
+# Zustandsordner: Die Bridge SCHREIBT dort die Kopplung. Er muss unter ReadWritePaths stehen
+# (systemd expandiert keine Variablen in ReadWritePaths): Liegt er anderswo, setze
+# KORE_STATE_DIR in bridge.env und .env auf diesen Pfad und trage denselben Pfad unten ein.
+# Sonst meldet die Bridge "Device pairing unavailable" und beantwortet /pair mit 401.
 [Unit]
 Description=Kore Coach Bridge (App -> Hermes-Profil aus KORE_HERMES_PROFILE -> kore MCP)
 Wants=network-online.target
@@ -10,16 +16,25 @@ After=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
-User=<HERMES_USER>
-WorkingDirectory=<HERMES_HOME>
-Environment=HOME=<HERMES_HOME>
-EnvironmentFile=<HERMES_HOME>/kore-coach-bridge/bridge.env
-ExecStart=/usr/bin/python3 <HERMES_HOME>/kore-coach-bridge/bridge.py
+User=<USER>
+Group=<GROUP>
+WorkingDirectory=<HOME>
+Environment=HOME=<HOME>
+EnvironmentFile=<HOME>/kore-coach-bridge/bridge.env
+ExecStart=/usr/bin/python3 <HOME>/kore-server/coach-bridge/bridge.py
 Restart=on-failure
 RestartSec=5
+UMask=0077
 # Keine Rechteausweitung: weder die Bridge noch ein von ihr gestartetes Hermes kann per
-# sudo/setuid mehr Rechte bekommen, als <HERMES_USER> hat.
+# sudo/setuid mehr Rechte bekommen, als <USER> hat.
 NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=<HOME>/.hermes <HOME>/kore-server/state -<HOME>/.cache
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target

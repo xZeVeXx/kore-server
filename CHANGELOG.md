@@ -38,7 +38,10 @@ First public release.
 - `hermes/kore-app-chat-soul.md` is neutral and adds a note that pairing is the bridge's business.
   `kore-doctor` reports an outdated Kore section in a profile's `SOUL.md`: replace it as the README
   describes.
-- The hardened systemd unit in the README needs the state directory in `ReadWritePaths`.
+- `coach-bridge/kore-coach-bridge.service` is now the hardened unit from the README (runs `bridge.py`
+  from the repository checkout, `ProtectSystem=strict`, state directory in `ReadWritePaths`).
+- `kore-doctor pair` also accepts `https://<name>.ts.net[:port]` (Tailscale serve); other host names,
+  public addresses and loopback are still refused, plain `http` only for private or VPN IPv4 addresses.
 
 ### Upgrading from 0.10
 

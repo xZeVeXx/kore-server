@@ -50,9 +50,30 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_bridge_unit_names_no_concrete_user_home_or_profile(self) -> None:
         text = UNITS[2].read_text(encoding="utf-8")
-        for pattern in (r"^User=(?!<)\S+", r"/home/(?!<)\w+"):
+        for pattern in (r"^User=(?!<)\S+", r"^Group=(?!<)\S+", r"/home/(?!<)\w+"):
             with self.subTest(pattern=pattern):
                 self.assertIsNone(re.search(pattern, text, re.MULTILINE))
+
+    def test_bridge_unit_is_hardened_and_may_write_the_pairing_state(self) -> None:
+        service = _read_unit(UNITS[2])["Service"]
+        self.assertTrue(service["ExecStart"].endswith("<HOME>/kore-server/coach-bridge/bridge.py"))
+        self.assertEqual(service.get("EnvironmentFile"), "<HOME>/kore-coach-bridge/bridge.env")
+        for key, value in (("ProtectSystem", "strict"), ("PrivateTmp", "yes"), ("UMask", "0077")):
+            with self.subTest(key=key):
+                self.assertEqual(service.get(key), value)
+        writable = service["ReadWritePaths"].split()
+        for path in ("<HOME>/.hermes", "<HOME>/kore-server/state", "-<HOME>/.cache"):
+            with self.subTest(path=path):
+                self.assertIn(path, writable)
+
+    def test_readme_documents_the_unit_that_ships_in_the_repo(self) -> None:
+        directives = {line for line in UNITS[2].read_text(encoding="utf-8").splitlines()
+                      if re.match(r"^[A-Za-z]+=", line)}
+        for name in ("README.md", "README.de.md"):
+            text = (REPO_ROOT / name).read_text(encoding="utf-8")
+            for line in directives:
+                with self.subTest(readme=name, directive=line):
+                    self.assertIn(line, text)
 
 
 if __name__ == "__main__":

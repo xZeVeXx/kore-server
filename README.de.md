@@ -245,17 +245,19 @@ Bearbeite `bridge.env` (nur absolute Pfade; systemd expandiert weder `$HOME` noc
 | `KORE_PLAN_ORIGIN_SECRET` | derselbe Wert wie in der `.env` des Servers |
 
 `KORE_HERMES_ALLOW_ARGV_PROMPTS` setzt du nie. Dann installierst du den Dienst als
-`/etc/systemd/system/kore-coach-bridge.service` (`<USER>` und `<HOME>` ersetzen):
+`/etc/systemd/system/kore-coach-bridge.service` (`<USER>`, `<GROUP>` (dessen Gruppe, die aus `KORE_STATE_GID`) und `<HOME>` ersetzen; dieselbe Unit liegt als
+`coach-bridge/kore-coach-bridge.service` im Repo):
 
 ```ini
 [Unit]
-Description=Kore Coach Bridge
+Description=Kore Coach Bridge (App -> Hermes-Profil aus KORE_HERMES_PROFILE -> kore MCP)
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
 User=<USER>
+Group=<GROUP>
 WorkingDirectory=<HOME>
 Environment=HOME=<HOME>
 EnvironmentFile=<HOME>/kore-coach-bridge/bridge.env
@@ -285,9 +287,9 @@ Danach:
 sudo systemctl daemon-reload && sudo systemctl enable --now kore-coach-bridge
 ```
 
-(`coach-bridge/kore-coach-bridge.service` ist eine minimale Beispiel-Unit, die eine *Kopie* von
-`bridge.py` außerhalb des Repos startet; nutzt du sie, kopier `pairing.py` daneben und trag
-`KORE_STATE_DIR` in `bridge.env` und `.env` auf denselben absoluten Pfad ein.) Ist eine Firewall wie
+(Liegt dein Zustandsordner nicht unter `<HOME>/kore-server/state`, setze `KORE_STATE_DIR` in
+`bridge.env` und `.env` auf denselben absoluten Pfad und nimm diesen Pfad in `ReadWritePaths`; systemd
+expandiert dort keine Variablen.) Ist eine Firewall wie
 `ufw` aktiv, gib nur Port 8090 für dein lokales Subnetz frei. Docker umgeht `ufw` für seine eigenen
 Ports, und der MCP-Port ist ohnehin lokal.
 
@@ -333,8 +335,9 @@ Wie es funktioniert und was es zusichert:
 
 Nützliche Optionen: `--name "Mein iPhone"` benennt das Gerät, das als Nächstes koppelt;
 `--bridge-url` und `--ingest-url` setzen die Adressen, falls sie sich nicht aus `bridge.env` und
-`.env` ableiten lassen. Akzeptiert werden nur private (10/8, 172.16/12, 192.168/16) und VPN-Adressen
-(100.64/10) in IPv4, nie Loopback, Hostnamen oder öffentliche Adressen.
+`.env` ableiten lassen. Akzeptiert werden private (10/8, 172.16/12, 192.168/16) und VPN-Adressen
+(100.64/10) in IPv4 sowie `https://<name>.ts.net` (Tailscale serve, siehe VPN-Abschnitt), nie Loopback,
+andere Hostnamen oder öffentliche Adressen.
 
 **Geräte verwalten:**
 
@@ -421,9 +424,10 @@ sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090    # Bridge
 
 Die Flags deiner Version zeigt `tailscale serve --help`; HTTPS-Zertifikate müssen in der
 Admin-Konsole aktiviert sein. Kore verbindet sich dann mit `https://<rechner>.<tailnet>.ts.net` und
-`https://<rechner>.<tailnet>.ts.net:8443`. `kore-doctor pair` akzeptiert nur IP-Adressen, in diesem
-Aufbau nimmst du also den Experten-Weg mit den statischen Tokens. Der Hinweis zu den
-Zertifikats-Logs oben gilt auch hier.
+`https://<rechner>.<tailnet>.ts.net:8443`. `kore-doctor pair` akzeptiert diese Namen ebenfalls
+(`--bridge-url https://<rechner>.<tailnet>.ts.net:8443 --ingest-url https://<rechner>.<tailnet>.ts.net`),
+aber nur mit `https://`; jeden anderen Hostnamen lehnt es ab. Der Hinweis zu den Zertifikats-Logs
+oben gilt auch hier.
 
 ## Sicherheit
 
@@ -585,7 +589,7 @@ Kore nennt unter Experimentelle Funktionen den nächsten Schritt. Die Bridge pr�
 | Journal: `Device pairing unavailable: …` | Der Zustandsordner fehlt, oder die Bridge kann nicht hineinschreiben. | `kore-doctor init-state`, dann die Besitzer prüfen. Mit der gehärteten Unit muss `<HOME>/kore-server/state` in `ReadWritePaths` stehen. |
 | `docker compose up` bricht mit „set KORE_STATE_GID …“ ab | In der `.env` fehlt `KORE_STATE_GID`. | `kore-doctor init-state` ausführen und die ausgegebene Zeile in die `.env` übernehmen. |
 | Gekoppelt, aber die Ingest-API antwortet 401 | Der Ingest kann `devices.json` nicht lesen: Die Gruppe passt nicht. | `kore-doctor` hat einen Check „Zustandsordner“; `KORE_STATE_GID` auf die Gruppe des Ordners setzen und `docker compose up -d --force-recreate` ausführen. |
-| `kore-doctor pair` lehnt eine Adresse ab | Akzeptiert werden nur private oder VPN-Adressen in IPv4, nicht `127.0.0.1`, Hostnamen oder öffentliche Adressen. | `KORE_BRIDGE_BIND_HOST` und `KORE_BIND_ADDRESS` auf die Adresse setzen, die dein iPhone benutzt, oder `--bridge-url` und `--ingest-url` übergeben. |
+| `kore-doctor pair` lehnt eine Adresse ab | Akzeptiert werden private oder VPN-Adressen in IPv4 und `https://<name>.ts.net`, nicht `127.0.0.1`, andere Hostnamen, `http` auf einem Namen oder öffentliche Adressen. | `KORE_BRIDGE_BIND_HOST` und `KORE_BIND_ADDRESS` auf die Adresse setzen, die dein iPhone benutzt, oder `--bridge-url` und `--ingest-url` übergeben. |
 | „Die Bridge hat unvollständig geantwortet.“ | Es kam eine Antwort, aber keine lesbare. | Zeigt die Adresse wirklich auf die Bridge (Port 8090) und nicht auf einen anderen Dienst? Dann `journalctl -u kore-coach-bridge`. |
 | „Achtung: Deine Bridge übergibt Prompts über die Kommandozeile. Entferne KORE_HERMES_ALLOW_ARGV_PROMPTS aus bridge.env.“ | Die Bridge ist bereit, reicht den Prompt aber über `argv` weiter (Prinzip 6). | Die Zeile aus `bridge.env` löschen und die Bridge neu starten. |
 | „Der Server hat mit Fehler 500 geantwortet.“ | Etwas im Server selbst. | `docker compose logs -f ingest`; die Statuszahl ist das, womit du im Log suchst. |
