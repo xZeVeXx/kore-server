@@ -16,12 +16,28 @@ i.e. `./state` next to `docker-compose.yml`, which mounts the same directory rea
 ingest container at `/state`. If the bridge runs from a copy outside the repository, set
 `KORE_STATE_DIR` to the same absolute path in `bridge.env` and in `.env`.
 
-Directory mode `0700`, files `0600`, every write atomic (temporary file + `rename`). Writers (bridge,
-CLI) serialise on an exclusive lock on `.lock` in the same directory. The ingest API only reads.
+Permissions: directory `0750`, `devices.json` `0640`, `pairing.json`, `server_id` and `.lock` `0600`.
+Owner and group are those of the process that creates the files (the bridge user or the CLI run
+as that user); nothing is ever `chown`ed. Every write is atomic (temporary file + `rename`, final
+mode set before the rename). Writers (bridge, CLI) serialise on an exclusive lock on `.lock` in
+the same directory. The ingest API only reads.
+
+The ingest process runs as a different user (Docker: uid 10001 without capabilities; systemd:
+`User=kore`) and reaches `devices.json` only through the group. `devices.json` holds nothing but
+SHA-256 hashes of 256-bit random tokens, which cannot be used as tokens; the one-time code hash
+(`pairing.json`) and the server id stay private to the bridge user.
+
+- Docker Compose: `KORE_STATE_GID` in `.env` is the gid of the bridge user (`id -g`);
+  `docker-compose.yml` adds it to the ingest container with `group_add`. Compose refuses to start
+  without it. The directory must exist **before** `docker compose up`, otherwise Docker creates it
+  as root: `scripts/kore-doctor init-state` creates it (`0750`, with `server_id`) and prints the gid.
+- systemd: put `User=kore` into the bridge user's group (`usermod -aG <group> kore`).
+- `scripts/kore-doctor` checks that the directory exists with these modes and that
+  `KORE_STATE_GID` is the directory's group.
 
 | File | Content |
 |---|---|
-| `pairing.json` | `{"code_sha256": "<hex>", "expires_at": <unix>, "attempts": <int>}` — at most one open code |
+| `pairing.json` | `{"code_sha256": "<hex>", "expires_at": <unix>, "attempts": <int>}` — at most one open code; optional `"device_name"`: label chosen by the operator (`kore-doctor pair --name`), used instead of the name the app sends |
 | `devices.json` | `{"devices": [{"id": "<8 hex>", "name": "<str ≤ 40>", "token_sha256": "<hex>", "created_at": <unix>, "last_seen": <unix\|null>}]}` |
 | `server_id` | 8 hex characters, created once at random (the app shows "Server a1b2c3d4") |
 

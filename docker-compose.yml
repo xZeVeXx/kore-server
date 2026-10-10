@@ -9,7 +9,10 @@
 # forward these ports in your router.
 #
 # KORE_STATE_DIR is a host directory with the device-pairing state; the ingest
-# container reads it read-only at /state.
+# container reads it read-only at /state. The directory belongs to the user of the
+# coach bridge (mode 0750, devices.json 0640); the ingest process (uid 10001) reads it
+# through that user's group, KORE_STATE_GID. Create the directory first:
+# `scripts/kore-doctor init-state` prints the gid for .env.
 
 services:
   ingest:
@@ -25,6 +28,8 @@ services:
     volumes:
       - kore-db:/data
       - ${KORE_STATE_DIR:-./state}:/state:ro
+    # Supplementary group only: the process stays uid 10001 and gains no capability.
+    group_add: ["${KORE_STATE_GID:?set KORE_STATE_GID to the gid of the bridge user (scripts/kore-doctor init-state)}"]
     restart: unless-stopped
     # No process in the container needs root or capabilities (port > 1024, user kore).
     security_opt:

@@ -238,22 +238,93 @@ class DeviceNameTests(unittest.TestCase):
                 self.assertEqual(pairing.sanitize_device_name(raw), expected)
 
 
+class OperatorLabelTests(StoreCase):
+    def test_operator_name_wins_over_the_apps_and_is_cleaned(self):
+        code = self.store.create_code(now=T0, device_name="  Wohnzimmer\x07 iPad ")["code"]
+        self.assertEqual(json.loads((self.state_dir / "pairing.json").read_text())["device_name"],
+                         "Wohnzimmer iPad")
+        result = self.store.redeem(code, "iPhone", "10.0.0.10", now=T0)
+        self.assertEqual(self.store.list_devices()[0]["name"], "Wohnzimmer iPad")
+        self.assertEqual(self.store.list_devices()[0]["id"], result["device_id"])
+
+    def test_blank_operator_name_changes_nothing(self):
+        code = self.store.create_code(now=T0, device_name="   ")["code"]
+        self.assertNotIn("device_name", json.loads((self.state_dir / "pairing.json").read_text()))
+        self.store.redeem(code, "iPhone", "10.0.0.10", now=T0)
+        self.assertEqual(self.store.list_devices()[0]["name"], "iPhone")
+
+
 class PermissionTests(StoreCase):
     def mode(self, path):
         return stat.S_IMODE(os.stat(path).st_mode)
 
-    def test_dir_0700_and_files_0600(self):
+    def group_can_read(self, path):
+        """Mode-bit simulation of an ingest process that is only in the state group."""
+        path = Path(path)
+        dir_ok = self.mode(path.parent) & stat.S_IXGRP
+        return bool(dir_ok and self.mode(path) & stat.S_IRGRP)
+
+    def other_can_access(self, path):
+        path = Path(path)
+        return bool(self.mode(path.parent) & stat.S_IXOTH or self.mode(path) & 0o007)
+
+    def assert_layout(self):
+        self.assertEqual(self.mode(self.state_dir), 0o750)
+        self.assertEqual(self.mode(self.state_dir / "devices.json"), 0o640)
+        for name in ("pairing.json", "server_id", ".lock"):
+            with self.subTest(name=name):
+                self.assertEqual(self.mode(self.state_dir / name), 0o600)
+        self.assertEqual(self.mode(self.state_dir / "devices.json") & 0o007, 0)
+        self.assertFalse(self.other_can_access(self.state_dir / "devices.json"))
+        self.assertTrue(self.group_can_read(self.state_dir / "devices.json"))
+        for name in ("pairing.json", "server_id"):
+            self.assertFalse(self.group_can_read(self.state_dir / name))
+        leftovers = [p.name for p in self.state_dir.iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_dir_0750_devices_0640_others_0600(self):
         old = os.umask(0o022)
         try:
             self.pair()
         finally:
             os.umask(old)
-        self.assertEqual(self.mode(self.state_dir), 0o700)
-        for name in ("pairing.json", "devices.json", "server_id"):
-            with self.subTest(name=name):
-                self.assertEqual(self.mode(self.state_dir / name), 0o600)
-        leftovers = [p.name for p in self.state_dir.iterdir() if p.name.endswith(".tmp")]
-        self.assertEqual(leftovers, [])
+        self.assert_layout()
+
+    def test_modes_do_not_depend_on_the_umask(self):
+        for umask in (0o000, 0o077):
+            with self.subTest(umask=oct(umask)):
+                self._tmp.cleanup()
+                self.setUp()
+                old = os.umask(umask)
+                try:
+                    self.pair()
+                finally:
+                    os.umask(old)
+                self.assert_layout()
+
+    def test_modes_survive_every_later_write(self):
+        code, result = self.pair()
+        # last_seen update, a second code, a second device, then revoke: all atomic rewrites.
+        self.store.touch(result["device_id"], now=T0 + 120)
+        self.assert_layout()
+        self.pair(name="iPad", now=T0 + 130)
+        self.assert_layout()
+        self.assertTrue(self.store.revoke(result["device_id"]))
+        self.assert_layout()
+        self.assertEqual(len(self.store.list_devices()), 1)
+
+    def test_failed_redeem_keeps_modes(self):
+        self.new_code()
+        with self.assertRaises(pairing.PairingFailed):
+            self.store.redeem("WRONG", "iPhone", "10.0.0.10", now=T0)
+        self.assertEqual(self.mode(self.state_dir / "pairing.json"), 0o600)
+
+    def test_new_state_dir_group_is_the_creating_processes_group(self):
+        self.new_code()
+        info = os.stat(self.state_dir)
+        self.assertEqual(info.st_uid, os.geteuid())
+        # No chown anywhere: the group is whatever the creating process (the bridge user) gets.
+        self.assertIn(info.st_gid, [os.getegid(), os.stat(self._tmp.name).st_gid])
 
     def test_unavailable_when_dir_missing_or_not_writable(self):
         self.assertIsNotNone(self.store.unavailable_reason())

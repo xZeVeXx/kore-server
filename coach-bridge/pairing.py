@@ -7,18 +7,22 @@ exchanged for a device token (256 bit). The token leaves the server exactly once
 State lives in `KORE_STATE_DIR` (default: `state/` in the repository root, next to
 `docker-compose.yml`, which mounts the same directory read-only into the ingest container):
 
-    pairing.json  {"code_sha256": "<hex>", "expires_at": <unix>, "attempts": <int>}  (one open code)
+    pairing.json  {"code_sha256": "<hex>", "expires_at": <unix>, "attempts": <int>[, "device_name": "<str>"]}
+                  (one open code; device_name is the operator's label from `kore-doctor pair --name`)
     devices.json  {"devices": [{"id", "name", "token_sha256", "created_at", "last_seen"}]}
     server_id     8 hex characters, created once
 
-Directory 0700, files 0600, every write atomic (temp file + os.replace). Writers (bridge, CLI)
+Directory 0750, devices.json 0640 (only SHA-256 hashes of 256-bit tokens), every other file 0600,
+every write atomic (temp file + os.replace, mode set before the rename). The group is the group
+of the creating process (the bridge user); the ingest container joins it via `group_add`
+(KORE_STATE_GID) and so reads devices.json without any chown. Writers (bridge, CLI)
 serialise on an flock'ed `.lock` file in the same directory, so a revoke from the CLI cannot be
 undone by a concurrent last_seen update in the bridge.
 
 For the CLI (`kore-doctor pair/devices/revoke`):
 
     store = PairingStore(state_dir_from_env())
-    created = store.create_code()      # {"code", "expires_at", "server_id"}; creates the dir if needed
+    created = store.create_code()      # (optional device_name="...") {"code", "expires_at", "server_id"}; creates the dir if needed
     store.list_devices()               # without token hashes
     store.revoke(device_id)            # True if a device was removed
 
@@ -41,6 +45,12 @@ PAIRING_FILE = "pairing.json"
 DEVICES_FILE = "devices.json"
 SERVER_ID_FILE = "server_id"
 LOCK_FILE = ".lock"
+
+STATE_DIR_MODE = 0o750
+# Everything is private to the bridge user except the device list, which the ingest reads through
+# the group. The list holds only hashes of 256-bit random tokens; they cannot be used as tokens.
+FILE_MODES = {DEVICES_FILE: 0o640}
+PRIVATE_FILE_MODE = 0o600
 
 CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"  # RFC 4648 Base32, no padding
 CODE_LENGTH = 20  # 100 bit
@@ -122,8 +132,8 @@ class PairingStore:
 
     def _ensure_dir(self) -> None:
         if not os.path.isdir(self.state_dir):
-            os.mkdir(self.state_dir, 0o700)
-            os.chmod(self.state_dir, 0o700)
+            os.mkdir(self.state_dir, STATE_DIR_MODE)
+            os.chmod(self.state_dir, STATE_DIR_MODE)  # independent of the umask
 
     @contextmanager
     def _locked(self):
@@ -143,14 +153,15 @@ class PairingStore:
             return default
 
     def _write_text(self, name: str, text: str) -> None:
+        mode = FILE_MODES.get(name, PRIVATE_FILE_MODE)
         tmp = self._path(f".{name}.{secrets.token_hex(4)}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_FILE_MODE)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.chmod(tmp, 0o600)
+            os.chmod(tmp, mode)  # the temp file is private until it has its final mode
             os.replace(tmp, self._path(name))
         finally:
             if os.path.exists(tmp):
@@ -184,19 +195,26 @@ class PairingStore:
         with self._locked():
             return self._server_id_locked()
 
-    def create_code(self, now=None) -> dict:
-        """Replace any open code with a fresh one. The plain code is only in the return value."""
+    def create_code(self, now=None, device_name=None) -> dict:
+        """Replace any open code with a fresh one. The plain code is only in the return value.
+
+        `device_name` is an operator label: the device paired with this code gets exactly that
+        name instead of the one the app sends.
+        """
         now = time.time() if now is None else now
         self._ensure_dir()
         code = _new_code()
         expires_at = int(now) + CODE_TTL_S
         with self._locked():
             sid = self._server_id_locked()
-            self._write_json(PAIRING_FILE, {
+            pending = {
                 "code_sha256": hash_secret(code),
                 "expires_at": expires_at,
                 "attempts": 0,
-            })
+            }
+            if device_name is not None and device_name.strip():
+                pending["device_name"] = sanitize_device_name(device_name)
+            self._write_json(PAIRING_FILE, pending)
         log.info("pairing: new one-time code, valid until %s", expires_at)
         return {"code": code, "expires_at": expires_at, "server_id": sid}
 
@@ -241,6 +259,9 @@ class PairingStore:
             matches = hmac.compare_digest(supplied, expected.encode("utf-8", "surrogatepass"))
             if attempts != 0 or now >= expires_at or not matches:
                 raise PairingFailed()
+            label = pending.get("device_name")
+            if isinstance(label, str) and label:
+                name = sanitize_device_name(label)
             devices = self._devices_locked()
             taken = {d.get("id") for d in devices if isinstance(d, dict)}
             device_id = secrets.token_hex(4)

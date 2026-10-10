@@ -45,6 +45,14 @@ class DeviceTokenTests(unittest.TestCase):
     def test_missing_file_means_no_devices(self) -> None:
         self.assertIsNone(self.tokens.device_for_token(TOKEN_A))
 
+    def test_group_readable_layout_is_read(self) -> None:
+        # The bridge user owns the state; the ingest process only has the group (0750 dir, 0640 file).
+        os.chmod(self.state_dir, 0o750)
+        self.write(("0000000a", TOKEN_A))
+        os.chmod(self.state_dir / "devices.json", 0o640)
+        self.assertEqual(self.tokens.device_for_token(TOKEN_A), "0000000a")
+        self.assertEqual(os.stat(self.state_dir / "devices.json").st_mode & 0o007, 0)
+
     def test_known_tokens_map_to_their_device(self) -> None:
         self.write(("0000000a", TOKEN_A), ("0000000b", TOKEN_B))
         self.assertEqual(self.tokens.device_for_token(TOKEN_A), "0000000a")

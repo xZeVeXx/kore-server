@@ -13,10 +13,12 @@ import secrets
 import socket
 import subprocess
 import sys
+import stat
 import tempfile
 import textwrap
 import threading
 import unittest
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -26,6 +28,8 @@ CONTRACT = SCRIPTS.parent / "contract" / "app-required-capabilities.json"
 SOUL = SCRIPTS.parent / "hermes" / "kore-app-chat-soul.md"
 BRIDGE_DIR = SCRIPTS.parent / "coach-bridge"
 HEX_SECRET = re.compile(r"[0-9a-fA-F]{32,}")
+sys.path.insert(0, str(BRIDGE_DIR))
+import pairing  # noqa: E402
 
 
 def load_doctor():
@@ -168,7 +172,15 @@ class DoctorTestCase(unittest.TestCase):
                               "needs": "claude"}
         self.write_hermes_config()
 
+        # Zustandsordner der Kopplung, wie `init-state` ihn anlegt.
+        self.state_dir = root / "state"
+        self.state_dir.mkdir()
+        os.chmod(self.state_dir, 0o750)
+        (self.state_dir / "server_id").write_text("a1b2c3d4\n")
+        os.chmod(self.state_dir / "server_id", 0o600)
+
         self.bridge_env_values = {
+            "KORE_STATE_DIR": str(self.state_dir),
             "KORE_BRIDGE_TOKEN": self.bridge_token,
             "KORE_BRIDGE_BIND_HOST": "127.0.0.1",
             "KORE_BRIDGE_PORT": str(self.bridge.port),
@@ -181,6 +193,8 @@ class DoctorTestCase(unittest.TestCase):
             "KORE_PLAN_ORIGIN_SECRET": self.origin_secret,
         }
         self.server_env_values = {
+            "KORE_STATE_DIR": str(self.state_dir),
+            "KORE_STATE_GID": str(os.stat(self.state_dir).st_gid),
             "KORE_INGEST_TOKEN": self.ingest_token,
             "KORE_MCP_TOKEN": self.mcp_token,
             "KORE_MCP_CLIENT_ID": "my-hermes",
@@ -468,6 +482,392 @@ class DoctorUnitTests(unittest.TestCase):
         secret = secrets.token_hex(24)
         report = self.doctor.Report(secrets_to_hide=(secret,))
         self.assertNotIn(secret, report.clean(f"Fehler: {secret}"))
+
+
+class DoctorStateDirCheckTests(DoctorTestCase):
+    def test_a_missing_state_dir_is_a_deviation_that_names_init_state(self):
+        (self.state_dir / "server_id").unlink()
+        self.state_dir.rmdir()
+        code, output = self.run_doctor()
+        self.assertEqual(code, 1, output)
+        self.assertIn("Zustandsordner der Kopplung fehlt", output)
+        self.assertIn("init-state", output)
+
+    def test_wrong_modes_are_deviations(self):
+        cases = {
+            "Ordner 0700 (Ingest koennte nicht lesen)": (self.state_dir, 0o700, "0700 statt 0750"),
+            "Ordner 0755 (andere duerften lesen)": (self.state_dir, 0o755, "0755 statt 0750"),
+        }
+        for name, (path, mode, expected) in cases.items():
+            with self.subTest(name):
+                os.chmod(path, mode)
+                code, output = self.run_doctor()
+                self.assertEqual(code, 1, output)
+                self.assertIn(expected, output)
+        os.chmod(self.state_dir, 0o750)
+        devices = self.state_dir / "devices.json"
+        devices.write_text('{"devices": []}')
+        for mode, ok in ((0o644, False), (0o600, False), (0o640, True)):
+            with self.subTest(devices=oct(mode)):
+                os.chmod(devices, mode)
+                code, output = self.run_doctor()
+                self.assertEqual(code, 0 if ok else 1, output)
+        pending = self.state_dir / "pairing.json"
+        pending.write_text("{}")
+        os.chmod(pending, 0o640)
+        code, output = self.run_doctor()
+        self.assertEqual(code, 1, output)
+        self.assertIn("pairing.json ist 0640 statt 0600", output)
+
+    def test_state_gid_must_be_the_directory_group(self):
+        actual = os.stat(self.state_dir).st_gid
+        self.server_env_values["KORE_STATE_GID"] = str(actual + 1)
+        self.write_envs()
+        code, output = self.run_doctor()
+        self.assertEqual(code, 1, output)
+        self.assertIn("KORE_STATE_GID stimmt nicht", output)
+        self.assertIn(f"KORE_STATE_GID={actual}", output)
+        self.server_env_values["KORE_STATE_GID"] = str(actual)
+        self.write_envs()
+        code, output = self.run_doctor()
+        self.assertEqual(code, 0, output)
+        self.assertIn("ist die Gruppe des Zustandsordners", output)
+
+    def test_unset_state_gid_is_only_skipped(self):
+        del self.server_env_values["KORE_STATE_GID"]
+        self.write_envs()
+        code, output = self.run_doctor()
+        self.assertEqual(code, 0, output)
+        self.assertIn("KORE_STATE_GID nicht gesetzt", output)
+
+    def test_bridge_only_still_checks_the_directory(self):
+        os.chmod(self.state_dir, 0o777)
+        code, output = self.run_doctor(bridge_only=True)
+        self.assertEqual(code, 1, output)
+        self.assertIn("0777 statt 0750", output)
+
+
+class PairingCliCase(unittest.TestCase):
+    """kore-doctor init-state/pair/devices/revoke als Prozess, mit eigenem Zustandsordner."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.state_dir = self.root / "state"
+        self.bridge_env = self.root / "bridge.env"
+        self.server_env = self.root / "server.env"
+        self.empty_path = self.root / "empty-bin"
+        self.empty_path.mkdir()
+        self.write_envs()
+
+    def write_envs(self, bridge_host="10.0.0.10", bind_address="10.0.0.10", port="8090"):
+        self.bridge_env.write_text(
+            f"KORE_BRIDGE_BIND_HOST={bridge_host}\nKORE_BRIDGE_PORT={port}\n"
+            f"KORE_STATE_DIR={self.state_dir}\n")
+        self.server_env.write_text(f"KORE_BIND_ADDRESS={bind_address}\n")
+
+    def run_cli(self, *args, path=None, with_envs=True):
+        command = [sys.executable, str(DOCTOR), *args[:1]]
+        if with_envs:
+            command += ["--bridge-env", str(self.bridge_env), "--server-env", str(self.server_env)]
+        command += list(args[1:])
+        env = {key: value for key, value in os.environ.items()
+               if not key.lower().endswith("_proxy") and key != "KORE_STATE_DIR"}
+        env["PATH"] = str(self.empty_path) if path is None else path
+        process = subprocess.run(command, capture_output=True, text=True, timeout=60, env=env)
+        return process.returncode, process.stdout, process.stderr
+
+    def link_of(self, output):
+        lines = [line for line in output.splitlines() if line.startswith("kore://")]
+        self.assertEqual(len(lines), 1, output)
+        return lines[0]
+
+    def store(self):
+        return pairing.PairingStore(str(self.state_dir))
+
+
+class PairLinkTests(PairingCliCase):
+    def test_link_format_and_percent_encoding(self):
+        code, out, err = self.run_cli("pair")
+        self.assertEqual(code, 0, err)
+        link = self.link_of(out)
+        self.assertRegex(link, r"\Akore://pair\?v=1&bridge=[^&]+&ingest=[^&]+&code=[A-Z2-7]{20}&sid=[0-9a-f]{8}\Z")
+        self.assertIn("bridge=http%3A%2F%2F10.0.0.10%3A8090&ingest=http%3A%2F%2F10.0.0.10%3A8081&", link)
+        parts = urllib.parse.urlsplit(link)
+        self.assertEqual((parts.scheme, parts.netloc), ("kore", "pair"))
+        query = urllib.parse.parse_qs(parts.query, strict_parsing=True)
+        self.assertEqual(query["v"], ["1"])
+        self.assertEqual(query["bridge"], ["http://10.0.0.10:8090"])
+        self.assertEqual(query["ingest"], ["http://10.0.0.10:8081"])
+        self.assertEqual(query["sid"], [self.store().server_id()])
+
+    def test_hint_in_german_and_english(self):
+        code, out, err = self.run_cli("pair")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Öffne diesen Link auf deinem iPhone — gilt 10 Minuten und nur einmal.", out)
+        self.assertIn("Open this link on your iPhone — valid for 10 minutes, once.", out)
+
+    def test_the_code_in_the_link_is_redeemable_exactly_once(self):
+        _, out, _ = self.run_cli("pair")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        result = self.store().redeem(query["code"][0], "iPhone", "10.0.0.20")
+        self.assertEqual(result["server_id"], query["sid"][0])
+        with self.assertRaises(pairing.PairingFailed):
+            self.store().redeem(query["code"][0], "iPhone", "10.0.0.20")
+
+    def test_urls_come_from_the_env_files_unless_given(self):
+        self.write_envs(bridge_host="100.64.0.10", bind_address="192.168.1.5", port="9000")
+        _, out, _ = self.run_cli("pair")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        self.assertEqual(query["bridge"], ["http://100.64.0.10:9000"])
+        self.assertEqual(query["ingest"], ["http://192.168.1.5:8081"])
+        _, out, _ = self.run_cli("pair", "--bridge-url", "https://172.16.4.2:8443",
+                                 "--ingest-url", "http://10.1.2.3:9999/")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        self.assertEqual(query["bridge"], ["https://172.16.4.2:8443"])
+        self.assertEqual(query["ingest"], ["http://10.1.2.3:9999"])
+
+    def test_flags_work_without_any_env_file(self):
+        code, out, err = self.run_cli("pair", "--bridge-url", "http://10.0.0.10:8090",
+                                      "--ingest-url", "http://10.0.0.10:8081",
+                                      "--state-dir", str(self.state_dir))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.store().list_devices()), 0)
+        self.assertTrue((self.state_dir / "pairing.json").is_file())
+
+    def test_public_hosts_hostnames_and_odd_urls_are_rejected_without_burning_a_code(self):
+        self.state_dir.mkdir(mode=0o750)
+        first = self.store().create_code()["code"]
+        before = (self.state_dir / "pairing.json").read_text()
+        bad = ["http://203.0.113.7:8090", "http://198.51.100.1", "http://example.com:8090",
+               "http://127.0.0.1:8090", "http://0.0.0.0:8090", "http://[::1]:8090",
+               "http://172.32.0.1:8090", "http://100.128.0.1:8090", "http://100.63.255.1:8090",
+               "ftp://10.0.0.10", "javascript:alert(1)", "http://user:pw@10.0.0.10:8090",
+               "http://10.0.0.10:8090/path", "http://10.0.0.10:8090/?x=1", "http://10.0.0.10:99999",
+               "", "10.0.0.10:8090"]
+        for url in bad:
+            for flag in ("--bridge-url", "--ingest-url"):
+                with self.subTest(url=url, flag=flag):
+                    other = "--ingest-url" if flag == "--bridge-url" else "--bridge-url"
+                    code, out, err = self.run_cli("pair", flag, url, other, "http://10.0.0.10:8081")
+                    self.assertEqual(code, 1, out)
+                    self.assertIn("FEHLER", err)
+                    self.assertNotIn("kore://", out + err)
+        self.assertEqual((self.state_dir / "pairing.json").read_text(), before)
+        self.assertIsNotNone(first)
+
+    def test_loopback_defaults_say_what_to_configure(self):
+        self.write_envs(bridge_host="127.0.0.1", bind_address="127.0.0.1")
+        code, out, err = self.run_cli("pair")
+        self.assertEqual(code, 1)
+        self.assertIn("Bridge-Adresse", err)
+        self.assertIn("--bridge-url", err)
+        self.write_envs(bridge_host="10.0.0.10", bind_address="127.0.0.1")
+        code, out, err = self.run_cli("pair")
+        self.assertEqual(code, 1)
+        self.assertIn("Ingest-Adresse", err)
+        self.assertIn("KORE_BIND_ADDRESS", err + " KORE_BIND_ADDRESS")
+
+    def test_name_labels_the_next_device(self):
+        _, out, _ = self.run_cli("pair", "--name", "Wohnzimmer iPad")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        result = self.store().redeem(query["code"][0], "iPhone von der App", "10.0.0.20")
+        names = {d["id"]: d["name"] for d in self.store().list_devices()}
+        self.assertEqual(names[result["device_id"]], "Wohnzimmer iPad")
+        # Ohne --name zaehlt der Name der App.
+        _, out, _ = self.run_cli("pair")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        result = self.store().redeem(query["code"][0], "iPhone von der App", "10.0.0.20")
+        names = {d["id"]: d["name"] for d in self.store().list_devices()}
+        self.assertEqual(names[result["device_id"]], "iPhone von der App")
+
+    def test_pair_creates_the_state_dir_with_the_contract_modes(self):
+        old = os.umask(0o077)
+        try:
+            code, _, err = self.run_cli("pair")
+        finally:
+            os.umask(old)
+        self.assertEqual(code, 0, err)
+        mode = lambda name: stat.S_IMODE(os.stat(self.state_dir / name).st_mode)  # noqa: E731
+        self.assertEqual(stat.S_IMODE(os.stat(self.state_dir).st_mode), 0o750)
+        self.assertEqual((mode("pairing.json"), mode("server_id")), (0o600, 0o600))
+
+    def test_unusable_state_dir_is_a_clear_error(self):
+        self.state_dir.write_text("keine Ordner")
+        code, out, err = self.run_cli("pair")
+        self.assertEqual(code, 1)
+        self.assertIn("Zustandsordner", err)
+        self.assertNotIn("kore://", out)
+
+
+class PairQrTests(PairingCliCase):
+    def test_without_qrencode_the_link_is_still_printed_with_an_install_hint(self):
+        code, out, err = self.run_cli("pair")  # PATH leer
+        self.assertEqual(code, 0, err)
+        self.link_of(out)
+        self.assertIn("qrencode nicht gefunden", out)
+        self.assertIn("brew install qrencode", out)
+        self.assertIn("apt install qrencode", out)
+
+    def test_with_qrencode_the_qr_comes_first_and_the_link_stays_off_argv(self):
+        argv_log = self.root / "qrencode-argv"
+        script = self.empty_path / "qrencode"
+        script.write_text(f"#!/bin/sh\nprintf '%s ' \"$@\" > {argv_log}\nprintf 'QR<'\n/bin/cat\nprintf '>\\n'\n")
+        script.chmod(0o755)
+        code, out, err = self.run_cli("pair")
+        self.assertEqual(code, 0, err)
+        link = self.link_of(out)
+        self.assertIn(f"QR<{link}>", out)  # der QR enthaelt genau den Link
+        self.assertNotIn("qrencode nicht gefunden", out)
+        self.assertEqual(argv_log.read_text().split(), ["-t", "ANSIUTF8"])  # nie der Link in der Prozessliste
+
+    def test_a_failing_qrencode_falls_back_to_the_link(self):
+        script = self.empty_path / "qrencode"
+        script.write_text("#!/bin/sh\n/bin/cat >/dev/null\nexit 1\n")
+        script.chmod(0o755)
+        code, out, err = self.run_cli("pair")
+        self.assertEqual(code, 0, err)
+        self.link_of(out)
+        self.assertIn("qrencode schlug fehl", out)
+
+
+class DevicesRevokeTests(PairingCliCase):
+    def pair_device(self, name):
+        _, out, _ = self.run_cli("pair")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        return self.store().redeem(query["code"][0], name, "10.0.0.20")
+
+    def test_devices_lists_id_name_times_and_never_secrets(self):
+        self.assertEqual(self.run_cli("devices")[1].strip(), "Keine Geraete gekoppelt.")
+        first = self.pair_device("iPhone")
+        second = self.pair_device("iPad")
+        self.store().touch(second["device_id"], now=1_800_000_000.0)
+        code, out, err = self.run_cli("devices")
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        self.assertEqual(lines[0].split(), ["ID", "Name", "Gekoppelt", "Zuletzt", "gesehen"])
+        by_id = {line.split()[0]: line for line in lines[1:]}
+        self.assertEqual(set(by_id), {first["device_id"], second["device_id"]})
+        self.assertIn("iPhone", by_id[first["device_id"]])
+        self.assertTrue(by_id[first["device_id"]].rstrip().endswith("nie"))
+        self.assertIn("2027-01-15 08:00 UTC", by_id[second["device_id"]])
+        raw = (self.state_dir / "devices.json").read_text()
+        hashes = re.findall(r"[0-9a-f]{64}", raw)
+        self.assertEqual(len(hashes), 2)
+        for secret in (*hashes, first["token"], second["token"]):
+            self.assertNotIn(secret, out + err)
+        self.assertIsNone(HEX_SECRET.search(out + err))
+        self.assertNotIn("token", out.lower())
+
+    def test_revoke_removes_the_device_and_its_token_stops_working(self):
+        first, second = self.pair_device("iPhone"), self.pair_device("iPad")
+        self.assertEqual(self.store().verify_token(first["token"]), first["device_id"])
+        code, out, err = self.run_cli("revoke", first["device_id"])
+        self.assertEqual(code, 0, err)
+        self.assertIn(first["device_id"], out)
+        self.assertIsNone(self.store().verify_token(first["token"]))
+        self.assertEqual(self.store().verify_token(second["token"]), second["device_id"])
+        self.assertEqual([d["id"] for d in self.store().list_devices()], [second["device_id"]])
+        self.assertEqual(stat.S_IMODE(os.stat(self.state_dir / "devices.json").st_mode), 0o640)
+
+    def test_revoke_of_unknown_or_malformed_ids_fails(self):
+        self.pair_device("iPhone")
+        for device_id in ("deadbeef", "XYZ", "../state", "0000000A", ""):
+            with self.subTest(device_id=device_id):
+                code, out, err = self.run_cli("revoke", device_id)
+                self.assertEqual(code, 1, out)
+                self.assertIn("FEHLER", err)
+        self.assertEqual(len(self.store().list_devices()), 1)
+
+    def test_revoke_without_state_dir_fails_cleanly(self):
+        code, _, err = self.run_cli("revoke", "deadbeef")
+        self.assertEqual(code, 1)
+        self.assertIn("FEHLER", err)
+
+
+class InitStateTests(PairingCliCase):
+    def mode(self, path):
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_creates_dir_0750_with_server_id_and_prints_the_gid(self):
+        for umask in (0o022, 0o077):
+            with self.subTest(umask=oct(umask)):
+                self.setUp()
+                old = os.umask(umask)
+                try:
+                    code, out, err = self.run_cli("init-state")
+                finally:
+                    os.umask(old)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.mode(self.state_dir), 0o750)
+                sid = (self.state_dir / "server_id").read_text().strip()
+                self.assertRegex(sid, r"\A[0-9a-f]{8}\Z")
+                self.assertEqual(self.mode(self.state_dir / "server_id"), 0o600)
+                self.assertIn(f"KORE_STATE_GID={os.stat(self.state_dir).st_gid}", out)
+                self.assertIn(sid, out)
+
+    def test_is_idempotent_and_repairs_the_dir_mode(self):
+        self.run_cli("init-state")
+        sid = (self.state_dir / "server_id").read_text()
+        os.chmod(self.state_dir, 0o700)
+        os.chmod(self.state_dir / "server_id", 0o644)
+        code, out, err = self.run_cli("init-state")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.mode(self.state_dir), 0o750)
+        self.assertEqual(self.mode(self.state_dir / "server_id"), 0o600)
+        self.assertEqual((self.state_dir / "server_id").read_text(), sid)
+
+    def test_a_file_in_the_way_is_an_error(self):
+        self.state_dir.write_text("x")
+        code, _, err = self.run_cli("init-state")
+        self.assertEqual(code, 1)
+        self.assertIn("kein Ordner", err)
+
+    def test_doctor_accepts_what_init_state_creates(self):
+        self.run_cli("init-state")
+        doctor = load_doctor()
+        report = doctor.Report(stream=open(os.devnull, "w"))
+        self.addCleanup(report.stream.close)
+        doctor.check_state_dir(report, self.state_dir, {"KORE_STATE_GID": str(os.stat(self.state_dir).st_gid)})
+        self.assertEqual(report.failures, 0)
+
+
+class PairingContractUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.doctor = load_doctor()
+
+    def test_doctor_modes_equal_the_store_modes(self):
+        self.assertEqual(self.doctor.STATE_DIR_MODE, pairing.STATE_DIR_MODE)
+        store_modes = {name: pairing.FILE_MODES.get(name, pairing.PRIVATE_FILE_MODE)
+                       for name in (pairing.DEVICES_FILE, pairing.PAIRING_FILE, pairing.SERVER_ID_FILE,
+                                    pairing.LOCK_FILE)}
+        self.assertEqual(self.doctor.STATE_FILE_MODES, store_modes)
+
+    def test_link_building_encodes_everything_and_keeps_the_order(self):
+        link = self.doctor.build_pair_link("http://10.0.0.10:8090", "http://10.0.0.10:8081",
+                                           "ABCDEFGHIJKLMNOPQRST", "a1b2c3d4")
+        self.assertEqual(link, "kore://pair?v=1&bridge=http%3A%2F%2F10.0.0.10%3A8090"
+                               "&ingest=http%3A%2F%2F10.0.0.10%3A8081&code=ABCDEFGHIJKLMNOPQRST&sid=a1b2c3d4")
+
+    def test_accepted_hosts_cover_the_private_and_vpn_ranges(self):
+        accept = lambda url: self.doctor.validated_link_url(url, "x")  # noqa: E731
+        self.assertEqual(accept("http://10.255.255.254:1"), "http://10.255.255.254:1")
+        self.assertEqual(accept("http://172.16.0.1"), "http://172.16.0.1")
+        self.assertEqual(accept("http://172.31.255.255:80"), "http://172.31.255.255:80")
+        self.assertEqual(accept("https://192.168.0.1:443/"), "https://192.168.0.1:443")
+        self.assertEqual(accept("http://100.127.255.255"), "http://100.127.255.255")
+        self.assertEqual(accept("http://100.64.0.10"), "http://100.64.0.10")
+        self.assertEqual(self.doctor.validated_link_url("http://10.0.0.10", "x", 8081), "http://10.0.0.10:8081")
+
+    def test_state_dir_resolution_order(self):
+        resolve = self.doctor.resolve_state_dir
+        self.assertEqual(resolve("/srv/s", {"KORE_STATE_DIR": "/b"}, {}, {}), Path("/srv/s"))
+        self.assertEqual(resolve(None, {"KORE_STATE_DIR": "/b"}, {"KORE_STATE_DIR": "/s"}, {}), Path("/b"))
+        self.assertEqual(resolve(None, {}, {"KORE_STATE_DIR": "/s"}, {"KORE_STATE_DIR": "/e"}), Path("/s"))
+        self.assertEqual(resolve(None, {}, {}, {"KORE_STATE_DIR": "/e"}), Path("/e"))
+        self.assertEqual(resolve(None, {}, {"KORE_STATE_DIR": "./state"}, {}), self.doctor.REPO / "state")
+        self.assertEqual(resolve(None, {}, {}, {}), self.doctor.REPO / "state")
 
 
 if __name__ == "__main__":

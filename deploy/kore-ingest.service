@@ -18,6 +18,8 @@ RestartSec=5
 # Keine Rechteausweitung per sudo/setuid. Weitere Haertung siehe deploy/README.md.
 NoNewPrivileges=yes
 User=kore
+# Geraete-Kopplung: kore muss in der Gruppe des Bridge-Nutzers sein (usermod -aG <Gruppe> kore),
+# damit der Ingest state/devices.json (0640) lesen kann. Siehe contract/pairing-v1.md.
 
 [Install]
 WantedBy=multi-user.target

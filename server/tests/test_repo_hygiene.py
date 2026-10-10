@@ -68,6 +68,19 @@ class ContainerTests(unittest.TestCase):
             '- "127.0.0.1:8000:8000"',
         ])
 
+    def test_ingest_reads_the_pairing_state_through_a_required_group_only(self) -> None:
+        compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        ingest, mcp = compose.split("\n  mcp:\n")
+        # Required (no default that would silently grant nothing), read-only mount, ingest only.
+        self.assertIn('group_add: ["${KORE_STATE_GID:?', ingest)
+        self.assertIn(":/state:ro", ingest)
+        self.assertNotIn("group_add", mcp)
+        self.assertNotIn("/state", mcp)
+        self.assertEqual(compose.count("group_add"), 1)
+        example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("\nKORE_STATE_GID=", example)
+        self.assertIn("KORE_STATE_DIR", example)
+
 
 class WorkflowTests(unittest.TestCase):
     def test_ci_has_read_only_token_and_no_privileged_trigger(self) -> None:
