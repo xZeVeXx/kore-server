@@ -37,7 +37,8 @@ Geraete-Kopplung (als Nutzer der Bridge ausfuehren; contract/pairing-v1.md):
     python3 scripts/kore-doctor revoke <id>
 
 `pair` gibt den Link kore://pair?... (gilt 10 Minuten, einmal) und, falls `qrencode` installiert ist,
-den QR-Code aus. Die Adressen folgen sonst aus bridge.env und .env; nur private und VPN-Adressen oder https://<name>.ts.net.
+den QR-Code aus. Die Adressen folgen sonst aus bridge.env und .env; erlaubt sind private Adressen (http oder https)
+und https://<name>.ts.net. Tailscale-Adressen (100.64/10) nur mit https: iOS blockiert dort Klartext-http.
 """
 import argparse
 import hashlib
@@ -70,10 +71,12 @@ STATE_DIR_MODE = 0o750
 # Wie coach-bridge/pairing.py (FILE_MODES, PRIVATE_FILE_MODE); test_kore_doctor.py vergleicht beides.
 STATE_FILE_MODES = {"devices.json": 0o640, "pairing.json": 0o600, "server_id": 0o600, ".lock": 0o600}
 BRIDGE_PORT = 8090
-# Wohin ein iPhone gelangen kann: RFC 1918 und VPN (CGNAT, z. B. Tailscale). Kein Loopback.
+# Wohin ein iPhone gelangen kann: RFC 1918 (Heimnetz, Router-VPN wie WireGuard) und CGNAT (Tailscale). Kein Loopback.
 LINK_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
 ))
+# iOS App Transport Security blockiert Klartext-http an CGNAT-Adressen und *.ts.net; dort nur https.
+CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 # Tailscale serve mit HTTPS: https://<rechner>.<tailnet>.ts.net; urlsplit liefert den Host kleingeschrieben.
 TAILNET_HOST_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+ts\.net")
 SUBCOMMANDS = ("init-state", "pair", "devices", "revoke")
@@ -584,9 +587,10 @@ def load_pairing():
 
 
 def validated_link_url(value: str, label: str, default_port=None) -> str:
-    """http(s)://<IPv4 aus privatem oder VPN-Netz>[:port] oder https://<name>.ts.net[:port]; sonst PairingError.
+    """http(s)://<private IPv4>[:port], https://<100.64/10-IPv4>[:port] oder https://<name>.ts.net[:port]; sonst PairingError.
 
-    Andere Hostnamen, oeffentliche IPs und Loopback sind tabu; Klartext-http nur fuer IPv4-Adressen.
+    Andere Hostnamen, oeffentliche IPs und Loopback sind tabu; Klartext-http nur fuer private IPv4-Adressen
+    (iOS ATS blockiert es an 100.64/10 und *.ts.net).
     """
     text = (value or "").strip()
     try:
@@ -617,6 +621,9 @@ def validated_link_url(value: str, label: str, default_port=None) -> str:
     if not isinstance(host, ipaddress.IPv4Address) or not any(host in net for net in LINK_NETWORKS):
         raise PairingError(f"{label}: {host} ist keine private oder VPN-Adresse "
                            "(10/8, 172.16/12, 192.168/16, 100.64/10); oeffentliche Adressen sind tabu.")
+    if host in CGNAT_NETWORK and parts.scheme != "https":
+        raise PairingError(f"{label}: iOS blockiert Klartext-http an Tailscale-Adressen ({host}). "
+                           "Mit `tailscale serve` veroeffentlichen und https://<name>.ts.net eintragen.")
     return f"{parts.scheme}://{host}{suffix}"
 
 

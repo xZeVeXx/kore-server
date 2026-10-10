@@ -49,8 +49,8 @@ Drei kleine Dienste laufen auf einer Maschine, neben deinem Hermes-Agenten:
 
 | Dienst | Port | Aufgabe | Erreichbar von |
 | --- | --- | --- | --- |
-| **Coach-Bridge** (`coach-bridge/`, reines Python, nur Standardbibliothek) | 8090 | Chat: Kore spricht mit der Bridge, die Bridge startet `hermes` für ein einziges, dafür vorgesehenes Profil und gibt die Antwort zurück. Erledigt auch die [Kopplung](#kopplung-mit-dem-iphone). Läuft als systemd-Dienst auf dem Host. | deinem Heimnetz oder VPN-Adresse (`KORE_BRIDGE_BIND_HOST`) |
-| **Ingest-API** (`server/`, FastAPI, in Docker) | 8081 | Nimmt die Tageswerte vom iPhone entgegen und gibt offene Plan-Vorschläge zurück. | deinem Heimnetz oder VPN-Adresse (`KORE_BIND_ADDRESS`) |
+| **Coach-Bridge** (`coach-bridge/`, reines Python, nur Standardbibliothek) | 8090 | Chat: Kore spricht mit der Bridge, die Bridge startet `hermes` für ein einziges, dafür vorgesehenes Profil und gibt die Antwort zurück. Erledigt auch die [Kopplung](#kopplung-mit-dem-iphone). Läuft als systemd-Dienst auf dem Host. | deiner Heimnetz-Adresse oder `127.0.0.1` hinter `tailscale serve` (`KORE_BRIDGE_BIND_HOST`) |
+| **Ingest-API** (`server/`, FastAPI, in Docker) | 8081 | Nimmt die Tageswerte vom iPhone entgegen und gibt offene Plan-Vorschläge zurück. | deiner Heimnetz-Adresse oder `127.0.0.1` hinter `tailscale serve` (`KORE_BIND_ADDRESS`) |
 | **MCP-Server** (`server/`, FastMCP, in Docker) | 8000 | Lässt dein Hermes-Profil die Kore-Daten **lesen** (7 Werkzeuge) und einen Trainingsplan **vorschlagen** (1 Werkzeug). | **nur diesem Rechner** (`127.0.0.1`) |
 
 Kore spricht mit der Bridge und der Ingest-API. Mit dem MCP-Server spricht nur Hermes.
@@ -71,7 +71,7 @@ aufnimmst.
 | **Ein Linux-Rechner, der läuft** | Homeserver, Mini-PC, NAS, Raspberry Pi 5 … im selben Netz wie dein iPhone. Docker mit Compose v2 für Ingest und MCP, Python 3 für die Bridge. |
 | **Hermes Agent 0.21.4 oder neuer** | Installiert auf **demselben Rechner**: Die Bridge startet `hermes` als Kindprozess, und der MCP-Server ist nur lokal erreichbar. Getestet mit v0.21.4 und v0.21.5. Ohne Hermes funktionieren Lesen und Plan-Vorschläge über MCP weiter, nur zum Chatten fehlt der Partner. |
 | **Dein eigener Schlüssel eines Modell-Anbieters** | Hermes braucht ein Modell. Bring deinen eigenen Anbieter-Schlüssel (oder ein lokales Modell) mit und gib ihn selbst in deinem Terminal ein, nie in einem Chat. |
-| **Eine feste Adresse für den Server** | Eine DHCP-Reservierung im Router oder eine VPN-Adresse (siehe [VPN](#unterwegs-per-vpn)). |
+| **Eine feste Adresse für den Server** | Eine DHCP-Reservierung im Router oder bei Tailscale keine: die Dienste bleiben auf Loopback (siehe [VPN](#unterwegs-per-vpn)). |
 
 Du brauchst **keine** öffentliche Adresse, **keine** Domain und **kein** HTTPS-Zertifikat. Alles
 bleibt im Heimnetz oder in deinem VPN. Genau das ist der Punkt.
@@ -335,9 +335,10 @@ Wie es funktioniert und was es zusichert:
 
 Nützliche Optionen: `--name "Mein iPhone"` benennt das Gerät, das als Nächstes koppelt;
 `--bridge-url` und `--ingest-url` setzen die Adressen, falls sie sich nicht aus `bridge.env` und
-`.env` ableiten lassen. Akzeptiert werden private (10/8, 172.16/12, 192.168/16) und VPN-Adressen
-(100.64/10) in IPv4 sowie `https://<name>.ts.net` (Tailscale serve, siehe VPN-Abschnitt), nie Loopback,
-andere Hostnamen oder öffentliche Adressen.
+`.env` ableiten lassen. Akzeptiert werden private IPv4-Adressen (10/8, 172.16/12, 192.168/16; `http` oder
+`https`), `https://<name>.ts.net` und `https` an eine Tailscale-Adresse (100.64/10) (siehe
+[VPN](#unterwegs-per-vpn)); Klartext-`http` an Tailscale-Adressen wird abgelehnt, weil iOS es blockiert.
+Nie Loopback, andere Hostnamen oder öffentliche Adressen.
 
 **Geräte verwalten:**
 
@@ -371,7 +372,8 @@ Woche, und was fällt dir an meinem Schlaf auf?“*
 Zuhause erreicht Kore den Server direkt über dein Heimnetz. Unterwegs nimmst du ein **VPN in dein
 Heimnetz**. Die Regel: **nie einen Port weiterleiten, nie an `0.0.0.0` binden, nie einen öffentlichen
 Tunneldienst nutzen** (Reverse-Tunnel, Tailscale Funnel und Ähnliches). Alle drei Dienste sprechen
-Klartext-HTTP; im VPN-Tunnel verschlüsselt der Tunnel diesen Verkehr, zuhause nicht.
+Klartext-HTTP im eigenen Netz; im VPN-Tunnel verschlüsselt der Tunnel diesen Verkehr, zuhause nicht.
+Die Ausnahme ist Tailscale, das HTTPS braucht (Variante 2).
 
 Jeder Dienst lauscht auf **einer** Adresse, such also die Adresse aus, die dein iPhone immer benutzen
 soll.
@@ -385,49 +387,52 @@ enthalten es, etwa `10.0.0.0/24`). Das Handy erreicht den Server dann unter **de
 zuhause** (`10.0.0.10`). Auf dem Server ändert sich nichts: `KORE_BIND_ADDRESS` und
 `KORE_BRIDGE_BIND_HOST` bleiben auf der LAN-Adresse (mit DHCP-Reservierung), und du koppelst wie
 gewohnt. Der VPN-Port des Routers ist der Endpunkt des VPNs selbst, kein weitergeleiteter Kore-Port.
+Weil das Handy eine Heimnetz-Adresse bekommt, funktioniert Klartext-`http` genau wie zuhause.
 
-### Variante 2: Tailscale, Schritt für Schritt
+### Variante 2: Tailscale mit `tailscale serve` (HTTPS)
 
-Tailscale gibt jedem deiner Geräte eine stabile Adresse in `100.64.0.0/10`, die Bridge und Kore als
-VPN-Adresse akzeptieren.
+iOS verweigert unverschlüsseltes `http` an Tailscale-Adressen (`100.64.0.0/10`) und an `*.ts.net`-Namen
+(App Transport Security). Die Tailscale-Adresse selbst lässt sich deshalb nicht so benutzen wie die
+Heimnetz-Adresse. Was funktioniert: beide Dienste auf `127.0.0.1` lassen und `tailscale serve` sie
+innerhalb deines Tailnets mit Zertifikat veröffentlichen lassen. Kore spricht dann
+`https://<name>.ts.net`.
 
 1. **Tailscale auf dem Server installieren** nach der Anleitung von Tailscale für deine
    Distribution und anmelden (`sudo tailscale up`).
 2. **Die Tailscale-App auf dem iPhone installieren** und mit demselben Konto anmelden.
 3. **Einen unauffälligen Rechnernamen wählen** (in der Admin-Konsole oder mit
-   `sudo tailscale set --hostname=<name>`). Schaltest du je HTTPS-Zertifikate ein, stehen
-   Rechnername und Name deines Tailnets in öffentlichen Zertifikats-Logs (Certificate Transparency),
-   die jeder durchsuchen kann. Also nicht `<dein-name>-gesundheitsserver`, sondern etwas Neutrales.
-4. **Die Tailscale-Adresse des Servers ermitteln:** `tailscale ip -4`, zum Beispiel `100.64.0.10`.
-5. **Daran binden.** In der `.env` des Servers: `KORE_BIND_ADDRESS=100.64.0.10`. In `bridge.env`:
-   `KORE_BRIDGE_BIND_HOST=100.64.0.10`. Dann neu starten: `docker compose up -d` und
-   `sudo systemctl restart kore-coach-bridge`.
-6. **Reihenfolge beim Booten.** Die Adresse gibt es erst, wenn Tailscale läuft. Für die Bridge trägst
-   du `After=tailscaled.service` in die Unit ein (`sudo systemctl edit kore-coach-bridge`); sie
-   versucht es ohnehin alle fünf Sekunden neu. Sind die Docker-Dienste nach einem Neustart nicht da,
-   führ `docker compose up -d` erneut aus.
-7. **Koppeln.** `kore-doctor pair` liest die Adressen aus `.env` und `bridge.env`, der Link enthält
-   also schon `100.64.0.10`. Schalt Tailscale auf dem Handy ein und öffne dann den Link.
-8. **Halte dein Tailnet persönlich** und seine Zugriffsregeln eng: Alles, was diese Adresse
-   erreicht, kann deine Tokens ausprobieren.
+   `sudo tailscale set --hostname=<name>`). HTTPS-Zertifikate tragen Rechnername und Name deines
+   Tailnets in öffentliche Zertifikats-Logs (Certificate Transparency) ein, die jeder durchsuchen
+   kann. Also nicht `<dein-name>-gesundheitsserver`, sondern etwas Neutrales. Schalte die
+   HTTPS-Zertifikate in der Admin-Konsole ein.
+4. **Die Dienste auf Loopback lassen.** In der `.env` des Servers: `KORE_BIND_ADDRESS=127.0.0.1`. In
+   `bridge.env`: `KORE_BRIDGE_BIND_HOST=127.0.0.1`. Dann neu starten: `docker compose up -d` und
+   `sudo systemctl restart kore-coach-bridge`. `tailscale serve` leitet an localhost weiter, es
+   lauscht also nichts auf einer Netzwerkadresse.
+5. **Im Tailnet veröffentlichen:**
 
-Mit eingeschalteter Tailscale-App gilt dieselbe Adresse zuhause und unterwegs.
+   ```bash
+   sudo tailscale serve --bg --https=443  http://127.0.0.1:8081    # Ingest
+   sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090    # Bridge
+   ```
 
-**Variante 2b: HTTPS mit `tailscale serve` (für Fortgeschrittene).** Lass Ingest und Bridge auf
-`127.0.0.1` und lass Tailscale sie innerhalb deines Tailnets mit Zertifikat veröffentlichen, zum
-Beispiel:
+   Die Flags deiner Version zeigt `tailscale serve --help`. Nie `tailscale funnel` verwenden; das
+   veröffentlicht ins offene Internet.
+6. **Mit den HTTPS-Namen koppeln.** `kore-doctor pair` kann sie nicht aus der `.env` ableiten
+   (Loopback erreicht ein Handy nicht), also gibst du sie an:
 
-```bash
-sudo tailscale serve --bg --https=443  http://127.0.0.1:8081    # Ingest
-sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090    # Bridge
-```
+   ```bash
+   python3 ~/kore-server/scripts/kore-doctor pair \
+     --bridge-url https://<rechner>.<tailnet>.ts.net:8443 \
+     --ingest-url https://<rechner>.<tailnet>.ts.net
+   ```
 
-Die Flags deiner Version zeigt `tailscale serve --help`; HTTPS-Zertifikate müssen in der
-Admin-Konsole aktiviert sein. Kore verbindet sich dann mit `https://<rechner>.<tailnet>.ts.net` und
-`https://<rechner>.<tailnet>.ts.net:8443`. `kore-doctor pair` akzeptiert diese Namen ebenfalls
-(`--bridge-url https://<rechner>.<tailnet>.ts.net:8443 --ingest-url https://<rechner>.<tailnet>.ts.net`),
-aber nur mit `https://`; jeden anderen Hostnamen lehnt es ab. Der Hinweis zu den Zertifikats-Logs
-oben gilt auch hier.
+   Schalt Tailscale auf dem Handy ein und öffne dann den Link. `kore-doctor pair` lehnt Klartext-`http`
+   an `100.x`-Adressen und `*.ts.net`-Namen ab und sagt dir das.
+7. **Halte dein Tailnet persönlich** und seine Zugriffsregeln eng: Alles, was diese Namen erreicht,
+   kann deine Tokens ausprobieren.
+
+Mit eingeschalteter Tailscale-App gelten dieselben Namen zuhause und unterwegs.
 
 ## Sicherheit
 
@@ -446,7 +451,7 @@ Wer sie verletzt, betreibt etwas anderes als das hier beschriebene System.
    dir, und erst dein Tippen auf „Übernehmen“ macht ihn wirksam. Ein Agent kann in Kore nichts still
    aktivieren. Zusätzlich braucht jeder Schreibvorgang ein kurzlebiges, HMAC-signiertes Einmal-Ticket
    der Coach-Bridge (`KORE_PLAN_ORIGIN_SECRET`); der MCP-Token allein genügt nicht.
-3. **Kein Port-Forward.** Alle Ports gehören ins Heimnetz, auf eine VPN-Adresse oder auf Loopback.
+3. **Kein Port-Forward.** Alle Ports gehören ins Heimnetz, auf eine VPN-Adresse oder auf Loopback (Loopback hinter `tailscale serve` ist der empfohlene Tailscale-Aufbau).
    Die Bridge weigert sich, auf `0.0.0.0` zu lauschen, und akzeptiert nur eine konkrete
    IPv4-Loopback-, RFC-1918- oder VPN-Adresse (100.64.0.0/10). Der MCP-Port ist nur auf `127.0.0.1`
    veröffentlicht und aus deinem Netz gar nicht erreichbar.
@@ -589,7 +594,7 @@ Kore nennt unter Experimentelle Funktionen den nächsten Schritt. Die Bridge pr�
 | Journal: `Device pairing unavailable: …` | Der Zustandsordner fehlt, oder die Bridge kann nicht hineinschreiben. | `kore-doctor init-state`, dann die Besitzer prüfen. Mit der gehärteten Unit muss `<HOME>/kore-server/state` in `ReadWritePaths` stehen. |
 | `docker compose up` bricht mit „set KORE_STATE_GID …“ ab | In der `.env` fehlt `KORE_STATE_GID`. | `kore-doctor init-state` ausführen und die ausgegebene Zeile in die `.env` übernehmen. |
 | Gekoppelt, aber die Ingest-API antwortet 401 | Der Ingest kann `devices.json` nicht lesen: Die Gruppe passt nicht. | `kore-doctor` hat einen Check „Zustandsordner“; `KORE_STATE_GID` auf die Gruppe des Ordners setzen und `docker compose up -d --force-recreate` ausführen. |
-| `kore-doctor pair` lehnt eine Adresse ab | Akzeptiert werden private oder VPN-Adressen in IPv4 und `https://<name>.ts.net`, nicht `127.0.0.1`, andere Hostnamen, `http` auf einem Namen oder öffentliche Adressen. | `KORE_BRIDGE_BIND_HOST` und `KORE_BIND_ADDRESS` auf die Adresse setzen, die dein iPhone benutzt, oder `--bridge-url` und `--ingest-url` übergeben. |
+| `kore-doctor pair` lehnt eine Adresse ab | Akzeptiert werden private IPv4-Adressen und `https://<name>.ts.net`, nicht `127.0.0.1`, andere Hostnamen, `http` auf einem Namen oder auf einer Tailscale-Adresse (100.x) oder öffentliche Adressen. | `KORE_BRIDGE_BIND_HOST` und `KORE_BIND_ADDRESS` auf die Heimnetz-Adresse setzen, die dein iPhone benutzt, oder `--bridge-url` und `--ingest-url` übergeben (bei Tailscale: die `https://<name>.ts.net`-Namen). |
 | „Die Bridge hat unvollständig geantwortet.“ | Es kam eine Antwort, aber keine lesbare. | Zeigt die Adresse wirklich auf die Bridge (Port 8090) und nicht auf einen anderen Dienst? Dann `journalctl -u kore-coach-bridge`. |
 | „Achtung: Deine Bridge übergibt Prompts über die Kommandozeile. Entferne KORE_HERMES_ALLOW_ARGV_PROMPTS aus bridge.env.“ | Die Bridge ist bereit, reicht den Prompt aber über `argv` weiter (Prinzip 6). | Die Zeile aus `bridge.env` löschen und die Bridge neu starten. |
 | „Der Server hat mit Fehler 500 geantwortet.“ | Etwas im Server selbst. | `docker compose logs -f ingest`; die Statuszahl ist das, womit du im Log suchst. |

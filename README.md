@@ -48,8 +48,8 @@ Three small services run on one machine, next to your Hermes agent:
 
 | Service | Port | What it does | Reachable from |
 | --- | --- | --- | --- |
-| **Coach bridge** (`coach-bridge/`, plain Python, standard library only) | 8090 | Chat: Kore talks to the bridge, the bridge runs `hermes` for one dedicated profile and returns the answer. Also handles [pairing](#pairing-your-iphone). Runs as a systemd service on the host. | your home network or VPN address (`KORE_BRIDGE_BIND_HOST`) |
-| **Ingest API** (`server/`, FastAPI, in Docker) | 8081 | Receives the daily values from the iPhone and hands pending plan proposals back. | your home network or VPN address (`KORE_BIND_ADDRESS`) |
+| **Coach bridge** (`coach-bridge/`, plain Python, standard library only) | 8090 | Chat: Kore talks to the bridge, the bridge runs `hermes` for one dedicated profile and returns the answer. Also handles [pairing](#pairing-your-iphone). Runs as a systemd service on the host. | your home network address, or `127.0.0.1` behind `tailscale serve` (`KORE_BRIDGE_BIND_HOST`) |
+| **Ingest API** (`server/`, FastAPI, in Docker) | 8081 | Receives the daily values from the iPhone and hands pending plan proposals back. | your home network address, or `127.0.0.1` behind `tailscale serve` (`KORE_BIND_ADDRESS`) |
 | **MCP server** (`server/`, FastMCP, in Docker) | 8000 | Lets your Hermes profile *read* the Kore data (7 tools) and *propose* a training plan (1 tool). | **this machine only** (`127.0.0.1`) |
 
 Kore talks to the bridge and the ingest API. Only Hermes talks to the MCP server.
@@ -69,7 +69,7 @@ pairing, and `hermes/kore-app-chat-soul.md` is the section you add to your coach
 | **A Linux host that stays on** | Home server, mini PC, NAS, Raspberry Pi 5 … on the same network as your iPhone. Docker with Compose v2 for ingest and MCP, Python 3 for the bridge. |
 | **Hermes Agent 0.21.4 or newer** | Installed on **the same host**: the bridge starts `hermes` as a child process, and the MCP server is only reachable locally. Tested with v0.21.4 and v0.21.5. Without Hermes the server still works for reading and plan proposals through MCP, but nothing can chat. |
 | **Your own model-provider key** | Hermes needs a model. Bring your own provider key (or a local model) and enter it yourself in your terminal, never in a chat. |
-| **A fixed address for the server** | A DHCP reservation in your router, or a VPN address (see [VPN](#remote-access-via-vpn)). |
+| **A fixed address for the server** | A DHCP reservation in your router, or, with Tailscale, none: the services stay on loopback (see [VPN](#remote-access-via-vpn)). |
 
 You do **not** need a public address, a domain or a TLS certificate. Everything stays in your home
 network or your VPN. That is the point.
@@ -330,8 +330,9 @@ How it works and what it guarantees:
 
 Useful options: `--name "My iPhone"` labels the device that pairs next; `--bridge-url` and
 `--ingest-url` set the addresses if they cannot be derived from `bridge.env` and `.env`. Accepted are
-private (10/8, 172.16/12, 192.168/16) and VPN (100.64/10) IPv4 addresses, and `https://<name>.ts.net`
-(Tailscale serve, see [VPN](#away-from-home-vpn)); never loopback, other host names or public addresses.
+private IPv4 addresses (10/8, 172.16/12, 192.168/16; `http` or `https`), `https://<name>.ts.net` and
+`https` to a Tailscale address (100.64/10) (see [VPN](#remote-access-via-vpn)); plain `http` to Tailscale
+addresses is refused because iOS blocks it. Never loopback, other host names or public addresses.
 
 **Managing devices:**
 
@@ -362,7 +363,8 @@ this week, and what do you notice about my sleep?"*
 At home Kore reaches the server directly over your home network. Away from home, use a **VPN into
 your home network**. The rule: **never forward a port, never bind to `0.0.0.0`, never use a public
 tunnel service** (reverse tunnels, Tailscale Funnel and similar). All three services speak plain
-HTTP; inside a VPN tunnel that traffic is encrypted by the tunnel, at home it is not.
+HTTP on your own network; inside a VPN tunnel that traffic is encrypted by the tunnel, at home it is
+not. The one exception is Tailscale, which needs HTTPS (option 2).
 
 The services listen on **one** address each, so pick the address your iPhone should always use.
 
@@ -374,48 +376,51 @@ routes your home subnet (the `AllowedIPs` of the iPhone's configuration include 
 `10.0.0.0/24`). The phone then reaches the server under the **same address as at home**
 (`10.0.0.10`). Nothing changes on the server: keep `KORE_BIND_ADDRESS` and `KORE_BRIDGE_BIND_HOST` on
 the LAN address (with a DHCP reservation) and pair as usual. The router's VPN port is the VPN's own
-endpoint, not a forwarded Kore port.
+endpoint, not a forwarded Kore port. Because the phone gets a home-network address, plain `http` works
+exactly as it does at home.
 
-### Option 2: Tailscale, step by step
+### Option 2: Tailscale with `tailscale serve` (HTTPS)
 
-Tailscale gives each of your devices a stable address in `100.64.0.0/10`, which the bridge and Kore
-accept as a VPN address.
+iOS refuses unencrypted `http` to Tailscale addresses (`100.64.0.0/10`) and to `*.ts.net` names (App
+Transport Security). So the Tailscale address itself cannot be used the way the home address can. The
+way that works: keep both services on `127.0.0.1` and let `tailscale serve` publish them inside your
+tailnet with a certificate. Kore then talks `https://<name>.ts.net`.
 
 1. **Install Tailscale on the server** following Tailscale's instructions for your distribution, and
    sign in (`sudo tailscale up`).
 2. **Install the Tailscale app on your iPhone** and sign in with the same account.
 3. **Choose an unremarkable machine name** (in the admin console, or
-   `sudo tailscale set --hostname=<name>`). If you ever enable HTTPS certificates, the machine name
-   and your tailnet name appear in public certificate transparency logs that anyone can search. So
-   not `<your-name>-health-server`, but something neutral.
-4. **Find the server's Tailscale address:** `tailscale ip -4`, for example `100.64.0.10`.
-5. **Bind to it.** In the server's `.env`: `KORE_BIND_ADDRESS=100.64.0.10`. In `bridge.env`:
-   `KORE_BRIDGE_BIND_HOST=100.64.0.10`. Then restart: `docker compose up -d` and
-   `sudo systemctl restart kore-coach-bridge`.
-6. **Order at boot.** The address exists only once Tailscale is up. For the bridge, add
-   `After=tailscaled.service` to the unit (`sudo systemctl edit kore-coach-bridge`); it also retries
-   every five seconds on its own. If the Docker services did not come up after a reboot, run
-   `docker compose up -d` again.
-7. **Pair.** `kore-doctor pair` reads the addresses from `.env` and `bridge.env`, so the link already
-   contains `100.64.0.10`. Switch Tailscale on on the phone, then open the link.
-8. **Keep your tailnet personal** and its access rules tight: everything that can reach this
-   address can try your tokens.
+   `sudo tailscale set --hostname=<name>`). HTTPS certificates put the machine name and your tailnet
+   name into public certificate transparency logs that anyone can search. So not
+   `<your-name>-health-server`, but something neutral. Enable HTTPS certificates in the admin console.
+4. **Keep the services on loopback.** In the server's `.env`: `KORE_BIND_ADDRESS=127.0.0.1`. In
+   `bridge.env`: `KORE_BRIDGE_BIND_HOST=127.0.0.1`. Then restart: `docker compose up -d` and
+   `sudo systemctl restart kore-coach-bridge`. `tailscale serve` forwards to localhost, so nothing
+   listens on a network address at all.
+5. **Publish them in the tailnet:**
 
-With the Tailscale app on, the same address works at home and away.
+   ```bash
+   sudo tailscale serve --bg --https=443  http://127.0.0.1:8081    # ingest
+   sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090    # bridge
+   ```
 
-**Option 2b: HTTPS with `tailscale serve` (advanced).** Keep ingest and bridge on `127.0.0.1` and let
-Tailscale publish them inside your tailnet with a certificate, for example:
+   Check `tailscale serve --help` for the flags of your version. Never use `tailscale funnel`; it
+   publishes to the open internet.
+6. **Pair with the HTTPS names.** `kore-doctor pair` cannot derive them from `.env` (loopback is not
+   reachable from a phone), so pass them:
 
-```bash
-sudo tailscale serve --bg --https=443  http://127.0.0.1:8081    # ingest
-sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090    # bridge
-```
+   ```bash
+   python3 ~/kore-server/scripts/kore-doctor pair \
+     --bridge-url https://<machine>.<tailnet>.ts.net:8443 \
+     --ingest-url https://<machine>.<tailnet>.ts.net
+   ```
 
-Check `tailscale serve --help` for the flags of your version; HTTPS certificates must be enabled in
-the admin console. Kore then connects to `https://<machine>.<tailnet>.ts.net` and
-`https://<machine>.<tailnet>.ts.net:8443`. `kore-doctor pair` accepts these names too
-(`--bridge-url https://<machine>.<tailnet>.ts.net:8443 --ingest-url https://<machine>.<tailnet>.ts.net`),
-but only with `https://`; any other host name is refused. The certificate-transparency note above applies.
+   Switch Tailscale on on the phone, then open the link. `kore-doctor pair` refuses plain `http` to
+   `100.x` addresses and `*.ts.net` names and tells you so.
+7. **Keep your tailnet personal** and its access rules tight: everything that can reach these names
+   can try your tokens.
+
+With the Tailscale app on, the same names work at home and away.
 
 ## Security
 
@@ -434,7 +439,7 @@ violate them, you are running something other than the system described here.
    to you, and only your tap on "Accept" makes it effective. An agent cannot silently activate
    anything in Kore. Every write also needs a short-lived, HMAC-signed one-time ticket from the
    coach bridge (`KORE_PLAN_ORIGIN_SECRET`); the MCP token alone is not enough.
-3. **No port forwarding.** All ports belong on your home network, a VPN address or loopback. The
+3. **No port forwarding.** All ports belong on your home network, a VPN address or loopback (loopback behind `tailscale serve` is the recommended Tailscale setup). The
    bridge refuses to listen on `0.0.0.0` and accepts only a concrete IPv4 loopback, RFC 1918 or VPN
    (100.64.0.0/10) address. The MCP port is published on `127.0.0.1` only and is not reachable from
    your network at all.
@@ -573,7 +578,7 @@ Kore names the next step under Experimental features. Test the bridge there with
 | Journal: `Device pairing unavailable: …` | The state directory is missing or the bridge cannot write to it. | `kore-doctor init-state`, then check ownership. With the hardened unit, `<HOME>/kore-server/state` must be in `ReadWritePaths`. |
 | `docker compose up` stops with "set KORE_STATE_GID …" | `KORE_STATE_GID` is missing in `.env`. | Run `kore-doctor init-state` and copy the printed line into `.env`. |
 | Paired, but the ingest API answers 401 | Ingest cannot read `devices.json`: the group does not match. | `kore-doctor` has a "state directory" check; make `KORE_STATE_GID` the directory's group and run `docker compose up -d --force-recreate`. |
-| `kore-doctor pair` refuses an address | Accepted are private or VPN IPv4 addresses and `https://<name>.ts.net`, not `127.0.0.1`, other host names, `http` on a name or public addresses. | Set `KORE_BRIDGE_BIND_HOST` and `KORE_BIND_ADDRESS` to the address your iPhone uses, or pass `--bridge-url` and `--ingest-url`. |
+| `kore-doctor pair` refuses an address | Accepted are private IPv4 addresses and `https://<name>.ts.net`, not `127.0.0.1`, other host names, `http` on a name or on a Tailscale (100.x) address, or public addresses. | Set `KORE_BRIDGE_BIND_HOST` and `KORE_BIND_ADDRESS` to the home-network address your iPhone uses, or pass `--bridge-url` and `--ingest-url` (for Tailscale: the `https://<name>.ts.net` names). |
 | "The bridge answered incompletely." | An answer arrived, but not a readable one. | Does the address really point to the bridge (port 8090) and not to another service? Then `journalctl -u kore-coach-bridge`. |
 | "Warning: your bridge passes prompts on the command line. Remove KORE_HERMES_ALLOW_ARGV_PROMPTS from bridge.env." | The bridge is ready but would pass the prompt through `argv` (principle 6). | Delete the line from `bridge.env` and restart the bridge. |
 | "The server answered with error 500." | Something inside the server. | `docker compose logs -f ingest`; the status number is what you search for. |

@@ -56,10 +56,11 @@ SHA-256 hashes of 256-bit random tokens, which cannot be used as tokens; the one
 kore://pair?v=1&bridge=<URL>&ingest=<URL>&code=<CODE>&sid=<server_id>
 ```
 
-URLs percent-encoded. Allowed: `http` or `https` with an IPv4 address from a private or VPN range
-(10/8, 172.16/12, 192.168/16, 100.64/10), or `https` with a Tailscale name
-(`https://<name>.ts.net[:port]`, `tailscale serve`). Other host names, public addresses and loopback
-are refused; plain `http` is only for IPv4 addresses. The QR code contains exactly
+URLs percent-encoded. Allowed: `http` or `https` with a private IPv4 address (10/8, 172.16/12,
+192.168/16; also what a router VPN such as WireGuard hands the phone), `https` with a CGNAT/Tailscale
+IPv4 address (100.64/10), or `https` with a Tailscale name (`https://<name>.ts.net[:port]`,
+`tailscale serve`). Plain `http` to 100.64/10 and to `*.ts.net` is refused because iOS App Transport
+Security blocks it. Other host names, public addresses and loopback are refused. The QR code contains exactly
 this link. It never contains a long-lived token.
 
 ## `POST /pair` (bridge, no bearer)

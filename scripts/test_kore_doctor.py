@@ -617,16 +617,22 @@ class PairLinkTests(PairingCliCase):
             self.store().redeem(query["code"][0], "iPhone", "10.0.0.20")
 
     def test_urls_come_from_the_env_files_unless_given(self):
-        self.write_envs(bridge_host="100.64.0.10", bind_address="192.168.1.5", port="9000")
+        self.write_envs(bridge_host="10.0.0.10", bind_address="192.168.1.5", port="9000")
         _, out, _ = self.run_cli("pair")
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
-        self.assertEqual(query["bridge"], ["http://100.64.0.10:9000"])
+        self.assertEqual(query["bridge"], ["http://10.0.0.10:9000"])
         self.assertEqual(query["ingest"], ["http://192.168.1.5:8081"])
         _, out, _ = self.run_cli("pair", "--bridge-url", "https://172.16.4.2:8443",
                                  "--ingest-url", "http://10.1.2.3:9999/")
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
         self.assertEqual(query["bridge"], ["https://172.16.4.2:8443"])
         self.assertEqual(query["ingest"], ["http://10.1.2.3:9999"])
+
+    def test_env_derived_tailscale_bind_address_is_refused_with_the_hint(self):
+        self.write_envs(bridge_host="100.64.0.10", bind_address="192.168.1.5")
+        code, _, err = self.run_cli("pair")
+        self.assertEqual(code, 1)
+        self.assertIn("tailscale serve", err)
 
     def test_tailnet_https_urls_pass_through_to_the_link(self):
         code, out, err = self.run_cli("pair", "--bridge-url", "https://my-host.tail1234.ts.net:8443",
@@ -866,9 +872,17 @@ class PairingContractUnitTests(unittest.TestCase):
         self.assertEqual(accept("http://172.16.0.1"), "http://172.16.0.1")
         self.assertEqual(accept("http://172.31.255.255:80"), "http://172.31.255.255:80")
         self.assertEqual(accept("https://192.168.0.1:443/"), "https://192.168.0.1:443")
-        self.assertEqual(accept("http://100.127.255.255"), "http://100.127.255.255")
-        self.assertEqual(accept("http://100.64.0.10"), "http://100.64.0.10")
+        self.assertEqual(accept("https://100.127.255.255"), "https://100.127.255.255")
+        self.assertEqual(accept("https://100.64.0.10:8443"), "https://100.64.0.10:8443")
         self.assertEqual(self.doctor.validated_link_url("http://10.0.0.10", "x", 8081), "http://10.0.0.10:8081")
+
+    def test_plain_http_to_tailscale_addresses_is_refused_with_a_hint(self):
+        for url in ("http://100.64.0.10", "http://100.127.255.255:8090", "HTTP://100.100.100.100:80"):
+            with self.subTest(url=url):
+                with self.assertRaises(self.doctor.PairingError) as caught:
+                    self.doctor.validated_link_url(url, "x")
+                self.assertIn("tailscale serve", str(caught.exception))
+                self.assertIn("https://<name>.ts.net", str(caught.exception))
 
     def test_tailnet_https_hostnames_are_accepted(self):
         accept = lambda url, *a: self.doctor.validated_link_url(url, "x", *a)  # noqa: E731

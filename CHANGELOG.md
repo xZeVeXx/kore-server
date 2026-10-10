@@ -19,9 +19,10 @@ First public release.
   `./state`, mode 0750) and prints `KORE_STATE_GID`. The ingest container reads the device list
   read-only through that group (`group_add`); Compose refuses to start without `KORE_STATE_GID`.
   `kore-doctor` checks the directory, its permissions and the group.
-- **VPN support.** The bridge accepts a bind address in `100.64.0.0/10` (Tailscale and similar) besides
-  loopback and RFC 1918 addresses. The README describes WireGuard on a router and Tailscale step by
-  step, including the note about certificate transparency logs.
+- **VPN support.** The bridge accepts a bind address in `100.64.0.0/10` besides loopback and RFC 1918
+  addresses. The README describes WireGuard on a router (the phone gets a home-network address, plain
+  `http` works as at home) and Tailscale via `tailscale serve` with HTTPS (iOS blocks plain `http` to
+  Tailscale addresses), including the note about certificate transparency logs.
 - English `README.md` as the main document, German `README.de.md`; `CONTRIBUTING.md`, this changelog,
   issue and pull-request templates, `CODEOWNERS`.
 - Supply chain: hash-locked dependencies (`--require-hashes`), base image pinned by digest, GitHub
@@ -40,8 +41,10 @@ First public release.
   describes.
 - `coach-bridge/kore-coach-bridge.service` is now the hardened unit from the README (runs `bridge.py`
   from the repository checkout, `ProtectSystem=strict`, state directory in `ReadWritePaths`).
-- `kore-doctor pair` also accepts `https://<name>.ts.net[:port]` (Tailscale serve); other host names,
-  public addresses and loopback are still refused, plain `http` only for private or VPN IPv4 addresses.
+- `kore-doctor pair` also accepts `https://<name>.ts.net[:port]` (Tailscale serve). Plain `http` is only
+  for private IPv4 addresses; to 100.64/10 (Tailscale) it is refused with a hint to use
+  `tailscale serve` and `https://<name>.ts.net`, because iOS App Transport Security blocks it. Other
+  host names, public addresses and loopback are still refused.
 
 ### Upgrading from 0.10
 
