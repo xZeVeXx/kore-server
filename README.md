@@ -515,6 +515,17 @@ nur dieses kleine Protokoll:
   allgemein `web,skills,memory`, im Gesundheits-Chat mit Herkunftsticket dazu `kore`. Ohne Ticket
   kein kore-MCP. Nie Terminal, Dateien, Code-Ausführung, Cronjobs, Computer- oder Browser-Steuerung.
 
+### Kopplung (Pairing)
+
+Statt den Token von Hand einzutragen, koppelt die App per Einmalcode: `kore-doctor pair` erzeugt
+einen Link `kore://pair?…` samt QR-Code (gilt 10 Minuten, einmal einlösbar). Die App löst ihn bei
+`POST /pair` der Bridge ein und erhält ein Gerätetoken für Bridge und Ingest; der Server speichert
+davon nur den SHA-256-Hash. `kore-doctor devices` listet die gekoppelten Geräte,
+`kore-doctor revoke <id>` sperrt eines sofort, „Entkoppeln" in der App ruft `POST /unpair`. Der
+Zustand liegt in `KORE_STATE_DIR` (Standard `./state` neben `docker-compose.yml`); `pairing.py`
+gehört neben `bridge.py`. Der statische Token bleibt als Experten-Weg. Vertrag:
+[`contract/pairing-v1.md`](contract/pairing-v1.md). Eine ausführliche Anleitung folgt.
+
 ### Installation prüfen: `kore-doctor`
 
 ```bash

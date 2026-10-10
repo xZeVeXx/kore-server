@@ -28,6 +28,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import math
 import os
 import re
@@ -42,7 +43,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pairing
+
 TOKEN = os.environ.get("KORE_BRIDGE_TOKEN", "")
+# Device pairing (contract/pairing-v1.md): state shared with the ingest container (read-only there).
+PAIRING = pairing.PairingStore(pairing.state_dir_from_env())
+# /pair is unauthenticated: a small ceiling instead of KORE_BRIDGE_MAX_REQUEST_BYTES.
+PAIR_MAX_REQUEST_BYTES = 4096
 BIND_HOST = os.environ.get("KORE_BRIDGE_BIND_HOST", "127.0.0.1")
 INSTANCE_ID = os.environ.get("KORE_INSTANCE_ID", "")
 PROFILE = os.environ.get("KORE_HERMES_PROFILE", "")
@@ -359,6 +366,8 @@ def capabilities_payload() -> dict:
         capabilities.append("plan_origin_v1")
     if PROMPT_TRANSPORT == "stdin":
         capabilities.append("stdin_prompt_transport_v1")
+    if PAIRING.unavailable_reason() is None:
+        capabilities.append("device_pairing_v1")
     return {
         "service": "kore-coach-bridge",
         "api_version": BRIDGE_API_VERSION,
@@ -384,15 +393,40 @@ def health_payload() -> dict:
     }
 
 
-def authorization_status(authorization_header) -> int:
-    """A missing server secret is a deployment error, never an authentication bypass."""
+def authenticate(authorization_header):
+    """(status, device_id): the static token (device_id None) or a paired device's token.
+
+    A missing server secret is a deployment error, never an authentication bypass. Both checks
+    always run, so the response time does not tell which kind of token was close.
+    """
     if not TOKEN:
-        return 503
+        return 503, None
     if not isinstance(authorization_header, str):
-        return 401
+        return 401, None
     # Bytes, not str: compare_digest raises on non-ASCII str, and headers arrive as latin-1.
     supplied = authorization_header.encode("utf-8", "surrogatepass")
-    return 200 if hmac.compare_digest(supplied, f"Bearer {TOKEN}".encode("utf-8")) else 401
+    static_ok = hmac.compare_digest(supplied, f"Bearer {TOKEN}".encode("utf-8"))
+    device_id = None
+    if authorization_header.startswith("Bearer "):
+        device_id = PAIRING.verify_token(authorization_header[len("Bearer "):])
+    if static_ok:
+        return 200, None
+    if device_id is not None:
+        PAIRING.touch(device_id)
+        return 200, device_id
+    return 401, None
+
+
+def authorization_status(authorization_header) -> int:
+    return authenticate(authorization_header)[0]
+
+
+def pairing_startup_warning():
+    """Pairing is optional: the bridge starts without it, but says why /pair will fail."""
+    reason = PAIRING.unavailable_reason()
+    if reason is None:
+        return None
+    return f"Device pairing unavailable: {reason}. POST /pair answers 401 until this is fixed."
 
 
 def validated_bind_host(value) -> str:
@@ -2456,7 +2490,62 @@ class Handler(BaseHTTPRequestHandler):
             )
         self._send(202, {"turn_id": turn.turn_id, "status": turn.status})
 
+    def _pair(self):
+        """POST /pair without bearer: one-time code -> device token (contract/pairing-v1.md)."""
+        failed = (401, {"error": "pairing_failed"})
+        try:
+            n = validated_content_length(self.headers.get("Content-Length"))
+        except RequestTooLarge:
+            n = PAIR_MAX_REQUEST_BYTES + 1
+        except ValueError:
+            n = 0  # no usable body: an attempt like any other, answered uniformly
+        if n > PAIR_MAX_REQUEST_BYTES:
+            self._send(413, {"error": "request too large"})
+            return
+        try:
+            data = strict_json_loads(self.rfile.read(n)) if n else None
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            data = {}
+        try:
+            result = PAIRING.redeem(data.get("code"), data.get("device_name"),
+                                    self.client_address[0])
+        except pairing.RateLimited:
+            self._send(429, {"error": "rate_limited"})
+            return
+        except pairing.PairingFailed:
+            self._send(*failed)
+            return
+        except Exception as error:
+            print(f"kore-pairing-error class={type(error).__name__}", file=sys.stderr, flush=True)
+            self._send(*failed)
+            return
+        self._send(200, result)
+
+    def _unpair(self):
+        """POST /unpair with a device token as bearer: forget this device."""
+        status, device_id = authenticate(self.headers.get("Authorization"))
+        if status == 503:
+            self._send(503, {"error": "bridge token not configured"})
+            return
+        if device_id is None or not PAIRING.revoke(device_id):
+            self._send_turn_error("unauthorized")
+            return
+        self.send_response(204)
+        self.end_headers()
+
     def do_POST(self):
+        if self.path in ("/pair", "/unpair"):
+            # No browser may reach the pairing routes (DNS rebinding): the app never sends Origin.
+            if self.headers.get("Origin") is not None:
+                self._send(403, {"error": "forbidden origin"})
+                return
+            if self.headers.get("Transfer-Encoding") is not None:
+                self._send(400, {"error": "Transfer-Encoding wird nicht unterstützt"})
+                return
+            self._pair() if self.path == "/pair" else self._unpair()
+            return
         turn_id, subpath = self._turn_route()
         is_cancel = turn_id is not None and subpath == "/cancel"
         if self.path not in ("/coach", "/coach/adjust-today", "/coach/forget") and not is_cancel:
@@ -2544,8 +2633,11 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if error := runtime_configuration_error():
         raise SystemExit(error)
+    # stderr, damit die Zeilen im journal des Dienstes landen und nicht in einer Antwort.
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     if warning := runtime_configuration_warning():
-        # stderr, damit die Zeile im journal des Dienstes landet und nicht in einer Antwort.
+        print(warning, file=sys.stderr, flush=True)
+    if warning := pairing_startup_warning():
         print(warning, file=sys.stderr, flush=True)
     threading.Thread(
         target=_sweep_turns_forever, args=(TURNS,), name="kore-turn-sweeper", daemon=True

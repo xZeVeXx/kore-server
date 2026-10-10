@@ -8,8 +8,15 @@ Chat-Lauf sehen, ist die Titelsuche hier standardmaessig aus; die Titel-Tests
 import pytest
 
 import bridge
+import pairing
 
 
 @pytest.fixture(autouse=True)
 def no_session_title_lookup(monkeypatch):
     monkeypatch.setattr(bridge, "lookup_session_title", lambda hermes_session_id: None)
+
+
+@pytest.fixture(autouse=True)
+def isolated_pairing_state(monkeypatch, tmp_path):
+    """Never touch a real pairing state dir; this one does not exist unless a test creates it."""
+    monkeypatch.setattr(bridge, "PAIRING", pairing.PairingStore(str(tmp_path / "pairing-state")))

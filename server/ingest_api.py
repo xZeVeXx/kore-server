@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+import auth_devices
 import store
 from body_limit import BodyLimitMiddleware
 from models import PlanAck, Snapshot
@@ -25,6 +26,8 @@ def _required_secret(name: str) -> str:
 
 
 INGEST_TOKEN = _required_secret("KORE_INGEST_TOKEN")
+# Paired devices (contract/pairing-v1.md), read-only; None without KORE_STATE_DIR.
+DEVICE_TOKENS = auth_devices.from_env()
 ORIGIN_POLICY = policy_from_env()
 
 ALLOWED_ORIGINS = allowed_origins_from_env()
@@ -54,10 +57,13 @@ def startup() -> None:
 
 
 def require_ingest_token(authorization: str = Header(default="")) -> None:
+    """The static ingest token or a paired device's token; both checks always run."""
     # Bytes, not str: compare_digest raises on non-ASCII str, and headers arrive as latin-1.
     supplied = authorization.encode("utf-8", "surrogatepass")
     expected = f"Bearer {INGEST_TOKEN}".encode("utf-8")
-    if not hmac.compare_digest(supplied, expected):
+    static_ok = hmac.compare_digest(supplied, expected)
+    device_ok = DEVICE_TOKENS is not None and DEVICE_TOKENS.device_for_authorization(authorization) is not None
+    if not (static_ok or device_ok):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized",
