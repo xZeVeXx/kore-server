@@ -1,0 +1,24 @@
+# gitleaks-Konfiguration: die Standardregeln bleiben vollständig aktiv, die Allowlist nimmt nur
+# dokumentierte Platzhalter aus. Jeder Eintrag braucht einen Kommentar, warum er harmlos ist;
+# ein echter Fund wird behoben (Schlüssel rotieren, Verlauf bereinigen), nie hier eingetragen.
+title = "kore-server"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Platzhalter 'change-me…' aus den Vorlagen und Tests"
+# Die Vorlagen (.env.example, bridge.env.example), die README und die Tests nennen bewusst
+# 'change-me-…'-Werte; Bridge und Ingest verweigern den Start, solange so ein Wert gesetzt ist
+# (placeholder_guard.py). Es sind keine Geheimnisse. Der Pfadfilter und das Muster gelten
+# zusammen (condition = AND): ein 'change-me' ausserhalb dieser Dateien wird weiter gemeldet.
+condition = "AND"
+paths = [
+  '''(^|/)[^/]*\.env\.example$''',
+  '''^README\.md$''',
+  '''^deploy/README\.md$''',
+  '''(^|/)test_[^/]*\.py$''',
+]
+regexes = [
+  '''(?i)change-me[A-Za-z0-9_.…-]*''',
+]

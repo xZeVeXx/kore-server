@@ -6,6 +6,7 @@ Root-Rechte und ohne Capabilities, die CI hat nur Leserecht.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import unittest
@@ -90,6 +91,70 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("secrets.", workflow)
         self.assertEqual(workflow.count("persist-credentials: false"),
                          workflow.count("actions/checkout@"))
+
+    def test_every_action_is_pinned_to_a_full_commit_sha(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        uses = re.findall(r"^\s*-?\s*uses:\s*(\S+)(.*)$", workflow, flags=re.MULTILINE)
+        self.assertTrue(uses)
+        for ref, rest in uses:
+            with self.subTest(ref=ref):
+                self.assertRegex(ref, r"@[0-9a-f]{40}$")
+                self.assertRegex(rest, r"#\s*v\d+(\.\d+)*")
+
+    def test_dependencies_install_only_from_hashed_lockfiles(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        installs = [l for l in workflow.splitlines() if "pip install" in l]
+        self.assertTrue(installs)
+        for line in installs:
+            with self.subTest(line=line):
+                self.assertIn("--require-hashes -r server/requirements-dev.lock", line)
+
+    def test_gitleaks_scans_the_full_history_with_a_verified_binary(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = workflow.split("\n  gitleaks:\n")[1]
+        self.assertIn("fetch-depth: 0", job)
+        self.assertRegex(job, r'GITLEAKS_SHA256: "[0-9a-f]{64}"')
+        self.assertIn("sha256sum --check", job)
+        self.assertIn("--config .gitleaks.toml", job)
+
+
+class SupplyChainTests(unittest.TestCase):
+    def test_dockerfile_pins_the_base_image_digest_and_installs_with_hashes(self) -> None:
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertRegex(dockerfile, r"(?m)^FROM python:3\.12-slim@sha256:[0-9a-f]{64}$")
+        self.assertIn("pip install --no-cache-dir --require-hashes -r requirements.lock", dockerfile)
+        self.assertIn("COPY server/requirements.lock", dockerfile)
+
+    def test_lockfiles_carry_hashes_and_cover_their_inputs(self) -> None:
+        for source, lock in (("requirements.txt", "requirements.lock"),
+                             ("requirements-dev.txt", "requirements-dev.lock")):
+            with self.subTest(lock=lock):
+                locked = (REPO_ROOT / "server" / lock).read_text(encoding="utf-8")
+                # Every pinned requirement in the input must appear with the same version.
+                for line in (REPO_ROOT / "server" / source).read_text(encoding="utf-8").splitlines():
+                    match = re.fullmatch(r"([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?==([^\s;]+)", line.strip())
+                    if match:
+                        name, version = match.groups()
+                        self.assertRegex(locked, rf"(?mi)^{re.escape(name)}=={re.escape(version)}\b")
+                # Every package in the lock has at least one hash.
+                for block in re.split(r"(?m)^(?=[A-Za-z0-9])", locked):
+                    if re.match(r"[A-Za-z0-9_.-]+==", block):
+                        self.assertIn("--hash=sha256:", block.splitlines()[0] + block)
+
+    def test_gitleaks_config_extends_the_defaults_and_comments_each_allowlist(self) -> None:
+        config = (REPO_ROOT / ".gitleaks.toml").read_text(encoding="utf-8")
+        self.assertIn("useDefault = true", config)
+        self.assertEqual(config.count("[[allowlists]]"), 1)
+        self.assertIn("change-me", config)
+        hook = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        self.assertRegex(hook, r"rev: [0-9a-f]{40} # v\d+\.\d+\.\d+")
+        self.assertIn("id: gitleaks", hook)
+
+    def test_dependabot_covers_pip_actions_and_docker(self) -> None:
+        config = (REPO_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        for ecosystem in ("pip", "github-actions", "docker"):
+            with self.subTest(ecosystem=ecosystem):
+                self.assertIn(f"package-ecosystem: {ecosystem}", config)
 
 
 if __name__ == "__main__":

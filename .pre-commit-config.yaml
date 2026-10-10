@@ -1,0 +1,10 @@
+# Einmalig einrichten: pip install pre-commit && pre-commit install
+# Der Hook prüft vor jedem Commit die gestagten Änderungen auf Geheimnisse
+# (Regeln und Ausnahmen: .gitleaks.toml). Die Revision steht auf dem vollen Commit-SHA;
+# beim Anheben zugleich GITLEAKS_VERSION/-SHA256 in .github/workflows/ci.yml nachziehen.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # v8.30.1
+    hooks:
+      - id: gitleaks
+        args: ["--config=.gitleaks.toml"]

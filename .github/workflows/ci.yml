@@ -9,41 +9,71 @@ on:
 permissions:
   contents: read
 
+# Actions stehen auf dem vollen Commit-SHA (Tags lassen sich verschieben); Dependabot
+# (github-actions) hebt SHA und Versionskommentar gemeinsam an.
 jobs:
   server:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - run: pip install -r server/requirements.txt pytest
+      # Nur aus dem Lockfile, jedes Paket gegen seinen Hash geprüft.
+      - run: pip install --require-hashes -r server/requirements-dev.lock
       - run: pytest server/tests server/integration_tests -q
 
   coach-bridge:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      # bridge.py braucht nur die Standardbibliothek.
-      - run: pip install pytest
+      # bridge.py braucht nur die Standardbibliothek; pytest kommt aus dem Lockfile.
+      - run: pip install --require-hashes -r server/requirements-dev.lock
       - run: pytest coach-bridge -q
 
   scripts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      # kore-doctor braucht nur die Standardbibliothek.
-      - run: pip install pytest
+      # kore-doctor braucht nur die Standardbibliothek; pytest kommt aus dem Lockfile.
+      - run: pip install --require-hashes -r server/requirements-dev.lock
       - run: pytest scripts -q
+
+  gitleaks:
+    # Sucht Geheimnisse im gesamten Verlauf, nicht nur im letzten Stand. Bewusst das offizielle
+    # Release-Binary statt gitleaks-action: kein Lizenzschlüssel, kein Token, kein Fremdcode im
+    # Job ausser dem geprüften Binary. Beim Anheben von GITLEAKS_VERSION die SHA-256 aus der
+    # *_checksums.txt desselben Releases übernehmen (Dependabot sieht diesen Eintrag nicht).
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb" # linux_x64.tar.gz
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks installieren (Prüfsumme fest eingetragen)
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/gitleaks" gitleaks
+      - name: Verlauf scannen
+        run: |
+          "$RUNNER_TEMP/gitleaks/gitleaks" git --config .gitleaks.toml --redact --no-banner --verbose .

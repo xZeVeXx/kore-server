@@ -1,9 +1,11 @@
-FROM python:3.12-slim
+# Digest of the multi-arch index for 3.12-slim (checked 2026-10-10); Dependabot (docker) bumps tag and digest.
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 WORKDIR /app
 
-COPY server/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Every package, including transitive ones, must match a hash from the lock file.
+COPY server/requirements.lock ./requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY server/ ./
 

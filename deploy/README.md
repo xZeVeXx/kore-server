@@ -9,7 +9,7 @@ sudo useradd --system --home /opt/kore-server kore
 sudo mkdir -p /opt/kore-server && sudo chown kore /opt/kore-server
 # server/ aus diesem Repo nach /opt/kore-server kopieren, dann:
 sudo -u kore python3 -m venv /opt/kore-server/.venv
-sudo -u kore /opt/kore-server/.venv/bin/pip install -r /opt/kore-server/requirements.txt
+sudo -u kore /opt/kore-server/.venv/bin/pip install --require-hashes -r /opt/kore-server/requirements.lock
 
 sudo install -m 600 -o kore .env /opt/kore-server/.env   # aus .env.example erzeugt
 sudo cp kore-ingest.service kore-mcp.service /etc/systemd/system/

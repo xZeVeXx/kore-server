@@ -167,7 +167,7 @@ curl -o /dev/null -w "%{http_code}\n" localhost:8000/mcp   # -> 401
 
 Die **401** ist kein Fehler, sondern die richtige Antwort: Der MCP-Port weist jeden ab, der kein
 Token vorzeigt. **Ohne Docker:** [`deploy/`](deploy/) — eigener Systemnutzer, venv,
-`pip install -r server/requirements.txt`, dieselbe `.env` auf `chmod 600`,
+`pip install --require-hashes -r server/requirements.lock`, dieselbe `.env` auf `chmod 600`,
 `systemctl enable --now kore-ingest kore-mcp`. Dieselben zwei `curl`-Proben gelten.
 
 ### Schritt 2 — Deinen Agenten anbinden
@@ -561,7 +561,7 @@ nicht `http://<KORE_BIND_ADDRESS>:8081` ist.
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r server/requirements.txt pytest
+pip install --require-hashes -r server/requirements-dev.lock
 pytest coach-bridge -q
 pytest scripts -q
 pytest server/tests server/integration_tests -q
@@ -570,6 +570,19 @@ pytest server/tests server/integration_tests -q
 Drei getrennte Läufe, genau wie in [`.github/workflows/ci.yml`](.github/workflows/ci.yml): Die
 Server-Tests laden ihre Module mit eigener Umgebung neu und vertragen sich nicht mit den übrigen
 Suiten in einem einzigen `pytest`-Prozess.
+
+**Abhängigkeiten ändern:** `server/requirements.txt` (Laufzeit) und `server/requirements-dev.txt`
+(plus pytest) sind die von Hand gepflegten Eingaben mit festen Versionen; installiert wird nur aus
+den Lockfiles `server/requirements.lock` und `server/requirements-dev.lock`, die jedes Paket samt
+Hash festlegen. Nach einer Änderung (oder einem Dependabot-PR) neu erzeugen:
+
+```bash
+cd server
+uv pip compile requirements.txt     --generate-hashes --universal --python-version 3.12 -o requirements.lock
+uv pip compile requirements-dev.txt --generate-hashes --universal --python-version 3.12 -o requirements-dev.lock
+```
+
+(`pip-compile --generate-hashes` aus pip-tools liefert dasselbe; `uv` ist nur Werkzeug, keine Laufzeit-Abhängigkeit.)
 
 ---
 

@@ -1,4 +1,8 @@
 # Wöchentliche Update-PRs für die gepinnten Abhängigkeiten, die CI-Actions und das Basis-Image.
+# Die Eingaben server/requirements.txt und requirements-dev.txt hebt Dependabot an; die Lockfiles
+# (mit Hashes) erzeugt man danach neu, siehe README-Abschnitt Tests. Ein Test schlägt an, wenn
+# Eingabe und Lockfile auseinanderlaufen. Die gitleaks-Version in ci.yml und .pre-commit-config.yaml
+# pflegt man von Hand.
 # Sicherheitswarnungen (Dependabot alerts) schaltet man zusätzlich in den Repo-Einstellungen ein.
 version: 2
 updates:
