@@ -1,9 +1,15 @@
 # Two processes, one SQLite database, one person. No multi-tenancy.
 #
-# Both ports bind to 127.0.0.1 by default. To reach the server from your iPhone
-# or from a Hermes agent on another host, set KORE_BIND_ADDRESS in .env to the
-# LAN address of this machine (e.g. 10.0.0.10) — never to 0.0.0.0, and never
+# The MCP port (8000) is published on 127.0.0.1 only: the Hermes agent runs on
+# the same host and reaches it at http://127.0.0.1:8000/mcp/.
+#
+# The ingest port (8081) binds to 127.0.0.1 by default. To reach it from your
+# iPhone, set KORE_BIND_ADDRESS in .env to the LAN or VPN address of this
+# machine (e.g. 10.0.0.10 or 100.64.0.10) — never to 0.0.0.0, and never
 # forward these ports in your router.
+#
+# KORE_STATE_DIR is a host directory with the device-pairing state; the ingest
+# container reads it read-only at /state.
 
 services:
   ingest:
@@ -13,12 +19,14 @@ services:
     env_file: .env
     environment:
       KORE_DB_PATH: /data/kore.db
+      KORE_STATE_DIR: /state
     ports:
       - "${KORE_BIND_ADDRESS:-127.0.0.1}:8081:8081"
     volumes:
       - kore-db:/data
+      - ${KORE_STATE_DIR:-./state}:/state:ro
     restart: unless-stopped
-    # Kein Prozess im Container braucht Root-Rechte oder Capabilities (Port > 1024, Nutzer kore).
+    # No process in the container needs root or capabilities (port > 1024, user kore).
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -34,11 +42,11 @@ services:
       KORE_MCP_HOST: 0.0.0.0
       KORE_MCP_PORT: "8000"
     ports:
-      - "${KORE_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - kore-db:/data
     restart: unless-stopped
-    # Kein Prozess im Container braucht Root-Rechte oder Capabilities (Port > 1024, Nutzer kore).
+    # No process in the container needs root or capabilities (port > 1024, user kore).
     security_opt:
       - no-new-privileges:true
     cap_drop:

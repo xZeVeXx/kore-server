@@ -1,6 +1,6 @@
 """Bridge-Runner 0.10: stream-json, Session aus dem result-Record, signierte Referenz, -t-Allowlist.
 
-Echte Hermes-Ausgaben liegen in fixtures/hermes-v0.21.4/ (Gate G1); Dateien mit dem Praefix
+Echte Hermes-Ausgaben liegen in fixtures/hermes-v0.21.4/; Dateien mit dem Praefix
 `synthetic-` sind nachgebaut und im README dort so markiert.
 """
 import base64
@@ -195,7 +195,7 @@ class StreamJsonRunnerTests(unittest.TestCase):
             bridge.toolsets_for("other", True)
 
     def test_hermes_args_match_the_interface_exactly_for_any_valid_profile(self):
-        for profile in ("kore-coach", "max", "Trainer.2"):
+        for profile in ("kore-coach", "my-coach", "Trainer.2"):
             with self.subTest(profile=profile):
                 args = bridge.hermes_args(
                     profile=profile,
@@ -637,7 +637,7 @@ class StreamJsonRunnerTests(unittest.TestCase):
         })
 
         self.assertEqual(code, 502)
-        self.assertEqual(payload, {"error": "Max konnte keine sichere Antwort liefern."})
+        self.assertEqual(payload, {"error": "Dein Coach konnte keine sichere Antwort liefern."})
 
     @patch("bridge._run_process_bounded")
     def test_adjust_today_runs_in_the_health_scope_with_the_health_scope_toolsets(self, run):

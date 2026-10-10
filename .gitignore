@@ -27,3 +27,6 @@ id_ed25519*
 .DS_Store
 ._*
 .pytest_cache/
+
+# Local device-pairing state (hashes of device tokens).
+state/

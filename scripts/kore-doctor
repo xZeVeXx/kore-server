@@ -3,7 +3,7 @@
 
     python3 scripts/kore-doctor [--bridge-env PATH] [--server-env PATH] [--ingest-url URL] [--bridge-only]
 
-Prueft (Spec E S6, Spec C §4.9):
+Prueft:
 - Ingest `/health` antwortet 200, mit fremdem Origin 403.
 - MCP auf 127.0.0.1 weist ohne Token ab (401) und ist ueber die LAN-Adresse nicht erreichbar.
 - Bridge laeuft und weist ohne Token ab (401); `/health` mit Token meldet jede Faehigkeit aus
@@ -283,7 +283,7 @@ def hermes_child_env(bridge_env: dict, parent_env=None) -> dict:
     """
     source = os.environ if parent_env is None else parent_env
     child = {
-        "HOME": bridge_env.get("KORE_HERMES_HOME", source.get("HOME", "/home/hermes")),
+        "HOME": bridge_env.get("KORE_HERMES_HOME", source.get("HOME", "")),
         "PATH": bridge_env.get("KORE_HERMES_CHILD_PATH", DEFAULT_CHILD_PATH),
     }
     for key in _SAFE_CHILD_ENV_KEYS:
@@ -364,6 +364,10 @@ def check_hermes(report: Report, bridge_env: dict) -> None:
     hermes = bridge_env.get("KORE_HERMES_BIN", "")
     child_env = hermes_child_env(bridge_env)
     home = child_env["HOME"]
+    if not home:
+        report.fail("KORE_HERMES_HOME ist nicht gesetzt und der Doctor hat kein HOME.",
+                    "KORE_HERMES_HOME in bridge.env auf das Home des Hermes-Nutzers setzen.")
+        return
     profile = bridge_env.get("KORE_HERMES_PROFILE", "")
     profile_valid = re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}", profile) is not None
     if not hermes or not os.access(hermes, os.X_OK):
@@ -464,7 +468,7 @@ def check_mcp_not_on_lan(report: Report, hosts, port: int) -> None:
     for host in hosts:
         if can_connect(host, port):
             report.fail(f"MCP ist ueber {host}:{port} erreichbar; er gehoert nur auf 127.0.0.1.",
-                        "docker-compose.override.yml: mcp.ports !override [\"127.0.0.1:8000:8000\"]")
+                        "docker-compose.yml: mcp.ports muss \"127.0.0.1:8000:8000\" sein")
         else:
             report.ok(f"MCP ist ueber {host}:{port} nicht erreichbar.")
 

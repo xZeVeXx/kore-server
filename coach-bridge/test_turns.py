@@ -1,4 +1,4 @@
-"""Bridge-Turn-Auftraege 0.10 (Spec C §4.2–4.6, §10.1 Turn-Teil).
+"""Bridge-Turn-Auftraege 0.10.
 
 202 + turn_id, GET (loescht einen fertigen Turn genau einmal), SSE mit Last-Event-ID-Replay und
 Keepalive, Stopp, Idempotenz ueber client_message_id. Hermes ist gestubbt; die HTTP-Tests laufen
@@ -677,7 +677,7 @@ class TurnEndpointTests(unittest.TestCase):
         self.assertEqual((code, payload["status"]), (200, "done"))
         self.assertEqual(fake.terminated, [])
 
-    # ---- Journal und Titel (0.10 Task 24c) -----------------------------------------------------
+    # ---- Journal und Titel (0.10) -----------------------------------------------------
 
     def capture_journal(self):
         stderr = io.StringIO()

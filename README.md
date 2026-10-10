@@ -31,7 +31,7 @@ geschrieben wurde. Wer sie verletzt, betreibt etwas anderes als das hier beschri
    Einmal-Ticket der Coach-Bridge (`KORE_PLAN_ORIGIN_SECRET`) — der MCP-Token allein genügt nicht.
 3. **Kein Port-Forward.** Beide Ports gehören ins eigene LAN oder auf Loopback. Keine
    Portfreigabe im Router, kein „nur kurz zum Testen". Die Bridge weigert sich, auf `0.0.0.0` zu
-   lauschen, und akzeptiert nur Loopback- oder RFC-1918-Adressen.
+   lauschen, und akzeptiert nur Loopback-, RFC-1918- oder VPN-Adressen (100.64.0.0/10).
 4. **Zwei getrennte Tokens, und du rotierst sie.** Token A spricht die App mit dem Ingest, Token B
    der Agent mit dem MCP. Sie sind absichtlich verschieden, damit ein kompromittierter Agent nicht
    auch schreiben darf, was die App darf. Rotation heißt: neuen Wert in `.env`, Dienste neu starten,
@@ -269,7 +269,7 @@ was trotzdem bleibt. Schwachstellen meldest du privat, siehe [SECURITY.md](SECUR
   vorgesehene Weg, nicht die Ausnahme. In Kore trägst du dabei immer die **LAN-Adresse** ein
   (`10.x`, `172.16–31.x`, `192.168.x`): Tailscale nur als Subnet-Router in dein Heimnetz, nicht mit
   einer `100.x`-Adresse oder einem `*.ts.net`-Namen. Die Coach-Bridge nimmt Kore nur unter einer
-  lokalen Adresse an, und die Bridge selbst lauscht nur auf Loopback- oder RFC-1918-Adressen, nie
+  lokalen Adresse an, und die Bridge selbst lauscht nur auf Loopback-, RFC-1918- oder VPN-Adressen (100.64.0.0/10), nie
   auf `0.0.0.0` oder einem Hostnamen. Ingest und MCP lauschen ohne eigene Einstellung nur auf
   `127.0.0.1`.
 - **Klartext-HTTP.** Alle drei Dienste sprechen HTTP ohne TLS. Wer in deinem Netz mitlesen kann,

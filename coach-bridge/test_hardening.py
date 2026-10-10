@@ -1,4 +1,4 @@
-"""Härtung der Bridge vor der Veröffentlichung (0.10 Task 28).
+"""Härtung der Bridge vor der Veröffentlichung (0.10).
 
 - Ein Authorization-Header mit Nicht-ASCII-Zeichen ist ein 401, keine Ausnahme im Handler.
 - Eine Verbindung, die nichts schickt, belegt keinen Handler-Thread auf Dauer (Slowloris im LAN).

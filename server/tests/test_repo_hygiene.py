@@ -1,4 +1,4 @@
-"""Was ein öffentliches Repo nie enthalten oder erlauben darf (0.10 Task 28).
+"""Was ein öffentliches Repo nie enthalten oder erlauben darf (0.10).
 
 Geheimnisse und Backups bleiben aus Git und aus dem Docker-Build-Kontext, Container laufen ohne
 Root-Rechte und ohne Capabilities, die CI hat nur Leserecht.
@@ -62,9 +62,11 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(compose.count("cap_drop:\n      - ALL"), 2)
         ports = [line.strip() for line in compose.splitlines() if line.strip().startswith('- "')]
         self.assertEqual(len(ports), 2)
-        for port in ports:
-            with self.subTest(port=port):
-                self.assertTrue(port.startswith('- "${KORE_BIND_ADDRESS:-127.0.0.1}:'))
+        # Ingest follows KORE_BIND_ADDRESS (loopback by default); MCP is always loopback-only.
+        self.assertEqual(sorted(ports), [
+            '- "${KORE_BIND_ADDRESS:-127.0.0.1}:8081:8081"',
+            '- "127.0.0.1:8000:8000"',
+        ])
 
 
 class WorkflowTests(unittest.TestCase):

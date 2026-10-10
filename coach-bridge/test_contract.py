@@ -1,4 +1,4 @@
-"""Capability-Vertrag 0.10 (Spec E S5, Spec C §4.11/§5.10).
+"""Capability-Vertrag 0.10.
 
 `contract/app-required-capabilities.json` ist genau die Liste, die die App ab 0.10 verlangt
 (`CoachClient.requiredPrivacyCapabilities`); das App-Repo haelt eine bytegleiche Kopie. Eine
@@ -31,7 +31,7 @@ class CapabilityContractTests(unittest.TestCase):
             "stdin_prompt_transport_v1",
         ):
             self.assertIn(required, values)
-        # Die Bridge nutzt kein --safe-mode mehr; ein Schein-Flag gibt es nicht (Spec C A7).
+        # Die Bridge nutzt kein --safe-mode mehr; ein Schein-Flag gibt es nicht.
         self.assertNotIn("safe_mode_without_health_v1", values)
 
     def test_contract_file_is_stable_json_with_a_trailing_newline(self):

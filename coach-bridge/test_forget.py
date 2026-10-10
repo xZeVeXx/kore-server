@@ -1,7 +1,7 @@
-"""/coach/forget und 30-Tage-Verfall der Kore-Sessions (Spec C §4.8, §10.1; Gate G1).
+"""/coach/forget und 30-Tage-Verfall der Kore-Sessions (Hermes v0.21.4).
 
 Hermes ist durch einen Nachbau der `hermes sessions`-CLI v0.21.4 ersetzt (Ausgabeformate aus
-hermes_cli/sessions_cmd.py). G1-Befunde, die hier festgeschrieben sind:
+hermes_cli/sessions_cmd.py). Befunde, die hier festgeschrieben sind:
 - `sessions prune` ohne `--dry-run` verweigert Hermes, solange Hermes Desktop die state.db des
   Profils haelt. Die Bridge waehlt deshalb nur per `--dry-run`/`list` aus und loescht jede ID
   einzeln mit `sessions delete --yes <id>`.
@@ -79,7 +79,7 @@ class FakeSessionsCLI:
     def _prune(self, rest):
         if "--dry-run" not in rest and self.held:
             return ("Refusing `hermes sessions prune`: another process is using "
-                    "/home/hermes/.hermes/profiles/kore-coach/state.db\n"), 1
+                    "/srv/coach/.hermes/profiles/kore-coach/state.db\n"), 1
         source = self._option(rest, "--source")
         older = self._option(rest, "--older-than")
         candidates = [

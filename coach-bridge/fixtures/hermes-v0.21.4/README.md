@@ -1,4 +1,4 @@
-# Fixtures Hermes v0.21.4 (Gate G1, 24.09.2026)
+# Fixtures Hermes v0.21.4 (24.09.2026)
 
 Echte Ausgaben von Hermes Agent **v0.21.4 (2026.9.21, upstream defb7033)** auf dem Bridge-Host, Profil `<profil>`,
 Quelle `kore-probe`. **Nur harmlose Probe-Inhalte** („Antworte nur mit OK"); keine Health-Daten, keine
@@ -45,19 +45,19 @@ printf 'Antworte nur mit OK' | hermes -p <profil> chat -Q --format stream-json -
 
   (`hermes_cli/cli_agent_setup_mixin.py:576`). Exit-Code 1, kein Modellaufruf (tokens 0), keine neue
   Session angelegt. Aus dem `result`-Record allein ist „unbekannte Session" nicht von „Anmeldung
-  gescheitert" zu unterscheiden — Task 8 muss das entscheiden (stderr-Zeile nur zur Fehlerklassifikation
+  gescheitert" zu unterscheiden — die Bridge muss das entscheiden (stderr-Zeile nur zur Fehlerklassifikation
   oder Existenzprüfung vor dem Resume).
 - Kompression ließ sich in v0.21.4 pro Aufruf nicht erzwingen (kein Schalter; `/compress` wirkt im
   Einmal-Modus nicht, die Anfrage ginge als Text ans Modell). Eine Fixture mit abweichender ID in
   `init`/`result` muss synthetisch abgeleitet und als solche markiert werden.
 
-## Ergänzt in Task 8 (Bridge-Runner)
+## Ergänzt für den Bridge-Runner
 
 - `stream-resume-unknown.stderr.txt`: die stderr-Zeilen des Laufs `stream-resume-unknown.jsonl`, wörtlich
   aus dem Abschnitt oben übernommen (echte Ausgabe). Die Bridge nutzt stderr **nur** zur Erkennung
   „unbekannte Session" und gibt nichts davon an die App.
 - **SYNTHETISCH** (nicht von Hermes erzeugt, nach `hermes_cli/stream_json.py` v0.21.4 gebaut):
   - `synthetic-stream-compressed.jsonl`: abweichende `session_id` in `init` und `result`, wie nach einer
-    Kompression (`_sync_cli_session_id_from_agent`). Kompression ließ sich in G1 nicht erzwingen.
+    Kompression (`_sync_cli_session_id_from_agent`). Kompression ließ sich in der Probe nicht erzwingen.
   - `synthetic-stream-tool-use.jsonl`: ein `tool_use`-/`tool_result`-Paar (kore-MCP-Name, Ticket im
-    `input`, Tool-Ausgabe). Die G1-Probe-Turns riefen kein Werkzeug auf.
+    `input`, Tool-Ausgabe). Die Probe-Turns riefen kein Werkzeug auf.

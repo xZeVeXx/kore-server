@@ -16,10 +16,9 @@
 
 mcp_servers:
   kore:
-    # Adresse, unter der der MCP-Server erreichbar ist (bei Docker Compose die
-    # KORE_BIND_ADDRESS aus der .env). Der abschliessende Schraegstrich hinter /mcp
-    # gehoert dazu.
-    url: http://10.0.0.10:8000/mcp/
+    # Der MCP-Server lauscht nur auf 127.0.0.1 (Hermes laeuft auf demselben Host).
+    # Der abschliessende Schraegstrich hinter /mcp gehoert dazu.
+    url: http://127.0.0.1:8000/mcp/
     headers:
       Authorization: Bearer ${MCP_KORE_API_KEY}
     enabled: true

@@ -1,8 +1,9 @@
-"""S2 und S7: Die Beispiel-Units binden nicht auf 0.0.0.0 und warten aufs Netz."""
+"""Die Beispiel-Units binden nicht auf 0.0.0.0 und warten aufs Netz."""
 
 from __future__ import annotations
 
 import configparser
+import re
 import unittest
 from pathlib import Path
 
@@ -49,9 +50,9 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_bridge_unit_names_no_concrete_user_home_or_profile(self) -> None:
         text = UNITS[2].read_text(encoding="utf-8")
-        for concrete in ("User=hermes", "/home/hermes", "profile max"):
-            with self.subTest(concrete=concrete):
-                self.assertNotIn(concrete, text)
+        for pattern in (r"^User=(?!<)\S+", r"/home/(?!<)\w+"):
+            with self.subTest(pattern=pattern):
+                self.assertIsNone(re.search(pattern, text, re.MULTILINE))
 
 
 if __name__ == "__main__":

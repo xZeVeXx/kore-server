@@ -124,7 +124,7 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertNotIn("plan_origin_v1", bridge.capabilities_payload()["capabilities"])
 
         with patch.object(bridge, "PLAN_ORIGIN_SECRET", "s" * 32), patch.object(
-            bridge, "PLAN_ORIGIN_PRINCIPAL", "marius"
+            bridge, "PLAN_ORIGIN_PRINCIPAL", "athlete"
         ):
             self.assertIn("plan_origin_v1", bridge.capabilities_payload()["capabilities"])
 
@@ -132,7 +132,7 @@ class BridgePrivacyTests(unittest.TestCase):
             self.assertNotIn("plan_origin_v1", bridge.capabilities_payload()["capabilities"])
             self.assertIn("both", bridge.plan_origin_configuration_error())
         with patch.object(bridge, "PLAN_ORIGIN_SECRET", "short"), patch.object(
-            bridge, "PLAN_ORIGIN_PRINCIPAL", "marius"
+            bridge, "PLAN_ORIGIN_PRINCIPAL", "athlete"
         ):
             self.assertNotIn("plan_origin_v1", bridge.capabilities_payload()["capabilities"])
             self.assertIn("32", bridge.plan_origin_configuration_error())
@@ -169,7 +169,7 @@ class BridgePrivacyTests(unittest.TestCase):
             "expires_at": 1_700_000_180,
             "issued_at": 1_700_000_000,
             "nonce": "ab" * 16,
-            "principal": "marius",
+            "principal": "athlete",
             "version": 1,
         }
         raw = json.dumps(
@@ -184,7 +184,7 @@ class BridgePrivacyTests(unittest.TestCase):
         ).decode("ascii")
 
         with patch.object(bridge, "PLAN_ORIGIN_SECRET", secret), patch.object(
-            bridge, "PLAN_ORIGIN_PRINCIPAL", "marius"
+            bridge, "PLAN_ORIGIN_PRINCIPAL", "athlete"
         ), patch.object(bridge, "PLAN_ORIGIN_TTL_SECONDS", 180):
             ticket = bridge.create_plan_origin_ticket(conversation_id)
 
@@ -202,7 +202,7 @@ class BridgePrivacyTests(unittest.TestCase):
         context_fake = "context.payload"
 
         with patch.object(bridge, "PLAN_ORIGIN_SECRET", "s" * 32), patch.object(
-            bridge, "PLAN_ORIGIN_PRINCIPAL", "marius"
+            bridge, "PLAN_ORIGIN_PRINCIPAL", "athlete"
         ):
             expected_ticket = bridge.create_plan_origin_ticket(conversation_id)
             self.assertEqual(bridge.origin_ticket_for("health", conversation_id), expected_ticket)
@@ -236,7 +236,7 @@ class BridgePrivacyTests(unittest.TestCase):
     ):
         conversation_id = "123e4567-e89b-42d3-a456-426614174000"
         with patch.object(bridge, "PLAN_ORIGIN_SECRET", "s" * 32), patch.object(
-            bridge, "PLAN_ORIGIN_PRINCIPAL", "marius"
+            bridge, "PLAN_ORIGIN_PRINCIPAL", "athlete"
         ):
             ticket = bridge.create_plan_origin_ticket(conversation_id)
             run.side_effect = hermes_process(reply_stream(f"Das Ticket lautet {ticket}."))
@@ -278,7 +278,7 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertNotIn("origin_ticket=", prompt)
 
     def test_every_prompt_forbids_announcing_a_card_that_never_comes(self):
-        # Befund 25.09. (Task 24c): Karte angekuendigt, aber kein bzw. ein unvollstaendiger Block.
+        # Karte angekuendigt, aber kein bzw. ein unvollstaendiger Block.
         prompts = [
             bridge.build_prompt("Plan?", None, health_context_allowed=False),
             bridge.build_prompt("Plan?", {"plans_scope": {"complete": True}}, True),
@@ -359,7 +359,7 @@ class BridgePrivacyTests(unittest.TestCase):
         run.side_effect = hermes_process(reply_stream("Antwort", "health-session"))
 
         with patch.object(bridge, "PLAN_ORIGIN_SECRET", "s" * 32), patch.object(
-            bridge, "PLAN_ORIGIN_PRINCIPAL", "marius"
+            bridge, "PLAN_ORIGIN_PRINCIPAL", "athlete"
         ):
             result = bridge.run_turn(
                 "Hallo",
@@ -816,13 +816,13 @@ class BridgePrivacyTests(unittest.TestCase):
             "SSL_CERT_FILE": "/etc/ssl/custom.pem",
         }
 
-        with patch.object(bridge, "HOME", "/home/hermes"), patch.object(
+        with patch.object(bridge, "HOME", "/srv/coach"), patch.object(
             bridge, "CHILD_PATH", "/usr/bin:/bin"
         ):
             child = bridge.hermes_child_env(parent)
 
         self.assertEqual(child, {
-            "HOME": "/home/hermes",
+            "HOME": "/srv/coach",
             "PATH": "/usr/bin:/bin",
             "LANG": "de_DE.UTF-8",
             "SSL_CERT_FILE": "/etc/ssl/custom.pem",
@@ -1082,7 +1082,7 @@ class BridgePrivacyTests(unittest.TestCase):
         with patch.object(bridge, "TOKEN", "configured"), patch.object(
             bridge, "ALLOW_ARGV_PROMPTS", False
         ), patch.object(bridge, "PLAN_ORIGIN_SECRET", "s" * 32), patch.object(
-            bridge, "PLAN_ORIGIN_PRINCIPAL", "marius"
+            bridge, "PLAN_ORIGIN_PRINCIPAL", "athlete"
         ):
             self.assertIsNone(bridge.runtime_configuration_error())
 
@@ -1100,7 +1100,7 @@ class BridgePrivacyTests(unittest.TestCase):
         complete = {
             "TOKEN": "configured",
             "PLAN_ORIGIN_SECRET": "s" * 32,
-            "PLAN_ORIGIN_PRINCIPAL": "marius",
+            "PLAN_ORIGIN_PRINCIPAL": "athlete",
         }
         cases = (
             ("TOKEN", "change-me-bridge-token", "KORE_BRIDGE_TOKEN"),
@@ -1144,7 +1144,7 @@ class BridgePrivacyTests(unittest.TestCase):
         self.assertIn("KORE_BRIDGE_TOKEN", completed.stderr)
         self.assertNotIn("change-me", completed.stderr + completed.stdout)
 
-    def test_bind_host_accepts_only_concrete_loopback_or_rfc1918_ipv4_addresses(self):
+    def test_bind_host_accepts_only_concrete_loopback_rfc1918_or_vpn_ipv4_addresses(self):
         for address in (
             "127.0.0.1",
             "127.0.0.2",
@@ -1152,6 +1152,9 @@ class BridgePrivacyTests(unittest.TestCase):
             "172.16.0.1",
             "172.31.255.254",
             "192.168.1.42",
+            "100.64.0.10",
+            "100.64.0.0",
+            "100.127.255.254",
         ):
             with self.subTest(address=address):
                 self.assertEqual(bridge.validated_bind_host(address), address)
@@ -1165,6 +1168,11 @@ class BridgePrivacyTests(unittest.TestCase):
             " 127.0.0.1",
             "127.0.0.1 ",
             "169.254.1.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "100.64.0.0/10",
+            "fd7a:115c:a1e0::1",
+            "my-host.tail1234.ts.net",
             "192.0.2.1",
             "8.8.8.8",
             "224.0.0.1",
@@ -1177,6 +1185,10 @@ class BridgePrivacyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     bridge.validated_bind_host(address)
 
+    def test_runtime_configuration_requires_a_hermes_home(self):
+        with patch.object(bridge, "TOKEN", "configured"), patch.object(bridge, "HOME", ""):
+            self.assertIn("KORE_HERMES_HOME", bridge.runtime_configuration_error())
+
     def test_runtime_configuration_rejects_an_unsafe_bind_host(self):
         with patch.object(bridge, "TOKEN", "configured"), patch.object(
             bridge, "BIND_HOST", "0.0.0.0"
@@ -1185,7 +1197,7 @@ class BridgePrivacyTests(unittest.TestCase):
 
     @patch("bridge._run_process_bounded")
     def test_stderr_is_never_used_as_reply_or_session_source(self, run):
-        # Bewusst neu gefasst (Spec C §10.1): Session und Antwort kommen nur aus dem
+        # Bewusst neu gefasst Session und Antwort kommen nur aus dem
         # stdout-JSONL, maßgeblich aus dem result-Record. Hermes schreibt `session_id: <id>`
         # zusaetzlich auf stderr (stream_json.py) — diese Zeile und ein Provider-Geheimnis
         # daneben duerfen weder in `session` noch in `reply` landen.

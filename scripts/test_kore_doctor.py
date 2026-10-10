@@ -1,4 +1,4 @@
-"""scripts/kore-doctor gegen gestubbte Endpunkte (Spec E S6, Spec C §4.9, Plan 0.10 P2).
+"""scripts/kore-doctor gegen gestubbte Endpunkte.
 
 Bridge, Ingest und MCP sind kleine HTTP-Server auf 127.0.0.1, `hermes` ist ein Python-Skript. Jede
 Abweichung muss zu Exit != 0 fuehren, und keine Ausgabe darf einen Geheimwert enthalten (die Tests
@@ -82,7 +82,7 @@ FAKE_HERMES = textwrap.dedent("""\
         json.dump(dict(os.environ), handle)
     if args in (["--version"], ["-p", config["profile"], "--version"]):
         print("Hermes Agent v0.21.4 (2026.9.21)")
-        print("Project: /home/hermes/.hermes/hermes-agent")
+        print("Project: /srv/coach/.hermes/hermes-agent")
         sys.exit(0)
     if args[:2] == ["-p", config["profile"]] and args[2:] == ["mcp", "test", "kore"]:
         print("  Testing 'kore'...")
@@ -306,7 +306,7 @@ class DoctorEndToEndTests(DoctorTestCase):
 
 
 class DoctorHermesChildEnvTests(DoctorTestCase):
-    """Befund 25.09.: `claude` lag nur auf dem PATH der Shell, nicht auf dem Kind-PATH der Bridge."""
+    """`claude` lag nur auf dem PATH der Shell, nicht auf dem Kind-PATH der Bridge."""
 
     def hermes_env(self) -> dict:
         return json.loads((self.hermes.parent / "fake-hermes-env.json").read_text())
@@ -366,7 +366,7 @@ class DoctorHermesChildEnvTests(DoctorTestCase):
 
 
 class DoctorSoulTests(DoctorTestCase):
-    """Befund 25.09.: Die SOUL.md des Profils trug noch den Kore-Abschnitt vom Juni (kore-plan ohne
+    """Die SOUL.md des Profils trug noch den Kore-Abschnitt vom Juni (kore-plan ohne
     Plan-ID, Fingerabdruck und Removal-Listen); die App verwarf den Block ohne Karte."""
 
     def test_an_outdated_kore_section_is_a_deviation(self):
@@ -461,7 +461,7 @@ class DoctorUnitTests(unittest.TestCase):
         report = self.doctor.Report(secrets_to_hide=(), stream=open(os.devnull, "w"))
         self.addCleanup(report.stream.close)
         self.doctor.SOUL_SECTION = Path("/nirgends/kore-app-chat-soul.md")
-        self.doctor.check_soul(report, Path("/nirgends"), "max")
+        self.doctor.check_soul(report, Path("/nirgends"), "coach")
         self.assertEqual(report.failures, 0)
 
     def test_report_hides_known_secrets_even_in_unexpected_text(self):

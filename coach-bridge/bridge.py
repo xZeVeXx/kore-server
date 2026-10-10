@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Kore Coach Bridge — verbindet den App-Coach-Tab mit dem self-hosted Agenten Max.
+"""Kore Coach Bridge — verbindet den App-Coach-Tab mit deinem self-hosted Hermes-Agenten.
 Ablauf:  App  → POST /coach {message, conversation_id, session?, health_context_allowed, context?}
          → diese Bridge
          → `hermes -p <KORE_HERMES_PROFILE> chat -Q --format stream-json --query-file -
             --max-turns N --source kore-<scope> -t <Allowlist> --run-budget <s> [--resume <id>]`
            (Prompt nur ueber stdin; stdout ist JSONL, Session aus dem result-Record)
-         → Max-Antwort (Markdown, Absätze erhalten) + signierte Session → JSON zurück an die App.
+         → Antwort des Coachs (Markdown, Absätze erhalten) + signierte Session → JSON zurück an die App.
          POST /coach/adjust-today {session, health_context_allowed, context} → Tages-Anpassung als striktes JSON.
          0.10: POST /coach mit client_message_id → 202 {turn_id}; Worker im Hintergrund, Puffer nur im RAM;
          GET /coach/turns/{id}[/events] (SSE) und POST /coach/turns/{id}/cancel.
          POST /coach/forget loescht Kore-Sessions (Chat oder Scope); Kore-Sessions verfallen nach
          KORE_BRIDGE_SESSION_RETENTION_DAYS (hoechstens 30) Tagen Inaktivitaet.
-Läuft als User `hermes` (systemd). Zero-Dependency (nur Python-Stdlib). Bearer-Auth aus ENV.
+Läuft als eigener Dienst-User (systemd). Zero-Dependency (nur Python-Stdlib). Bearer-Auth aus ENV.
 
 Coach-Upgrade 2026-06-10:
 - -Q (quiet) statt Box-Parsing: vorher zerstörte `" ".join(...)` jede Absatz-Struktur — die App
   bekam einen durchgehenden Textblock. Jetzt bleiben Zeilenumbrüche/Markdown erhalten.
 - `context` (Coach-Briefing der App) wird als [KORE-KONTEXT]-Block an die Nachricht angehängt
-  (wurde vorher stillschweigend verworfen → Max sah die App-Daten im Chat nie).
+  (wurde vorher stillschweigend verworfen → der Coach sah die App-Daten im Chat nie).
 - used_kore = true, sobald ein Briefing mitkam: die Antwort fußt dann auf echten Kore-Daten,
-  auch wenn Max kein MCP-Tool rufen musste (Context-first = weniger Latenz).
+  auch wenn der Coach kein MCP-Tool rufen musste (Context-first = weniger Latenz).
 - Kein Token-Streaming: die hermes-CLI liefert nur die fertige Antwort; die App fällt sauber
   auf JSON zurück. Echtes Streaming bräuchte die hermes-API statt der CLI (späterer Ausbau).
 """
@@ -44,10 +44,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = os.environ.get("KORE_BRIDGE_TOKEN", "")
 BIND_HOST = os.environ.get("KORE_BRIDGE_BIND_HOST", "127.0.0.1")
-HERMES = os.environ.get("KORE_HERMES_BIN", "/home/hermes/.hermes/hermes-agent/venv/bin/hermes")
 INSTANCE_ID = os.environ.get("KORE_INSTANCE_ID", "")
 PROFILE = os.environ.get("KORE_HERMES_PROFILE", "")
-HOME = os.environ.get("KORE_HERMES_HOME", os.environ.get("HOME", "/home/hermes"))
+# Home of the user that runs Hermes: KORE_HERMES_HOME, else the service user's HOME. No fixed default.
+HOME = os.environ.get("KORE_HERMES_HOME") or os.environ.get("HOME", "")
+HERMES = os.environ.get("KORE_HERMES_BIN") or (
+    os.path.join(HOME, ".hermes", "hermes-agent", "venv", "bin", "hermes") if HOME else ""
+)
 CHILD_PATH = os.environ.get(
     "KORE_HERMES_CHILD_PATH",
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -81,7 +84,7 @@ PLAN_ORIGIN_TTL_SECONDS = _bounded_env_int("KORE_PLAN_ORIGIN_TTL_SECONDS", 180, 
 
 
 def session_retention_days(environ=None) -> int:
-    """Verfall der Kore-Sessions in Tagen (Spec C §4.8): Standard und Obergrenze 30."""
+    """Verfall der Kore-Sessions in Tagen: Standard und Obergrenze 30."""
     source = os.environ if environ is None else environ
     raw = source.get("KORE_BRIDGE_SESSION_RETENTION_DAYS", "").strip()
     if not raw:
@@ -108,6 +111,7 @@ _ALLOWED_BIND_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "10.0.0.0/8",
     "172.16.0.0/12",
     "192.168.0.0/16",
+    "100.64.0.0/10",  # CGNAT range used by Tailscale and similar VPNs
 ))
 _SAFE_CHILD_ENV_KEYS = (
     "LANG",
@@ -174,21 +178,21 @@ BRIDGE_CAPABILITIES = (
     "detached_turns_v1",
     # 0.10: POST /coach/forget (Referenzen oder Scope) und 30-Tage-Verfall der Kore-Sessions.
     "session_forget_v1",
-    # 0.10 (Task 24c): optionales `title` im Turn-Ergebnis; nicht im Pflichtvertrag der App.
+    # 0.10: optionales `title` im Turn-Ergebnis; nicht im Pflichtvertrag der App.
     "turn_titles_v1",
 )
 
-# Werkzeugsatz im App-Chat (Spec C §4.7, Entscheidung 24.09.): eine positive Liste. Ohne -t
+# Werkzeugsatz im App-Chat: eine positive Liste. Ohne -t
 # nimmt Hermes die Plattform-Toolsets des Profils, mit -t nur diese. `session_search` fehlt
 # bewusst (kein Wissen ueber Chats und Kanaele hinweg). Erweitern heisst: Konstante aendern und
-# Gate G1 erneut.
+# die Hermes-Probe erneut.
 APP_CHAT_TOOLSETS = {
     "general": ("web", "skills", "memory"),
     "health": ("web", "skills", "memory", "kore"),
 }
 FORBIDDEN_TOOLSETS = ("terminal", "file", "code_execution", "cronjob", "computer_use", "browser")
 _APP_CHAT_TOOLSET_NAMES = frozenset(name for names in APP_CHAT_TOOLSETS.values() for name in names)
-# Hermes soll vor dem harten Kill der Bridge selbst abschliessen koennen (A5).
+# Hermes soll vor dem harten Kill der Bridge selbst abschliessen koennen.
 RUN_BUDGET_MARGIN_S = 15
 _SESSION_SIGNATURE_CONTEXT = b"kore-conversation-session-v1"
 _SESSION_SIGNATURE_LENGTH = 22
@@ -375,7 +379,7 @@ def health_payload() -> dict:
         "app_chat_toolsets": {scope: list(names) for scope, names in APP_CHAT_TOOLSETS.items()},
         "turn_buffer_ttl_hours": TURN_TTL_S // 3600,
         "session_retention_days": SESSION_RETENTION_DAYS,
-        # Nur eine Zahl: vor einem Neustart pruefen, ob gerade ein Turn laeuft (Spec C §4.12).
+        # Nur eine Zahl: vor einem Neustart pruefen, ob gerade ein Turn laeuft.
         "active_turns": TURNS.active_count(),
     }
 
@@ -392,22 +396,22 @@ def authorization_status(authorization_header) -> int:
 
 
 def validated_bind_host(value) -> str:
-    """Accept a concrete IPv4 loopback or RFC 1918 address, never a wildcard/hostname."""
+    """Accept a concrete IPv4 loopback, RFC 1918 or VPN (100.64.0.0/10) address, never a wildcard/hostname."""
     if not isinstance(value, str) or value != value.strip():
         raise ValueError(
-            "KORE_BRIDGE_BIND_HOST must be a concrete IPv4 loopback or RFC 1918 address"
+            "KORE_BRIDGE_BIND_HOST must be a concrete IPv4 loopback, RFC 1918 or VPN (100.64.0.0/10) address"
         )
     try:
         address = ipaddress.ip_address(value)
     except ValueError as error:
         raise ValueError(
-            "KORE_BRIDGE_BIND_HOST must be a concrete IPv4 loopback or RFC 1918 address"
+            "KORE_BRIDGE_BIND_HOST must be a concrete IPv4 loopback, RFC 1918 or VPN (100.64.0.0/10) address"
         ) from error
     if not isinstance(address, ipaddress.IPv4Address) or not any(
         address in network for network in _ALLOWED_BIND_NETWORKS
     ):
         raise ValueError(
-            "KORE_BRIDGE_BIND_HOST must be a concrete IPv4 loopback or RFC 1918 address"
+            "KORE_BRIDGE_BIND_HOST must be a concrete IPv4 loopback, RFC 1918 or VPN (100.64.0.0/10) address"
         )
     return str(address)
 
@@ -447,6 +451,8 @@ def runtime_configuration_error():
         reject_placeholder("KORE_BRIDGE_TOKEN", TOKEN)
     except ValueError as error:
         return str(error)
+    if not HOME:
+        return "KORE_HERMES_HOME must be configured (or HOME set for the service user)"
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(INSTANCE_ID) is None:
         return "KORE_INSTANCE_ID must be configured as a safe explicit instance identifier"
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(PROFILE) is None:
@@ -858,7 +864,7 @@ def verify_session(ref, scope: str, conversation_id) -> "str | None":
     return hermes_session_id
 
 
-# Befund 25.09. (Task 24c): Der Coach kuendigte eine Vorschlagskarte an, lieferte aber keinen
+# Befund: Der Coach kuendigte eine Vorschlagskarte an, lieferte aber keinen
 # Block bzw. einen Update-Block ohne ID, Fingerabdruck und Removal-Listen, den die App still
 # verwirft. Diese Regel steht in jedem Prompt, unabhaengig davon, welcher Stand der SOUL.md im
 # Profil liegt.
@@ -1208,7 +1214,7 @@ def _result_succeeded(record) -> bool:
 
 
 def is_unknown_session_error(result_record, stderr: str, resume_id: str) -> bool:
-    """Hermes v0.21.4 kennt die fortzusetzende Session nicht mehr (Gate G1).
+    """Hermes v0.21.4 kennt die fortzusetzende Session nicht mehr.
 
     Der result-Record sagt dann nur „credentials or agent init failed" — derselbe Text wie bei
     gescheiterter Anmeldung. Eindeutig ist allein die stderr-Zeile `Session not found: <id>`
@@ -1223,7 +1229,7 @@ def is_unknown_session_error(result_record, stderr: str, resume_id: str) -> bool
     return any(line.strip() == expected for line in stderr.splitlines())
 
 
-# ---- Journal bei gescheitertem Turn (0.10 Task 24c) -----------------------------------------
+# ---- Journal bei gescheitertem Turn (0.10) -----------------------------------------
 # Eine Zeile je gescheitertem Turn nach stderr, also ins Journal des Dienstes. Sie traegt nur
 # Kennungen aus festen Vokabularen: nie Prompt, Antwort, Token, Health-Werte oder stderr-Rohtext.
 _HERMES_INIT_FAILED = "credentials or agent init failed"
@@ -1270,7 +1276,7 @@ def journal_turn_failure(*, turn_id, scope, error_code, failure_class=None, exit
         pass
 
 
-# ---- Session-Titel (0.10 Task 24c) -----------------------------------------------------------
+# ---- Session-Titel (0.10) -----------------------------------------------------------
 # Hermes vergibt mit auxiliary.title_generation einen Titel pro Session. Die Bridge liest ihn nach
 # einem erfolgreichen Chat-Turn nur lesend ueber `sessions export` (Zeitbudget 5 s) und reicht ihn
 # bereinigt weiter; fehlt er oder scheitert das Lesen, fehlt `title` einfach.
@@ -1330,11 +1336,11 @@ class TurnOutcome:
 
 # Antworttexte fuer Turn-Enden (heutige Saetze); HTTP-Status nur fuer den synchronen Pfad.
 TURN_ERRORS = {
-    "timeout": (504, "Max hat zu lange gebraucht (Timeout)."),
-    "output_limit": (502, "Max hat zu viele Ausgabedaten geliefert."),
-    "hermes_failed": (502, "Max konnte keine sichere Antwort liefern."),
+    "timeout": (504, "Dein Coach hat zu lange gebraucht (Timeout)."),
+    "output_limit": (502, "Dein Coach hat zu viele Ausgabedaten geliefert."),
+    "hermes_failed": (502, "Dein Coach konnte keine sichere Antwort liefern."),
 }
-_NO_REPLY = "(keine Antwort von Max erhalten)"
+_NO_REPLY = "(keine Antwort von deinem Coach erhalten)"
 
 
 def run_budget_seconds() -> int:
@@ -1377,7 +1383,7 @@ def _run_hermes_once(args, prompt_bytes, on_delta, on_process):
 def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
              origin_ticket, on_delta=None, max_turns: str = "6",
              on_process=None) -> TurnOutcome:
-    """Ein Coach-Turn ueber stream-json, fuer den synchronen Pfad und (Task 10) fuer Worker.
+    """Ein Coach-Turn ueber stream-json, fuer den synchronen Pfad und fuer Worker.
 
     - `origin_ticket` erzeugt der Aufrufer (`origin_ticket_for`); nur mit Ticket kommt `kore` in -t.
     - `on_delta` bekommt die ROHEN text-Deltas (ungeschwaerzt); wer sie ausliefert, schwaerzt das
@@ -1485,7 +1491,7 @@ def turn_outcome_payload(outcome: TurnOutcome) -> dict:
     return payload
 
 
-# ---- Turn-Auftraege (0.10, Spec C §4.2–4.6) -------------------------------------------------
+# ---- Turn-Auftraege (0.10) -------------------------------------------------
 # Nur RAM: ein Neustart verliert den Puffer (Entscheidung). Ein fertiger Turn liegt hoechstens
 # 24 h und verschwindet mit der ersten vollstaendig ausgelieferten GET-Antwort; SSE loescht nie.
 MAX_BUFFERED_TURNS = 64
@@ -1529,7 +1535,7 @@ class TurnCancelled(RuntimeError):
 
 
 class TicketRedactor:
-    """Schwaerzt das Herkunftsticket in gestreamten Deltas (Spec C §4.6).
+    """Schwaerzt das Herkunftsticket in gestreamten Deltas.
 
     Zurueckgehalten wird nur das laengste Textende, das ein Anfang des Tickets sein kann — also
     hoechstens len(ticket) − 1 Zeichen. Ein ueber zwei Deltas geteiltes Ticket verlaesst die
@@ -1895,10 +1901,10 @@ def _sweep_turns_forever(store: TurnStore) -> None:
             pass
 
 
-# ---- Loeschen und Verfall der Kore-Sessions (0.10, Spec C §4.8) ----------------------------
+# ---- Loeschen und Verfall der Kore-Sessions (0.10) ----------------------------
 # Nur ueber die Hermes-CLI, nur Sessions der Quellen kore-general/kore-health; das Gedaechtnis
 # des Profils (memories/, Honcho) fasst die Bridge nie an.
-# Gate G1 (Hermes v0.21.4): `sessions prune` verweigert, solange ein anderer Prozess (Hermes
+# Hermes v0.21.4: `sessions prune` verweigert, solange ein anderer Prozess (Hermes
 # Desktop, `hermes serve`) die state.db des Profils haelt. Ausgewaehlt wird deshalb nur lesend
 # (`prune --dry-run`, `list`), geloescht jede ID einzeln mit `sessions delete --yes <id>` — das
 # hat diese Sperre nicht. Nie `--force`. `delete` loescht keine Kompressions-Vorgaenger (sie
@@ -2293,7 +2299,7 @@ def adjust_today(data) -> tuple:
     raw = outcome.reply
     start, end = raw.find("{"), raw.rfind("}")
     if start < 0 or end <= start:
-        return 502, {"error": "Max hat kein JSON geliefert"}
+        return 502, {"error": "Dein Coach hat kein JSON geliefert"}
     try:
         obj = strict_json_loads(raw[start:end + 1])
     except ValueError:

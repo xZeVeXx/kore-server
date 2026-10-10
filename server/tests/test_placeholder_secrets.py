@@ -1,4 +1,4 @@
-"""S3: Ingest und MCP starten nicht mit leerem oder `change-me`-Geheimnis aus `.env.example`.
+"""Ingest und MCP starten nicht mit leerem oder `change-me`-Geheimnis aus `.env.example`.
 
 Die Meldung nennt den Schluessel, nie den Wert — sie landet im Journal des Dienstes.
 """

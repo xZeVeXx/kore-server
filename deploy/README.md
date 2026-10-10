@@ -27,8 +27,8 @@ lauscht auf `KORE_MCP_HOST`, Standard `127.0.0.1` — richtig, wenn dein Hermes-
 demselben Rechner läuft. Die Ports nie im Router weiterleiten.
 
 Nur **im Docker-Container** lauschen beide Dienste auf `0.0.0.0` (`Dockerfile`,
-`docker-compose.yml`); nach außen veröffentlicht Compose sie ausschließlich auf
-`KORE_BIND_ADDRESS`.
+`docker-compose.yml`); nach außen veröffentlicht Compose den Ingest ausschließlich auf
+`KORE_BIND_ADDRESS` und den MCP-Server ausschließlich auf `127.0.0.1`.
 
 Die Units warten auf `network-online.target` und geben nie auf
 (`StartLimitIntervalSec=0`, `RestartSec=5`): Fehlt beim Booten die LAN-Adresse noch
@@ -45,5 +45,5 @@ gestartetes Hermes können per `sudo` oder setuid mehr Rechte bekommen als ihr D
 Wer weiter härten will, ergänzt für Ingest und MCP `PrivateTmp=yes`, `ProtectSystem=full` und
 `ProtectHome=yes` (die Datenbank muss dann außerhalb von `/usr`, `/etc` und `/home` liegen, etwa
 unter `/opt/kore-server`). Diese drei brauchen Mount-Namespaces; in einem unprivilegierten
-LXC-Container klappt das nur mit aktivierter Verschachtelung (`nesting`), sonst startet der Dienst
+System-Container klappt das nur mit aktivierter Verschachtelung (`nesting`), sonst startet der Dienst
 mit `226/NAMESPACE` nicht.

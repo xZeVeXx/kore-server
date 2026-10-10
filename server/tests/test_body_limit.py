@@ -1,4 +1,4 @@
-"""Größenlimit vor Routing und Token-Prüfung (0.10 Task 28, Härtung vor der Veröffentlichung).
+"""Größenlimit vor Routing und Token-Prüfung (0.10, Härtung vor der Veröffentlichung).
 
 FastAPI liest den Body, bevor es die Token-Abhängigkeit auswertet. Ohne dieses Limit läge ein
 beliebig großer Body eines Fremden im LAN im Arbeitsspeicher, bevor irgendwer „401" sagt.

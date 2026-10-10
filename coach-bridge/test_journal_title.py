@@ -1,4 +1,4 @@
-"""0.10 Task 24c: Journalzeile bei gescheitertem Turn und Hermes-Session-Titel im Turn-Ergebnis.
+"""0.10: Journalzeile bei gescheitertem Turn und Hermes-Session-Titel im Turn-Ergebnis.
 
 Die Journalzeile traegt nur Kennungen (Zeit, turn_id, Scope, error_code, Klasse, Exit-Code) und nie
 Prompt, Antwort, Token, Health-Werte oder stderr-Rohtext. Der Titel kommt lesend aus

@@ -1,7 +1,7 @@
 # Hermes v0.21.4, Profil <profil>, -t web,skills,memory,kore
 # Quelle: model_tools.get_tool_definitions(enabled_toolsets=["web","skills","memory","kore"]) mit HERMES_HOME=<Profil-Home>, nur lesend (24.09.2026)
 # Ohne MCP-Discovery: die mcp__kore__*-Werkzeuge registriert Hermes erst beim Start des MCP-Servers im Lauf.
-# Ob der Lauf mcp__kore__get_recovery_today erreicht, prüft der Health-Prüfturn (STOP B, Marius' OK).
+# Ob der Lauf mcp__kore__get_recovery_today erreicht, prüft der Health-Prüfturn.
 memory
 skill_manage
 skill_view
