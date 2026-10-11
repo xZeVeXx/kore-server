@@ -453,7 +453,9 @@ class DoctorUnitTests(unittest.TestCase):
                     [sys.executable, "-c",
                      "import json, bridge; print(json.dumps(bridge.hermes_child_env()))"],
                     capture_output=True, text=True, timeout=30, cwd=BRIDGE_DIR,
-                    env={**parent, **bridge_env, "PYTHONPATH": str(BRIDGE_DIR)},
+                    # PYTHONCOERCECLOCALE=0: fehlt die Locale (etwa de_DE auf CI-Runnern), setzt Python sonst
+                    # selbst LC_CTYPE=C.UTF-8 in die eigene Umgebung — das ist kein Verhalten der Bridge.
+                    env={**parent, **bridge_env, "PYTHONPATH": str(BRIDGE_DIR), "PYTHONCOERCECLOCALE": "0"},
                 )
                 self.assertEqual(process.returncode, 0, process.stderr)
                 expected = json.loads(process.stdout)
