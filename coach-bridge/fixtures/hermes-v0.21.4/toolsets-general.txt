@@ -8,9 +8,10 @@ web_extract
 web_search
 # Zur Laufzeit zusätzlich (nicht aus get_tool_definitions): das Toolset memory bringt die Werkzeuge des
 # externen Gedächtnis-Providers des Profils mit (agent/agent_init.py, inject_memory_provider_tools).
-# Im Probe-Profil ist memory.provider = honcho; der Probe-Turn nannte:
-# honcho_profile
-# honcho_search
-# honcho_context
-# honcho_reasoning
-# honcho_conclude
+# Im Probe-Profil war ein externer Provider eingetragen (memory.provider = <provider>); der Probe-Turn
+# nannte fünf Werkzeuge mit dessen Präfix:
+# <provider>_profile
+# <provider>_search
+# <provider>_context
+# <provider>_reasoning
+# <provider>_conclude

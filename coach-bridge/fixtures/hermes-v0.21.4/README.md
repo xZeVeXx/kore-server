@@ -2,7 +2,8 @@
 
 Echte Ausgaben von Hermes Agent **v0.21.4 (2026.9.21, upstream defb7033)** auf dem Bridge-Host, Profil `<profil>`,
 Quelle `kore-probe`. **Nur harmlose Probe-Inhalte** („Antworte nur mit OK"); keine Health-Daten, keine
-Geheimnisse. Die Probe-Sessions sind danach gelöscht.
+Geheimnisse. Die Probe-Sessions sind danach gelöscht. Betreiberspezifisches ist durch Platzhalter ersetzt:
+der Modellname im `init`-Record durch `<modell>`, der externe Gedächtnis-Provider durch `<provider>`.
 
 ## Befehle
 
