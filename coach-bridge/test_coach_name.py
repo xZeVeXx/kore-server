@@ -7,12 +7,12 @@ import bridge
 
 class CoachNameValidationTests(unittest.TestCase):
     def test_accepts_plain_names(self):
-        for raw in ("Peter", "Coach Lena", "Zoë", "Jean-Luc", "O'Brien", "Dr. Fit", "Coach 2", "a", "A" * 24):
+        for raw in ("Peter", "Coach Lena", "Noël", "Jean-Luc", "O'Brien", "Dr. Fit", "Coach 2", "a", "A" * 24):
             with self.subTest(raw=raw):
                 self.assertEqual(bridge.valid_coach_name(raw), raw)
 
     def test_decomposed_accents_are_composed(self):
-        self.assertEqual(bridge.valid_coach_name("Zoë"), "Zoë")
+        self.assertEqual(bridge.valid_coach_name("Noël"), "Noël")
 
     def test_surrounding_whitespace_is_trimmed(self):
         self.assertEqual(bridge.valid_coach_name("  Peter \n"), "Peter")
