@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -62,6 +63,47 @@ CHILD_PATH = os.environ.get(
     "KORE_HERMES_CHILD_PATH",
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 )
+
+_COACH_NAME_PUNCTUATION = frozenset(" -'.")
+
+
+def valid_coach_name(raw):
+    """Display name of the coach (KORE_COACH_NAME) or None.
+
+    Trimmed, NFC-normalised, 1-24 characters; only Unicode letters, digits, space, hyphen,
+    apostrophe and period. Anything else (markup, URLs, control or format characters, emoji)
+    is not a name, so the app never has to treat the value as anything but plain text.
+    """
+    if not isinstance(raw, str):
+        return None
+    name = unicodedata.normalize("NFC", raw.strip())
+    if not 1 <= len(name) <= 24:
+        return None
+    for char in name:
+        if char in _COACH_NAME_PUNCTUATION:
+            continue
+        category = unicodedata.category(char)
+        if category.startswith("L") or category == "Nd":
+            continue
+        return None
+    return name
+
+
+def coach_name_from_env(env):
+    """(name, warning): an invalid value never stops the bridge, it is ignored with one warning."""
+    raw = env.get("KORE_COACH_NAME")
+    if raw is None or raw == "":
+        return None, None
+    name = valid_coach_name(raw)
+    if name is None:
+        return None, (
+            "KORE_COACH_NAME ignored: use 1-24 letters, digits, spaces, hyphens, apostrophes or "
+            "periods. The app then shows its default name."
+        )
+    return name, None
+
+
+COACH_NAME, COACH_NAME_WARNING = coach_name_from_env(os.environ)
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -368,7 +410,7 @@ def capabilities_payload() -> dict:
         capabilities.append("stdin_prompt_transport_v1")
     if PAIRING.unavailable_reason() is None:
         capabilities.append("device_pairing_v1")
-    return {
+    payload = {
         "service": "kore-coach-bridge",
         "api_version": BRIDGE_API_VERSION,
         "capabilities": sorted(capabilities),
@@ -379,6 +421,10 @@ def capabilities_payload() -> dict:
             "stdin" if PROMPT_TRANSPORT == "stdin" else "argv-explicit-opt-in"
         ),
     }
+    # Optional display name; no capability flag, the field's presence is the signal.
+    if COACH_NAME:
+        payload["coach_name"] = COACH_NAME
+    return payload
 
 
 def health_payload() -> dict:
@@ -2639,6 +2685,8 @@ if __name__ == "__main__":
         print(warning, file=sys.stderr, flush=True)
     if warning := pairing_startup_warning():
         print(warning, file=sys.stderr, flush=True)
+    if COACH_NAME_WARNING:
+        print(COACH_NAME_WARNING, file=sys.stderr, flush=True)
     threading.Thread(
         target=_sweep_turns_forever, args=(TURNS,), name="kore-turn-sweeper", daemon=True
     ).start()

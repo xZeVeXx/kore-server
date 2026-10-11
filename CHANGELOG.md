@@ -23,6 +23,16 @@ First public release.
   addresses. The README describes WireGuard on a router (the phone gets a home-network address, plain
   `http` works as at home) and Tailscale via `tailscale serve` with HTTPS (iOS blocks plain `http` to
   Tailscale addresses), including the note about certificate transparency logs.
+- **Coach name.** Optional `KORE_COACH_NAME` in `bridge.env` (1 to 24 characters: letters, digits,
+  space, hyphen, apostrophe, period). A valid name appears as `"coach_name"` in `/health` and
+  `/capabilities`; an invalid one is ignored with one startup warning, the bridge still starts. The
+  capability list is unchanged: the field's presence is the signal.
+- README: choosing a new or an existing Hermes profile, including the consequences of an existing one
+  (health data in its general memory, Kore section in its `SOUL.md`, the `kore` MCP server in it, an
+  external memory provider receives Kore chats, deleting in Kore does not reach them); model providers
+  that are Hermes plugins are enabled per profile without copying credentials; `KORE_HERMES_CHILD_PATH`
+  documented precisely (it replaces the default `PATH`); install `qrencode` for the QR code in
+  `kore-doctor pair`.
 - English `README.md` as the main document, German `README.de.md`; `CONTRIBUTING.md`, this changelog,
   issue and pull-request templates, `CODEOWNERS`.
 - Supply chain: hash-locked dependencies (`--require-hashes`), base image pinned by digest, GitHub
@@ -30,6 +40,10 @@ First public release.
 
 ### Changed
 
+- **Tailscale target made consistent.** The recommended setup keeps the services on the LAN address
+  and `tailscale serve` forwards to `http://<LAN address>:8081` / `:8090`; loopback plus `serve` to
+  `127.0.0.1` is described as the Tailscale-only variant. One rule: `serve` forwards to the address the
+  service listens on.
 - **MCP is loopback only.** `docker-compose.yml` publishes port 8000 on `127.0.0.1` and nowhere else;
   the Hermes agent runs on the same host. Profile example and docs use `http://127.0.0.1:8000/mcp/`.
 - The bridge and docs speak neutrally ("your coach"); no internal references, no default paths

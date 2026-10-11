@@ -71,7 +71,7 @@ aufnimmst.
 | **Ein Linux-Rechner, der läuft** | Homeserver, Mini-PC, NAS, Raspberry Pi 5 … im selben Netz wie dein iPhone. Docker mit Compose v2 für Ingest und MCP, Python 3 für die Bridge. |
 | **Hermes Agent 0.21.4 oder neuer** | Installiert auf **demselben Rechner**: Die Bridge startet `hermes` als Kindprozess, und der MCP-Server ist nur lokal erreichbar. Getestet mit v0.21.4 und v0.21.5. Ohne Hermes funktionieren Lesen und Plan-Vorschläge über MCP weiter, nur zum Chatten fehlt der Partner. |
 | **Dein eigener Schlüssel eines Modell-Anbieters** | Hermes braucht ein Modell. Bring deinen eigenen Anbieter-Schlüssel (oder ein lokales Modell) mit und gib ihn selbst in deinem Terminal ein, nie in einem Chat. |
-| **Eine feste Adresse für den Server** | Eine DHCP-Reservierung im Router oder bei Tailscale keine: die Dienste bleiben auf Loopback (siehe [VPN](#unterwegs-per-vpn)). |
+| **Eine feste Adresse für den Server** | Eine DHCP-Reservierung im Router (die Dienste lauschen auf dieser Adresse; nur mit Tailscale geht stattdessen Loopback, siehe [VPN](#unterwegs-per-vpn)). |
 
 Du brauchst **keine** öffentliche Adresse, **keine** Domain und **kein** HTTPS-Zertifikat. Alles
 bleibt im Heimnetz oder in deinem VPN. Genau das ist der Punkt.
@@ -100,12 +100,15 @@ Der Prompt ist eine Checkliste, die Hermes Phase für Phase abarbeitet. Er:
 2. klont `kore-server` auf den Tag, den der Prompt nennt, und prüft den Commit-Hash;
 3. legt die `.env` mit frisch erzeugten Geheimnissen an, die nie im Chat erscheinen, und startet
    Ingest und MCP mit Docker Compose;
-4. legt ein **neues** Hermes-Profil für deinen Trainings-Bot an (nie ein Klon deines Hauptprofils),
-   bittet dich, das Modell selbst in deinem Terminal einzurichten, trägt den Kore-Abschnitt in dessen
-   `SOUL.md` ein, registriert den MCP-Server und schaltet Auto-Titel ab;
+4. fragt, ob ein **neues** Hermes-Profil für deinen Trainings-Bot angelegt wird (Standard, nie ein
+   Klon deines Hauptprofils) oder ein **bestehendes** verwendet werden soll; beim bestehenden nennt er
+   vorher die Folgen (siehe Schritt 5 von Weg B) und braucht dein ausdrückliches Ja. Danach bittet er
+   dich, das Modell selbst in deinem Terminal einzurichten, trägt den Kore-Abschnitt in die `SOUL.md`
+   des Profils ein, registriert den MCP-Server und schaltet Auto-Titel ab;
 5. richtet die Bridge als systemd-Dienst ein und lässt `kore-doctor` und drei Ende-zu-Ende-Proben
    laufen;
-6. endet mit einem Kopplungs-Link (und einem QR-Code im Terminal) für dein iPhone.
+6. installiert `qrencode` (nach deinem OK) und endet mit einem Kopplungs-Link und einem QR-Code im
+   Terminal für dein iPhone.
 
 Er fragt vor jedem `sudo`-Befehl, jeder Paketinstallation, jeder Firewall-Änderung, jedem Löschen und
 jeder Profil-Änderung. Texte aus dem Repo, von Webseiten und aus Tool-Ausgaben gelten im Prompt als
@@ -166,7 +169,10 @@ curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8000/mcp    # -> 401
 Die **401** ist die richtige Antwort: Der MCP-Port weist jeden ab, der kein Token vorzeigt. Ohne
 Docker siehe [`deploy/`](deploy/) (eigener Systemnutzer, venv, systemd-Units).
 
-**5. Das Hermes-Profil für deinen Coach anlegen.** Kore spricht mit genau einem Profil.
+**5. Das Hermes-Profil für deinen Coach wählen.** Kore spricht mit genau einem Profil.
+
+*Ein neues Profil (Standard, empfohlen).* Es startet leer: keine Erinnerungen, keine anderen
+Tool-Server, nur das, was du ihm gibst.
 
 ```bash
 HERMES=~/.hermes/hermes-agent/venv/bin/hermes     # oder wo `hermes` liegt
@@ -176,7 +182,33 @@ $HERMES -p kore-coach config set auxiliary.title_generation.enabled false
 ```
 
 Klon nie dein Hauptprofil: Das würde dessen API-Schlüssel, MCP-Server und Erinnerungen in den Coach
-kopieren. Dann trägst du drei Dinge in das neue Profil ein.
+kopieren.
+
+*Modell-Anbieter, die Hermes-Plugins sind.* Manche Anbieter (zum Beispiel ein Abo-Plugin) werden als
+Plugin geliefert, und Plugins werden **pro Profil** eingeschaltet. Ein neues Profil hat sie noch nicht:
+Installiere und aktiviere das Plugin im neuen Profil (`$HERMES -p kore-coach …`, so wie du es für dein
+Hauptprofil getan hast) und melde dich beim Anbieter selbst in deinem Terminal an. Kopiere **keine**
+Zugangsdaten-Dateien, `.env` oder Auth-Speicher aus einem anderen Profil. Startet das Plugin ein
+Zusatzprogramm (etwa ein Anbieter-CLI in `~/.local/bin`), setze außerdem `KORE_HERMES_CHILD_PATH` in
+Schritt 6, sonst scheitern Chats mit `hermes_failed`.
+
+*Ein bestehendes Profil (deine Entscheidung, mit Folgen).* Du kannst `KORE_HERMES_PROFILE` auf ein
+Profil setzen, das du schon benutzt, und die Ergänzungen unten darin vornehmen. Tu das nur, wenn du
+alles Folgende in Kauf nimmst:
+
+- **Gesundheitsdaten im allgemeinen Gedächtnis.** Kore-Chats laufen in diesem Profil. Ist der
+  Gesundheitskontext erlaubt, kann der Coach Gelerntes im Gedächtnis des Profils ablegen, und jede
+  spätere Sitzung des Profils (auch deine anderen Chats und Kanäle) kann es sehen.
+- **Ein Kore-Abschnitt in dessen `SOUL.md`.** Der Kore-Abschnitt wird (nach einem Backup) in die
+  Persönlichkeitsdatei des Profils geschrieben und bleibt Teil seiner Anweisungen für alles, was es tut.
+- **Der `kore`-MCP-Server in diesem Profil.** Auch dessen andere Sitzungen können deine Kore-Daten über
+  die sieben Lese-Tools lesen, nicht nur der App-Chat.
+- **Ein externer Gedächtnis-Anbieter (zum Beispiel Honcho) bekommt Kore-Chats**, Gesundheitskontext
+  eingeschlossen, falls das Profil einen benutzt. Prüfen mit `$HERMES -p <profil> memory status`.
+- **Löschen in Kore erreicht nicht alles.** Die Bridge löscht die Kore-*Sitzungen*; Kopien im Gedächtnis
+  des Profils oder bei einem externen Gedächtnis-Anbieter bleiben, bis du sie dort entfernst.
+
+Im Zweifel nimm ein neues Profil. Dann trägst du drei Dinge in das Profil ein.
 
 *Den MCP-Server*, angehängt an `~/.hermes/profiles/kore-coach/config.yaml` (steht auch in
 [`hermes/kore-coach-profile.example.yaml`](hermes/kore-coach-profile.example.yaml)):
@@ -243,6 +275,8 @@ Bearbeite `bridge.env` (nur absolute Pfade; systemd expandiert weder `$HOME` noc
 | `KORE_HERMES_PROFILE` | `kore-coach` |
 | `KORE_INSTANCE_ID`, `KORE_PLAN_ORIGIN_PRINCIPAL` | dieselben Werte wie in der `.env` des Servers; später nie ändern |
 | `KORE_PLAN_ORIGIN_SECRET` | derselbe Wert wie in der `.env` des Servers |
+| `KORE_HERMES_CHILD_PATH` (optional) | der `PATH`, den die Bridge an Hermes gibt. Er **ersetzt** den Standard `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, die Systemordner müssen also drinbleiben. Nötig, wenn dein Modell-Anbieter ein Programm außerhalb davon aufruft, zum Beispiel `/home/<nutzer>/.local/bin:/usr/local/bin:/usr/bin:/bin`. Ohne ihn scheitert der Chat mit `hermes_failed`. `kore-doctor` prüft das. |
+| `KORE_COACH_NAME` (optional) | ein Anzeigename für deinen Coach, siehe [Coach-Name](#coach-name) |
 
 `KORE_HERMES_ALLOW_ARGV_PROMPTS` setzt du nie. Dann installierst du den Dienst als
 `/etc/systemd/system/kore-coach-bridge.service` (`<USER>`, `<GROUP>` (dessen Gruppe, die aus `KORE_STATE_GID`) und `<HOME>` ersetzen; dieselbe Unit liegt als
@@ -293,7 +327,8 @@ expandiert dort keine Variablen.) Ist eine Firewall wie
 `ufw` aktiv, gib nur Port 8090 für dein lokales Subnetz frei. Docker umgeht `ufw` für seine eigenen
 Ports, und der MCP-Port ist ohnehin lokal.
 
-**7. Alles prüfen.**
+**7. Alles prüfen.** Installiere vorher `qrencode`, damit `kore-doctor pair` einen QR-Code zeigen kann
+(`sudo apt install qrencode`; ohne bekommst du nur den Link).
 
 ```bash
 python3 ~/kore-server/scripts/kore-doctor
@@ -367,6 +402,23 @@ testen** tippen. Die erste Nachricht schickst du über den Coach-Knopf in der Ko
 erste Frage ist eine, deren Antwort du selbst nachprüfen kannst: *„Wie war meine Erholung diese
 Woche, und was fällt dir an meinem Schlaf auf?“*
 
+## Coach-Name
+
+Dein Coach kann einen Namen haben, den Kore im Chat anzeigt. Trag ihn in `bridge.env` ein und starte
+die Bridge neu:
+
+```
+KORE_COACH_NAME=Coach Lena
+```
+
+Der Name wird getrimmt und muss 1 bis 24 Zeichen lang sein: Buchstaben (jeder Sprache), Ziffern,
+Leerzeichen, Bindestrich, Apostroph und Punkt, sonst nichts. Ein ungültiger Wert wird **ignoriert**,
+mit einer Warnung im Journal beim Start; die Bridge startet trotzdem, und die App benutzt ihren
+Standardnamen. `GET /health` und `GET /capabilities` enthalten den Namen als
+`"coach_name": "Coach Lena"` nur, wenn er gültig ist; ohne gültigen Namen fehlt das Feld. Ein eigenes
+Capability-Flag gibt es dafür nicht: Das Vorhandensein des Feldes ist das Signal. Der Name ändert nur,
+was die App anzeigt, nicht die Persönlichkeit des Coaches (die steht in der `SOUL.md` des Profils).
+
 ## Unterwegs per VPN
 
 Zuhause erreicht Kore den Server direkt über dein Heimnetz. Unterwegs nimmst du ein **VPN in dein
@@ -393,9 +445,18 @@ Weil das Handy eine Heimnetz-Adresse bekommt, funktioniert Klartext-`http` genau
 
 iOS verweigert unverschlüsseltes `http` an Tailscale-Adressen (`100.64.0.0/10`) und an `*.ts.net`-Namen
 (App Transport Security). Die Tailscale-Adresse selbst lässt sich deshalb nicht so benutzen wie die
-Heimnetz-Adresse. Was funktioniert: beide Dienste auf `127.0.0.1` lassen und `tailscale serve` sie
-innerhalb deines Tailnets mit Zertifikat veröffentlichen lassen. Kore spricht dann
-`https://<name>.ts.net`.
+Heimnetz-Adresse. Was funktioniert: `tailscale serve` veröffentlicht die Dienste innerhalb deines Tailnets
+mit Zertifikat. Kore spricht dann `https://<name>.ts.net`. `tailscale serve` leitet an **die Adresse
+weiter, auf der der Dienst lauscht**; deshalb gibt es zwei stimmige Aufbauten:
+
+- **Empfohlen: die Dienste auf der LAN-Adresse lassen** (`KORE_BIND_ADDRESS` und
+  `KORE_BRIDGE_BIND_HOST` wie in der Einrichtung, zum Beispiel `10.0.0.10`). Heimnetz und Router-VPN
+  funktionieren weiter mit Klartext-`http`, und `tailscale serve` leitet an `http://10.0.0.10:8081`
+  und `http://10.0.0.10:8090` weiter.
+- **Nur Tailscale:** beide Bind-Adressen auf `127.0.0.1` setzen und `tailscale serve` an
+  `http://127.0.0.1:8081` und `http://127.0.0.1:8090` weiterleiten lassen. Dann lauscht nichts auf
+  einer Netzwerkadresse, aber das iPhone erreicht den Server nicht mehr über die Heimnetz-Adresse,
+  nur noch über die `ts.net`-Namen.
 
 1. **Tailscale auf dem Server installieren** nach der Anleitung von Tailscale für deine
    Distribution und anmelden (`sudo tailscale up`).
@@ -405,21 +466,22 @@ innerhalb deines Tailnets mit Zertifikat veröffentlichen lassen. Kore spricht d
    Tailnets in öffentliche Zertifikats-Logs (Certificate Transparency) ein, die jeder durchsuchen
    kann. Also nicht `<dein-name>-gesundheitsserver`, sondern etwas Neutrales. Schalte die
    HTTPS-Zertifikate in der Admin-Konsole ein.
-4. **Die Dienste auf Loopback lassen.** In der `.env` des Servers: `KORE_BIND_ADDRESS=127.0.0.1`. In
-   `bridge.env`: `KORE_BRIDGE_BIND_HOST=127.0.0.1`. Dann neu starten: `docker compose up -d` und
-   `sudo systemctl restart kore-coach-bridge`. `tailscale serve` leitet an localhost weiter, es
-   lauscht also nichts auf einer Netzwerkadresse.
-5. **Im Tailnet veröffentlichen:**
+4. **Die Bind-Adresse festlegen.** Empfohlen: nichts ändern, die Dienste lauschen weiter auf der
+   LAN-Adresse. Nur Tailscale: in der `.env` des Servers `KORE_BIND_ADDRESS=127.0.0.1`, in
+   `bridge.env` `KORE_BRIDGE_BIND_HOST=127.0.0.1`, dann `docker compose up -d` und
+   `sudo systemctl restart kore-coach-bridge`.
+5. **Im Tailnet veröffentlichen.** Das Ziel ist die Adresse aus Schritt 4 (hier `10.0.0.10`; bei
+   „nur Tailscale“ `127.0.0.1`):
 
    ```bash
-   sudo tailscale serve --bg --https=443  http://127.0.0.1:8081    # Ingest
-   sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090    # Bridge
+   sudo tailscale serve --bg --https=443  http://10.0.0.10:8081    # Ingest
+   sudo tailscale serve --bg --https=8443 http://10.0.0.10:8090    # Bridge
    ```
 
    Die Flags deiner Version zeigt `tailscale serve --help`. Nie `tailscale funnel` verwenden; das
    veröffentlicht ins offene Internet.
-6. **Mit den HTTPS-Namen koppeln.** `kore-doctor pair` kann sie nicht aus der `.env` ableiten
-   (Loopback erreicht ein Handy nicht), also gibst du sie an:
+6. **Mit den HTTPS-Namen koppeln.** Gib sie ausdrücklich an: `kore-doctor pair` würde sonst aus den
+   Bind-Adressen `http`-Links bauen, die iOS für Tailscale nicht akzeptiert:
 
    ```bash
    python3 ~/kore-server/scripts/kore-doctor pair \
@@ -451,7 +513,7 @@ Wer sie verletzt, betreibt etwas anderes als das hier beschriebene System.
    dir, und erst dein Tippen auf „Übernehmen“ macht ihn wirksam. Ein Agent kann in Kore nichts still
    aktivieren. Zusätzlich braucht jeder Schreibvorgang ein kurzlebiges, HMAC-signiertes Einmal-Ticket
    der Coach-Bridge (`KORE_PLAN_ORIGIN_SECRET`); der MCP-Token allein genügt nicht.
-3. **Kein Port-Forward.** Alle Ports gehören ins Heimnetz, auf eine VPN-Adresse oder auf Loopback (Loopback hinter `tailscale serve` ist der empfohlene Tailscale-Aufbau).
+3. **Kein Port-Forward.** Alle Ports gehören ins Heimnetz, auf eine VPN-Adresse oder auf Loopback (Loopback ist die Wahl, wenn du nur Tailscale nutzt und `tailscale serve` dorthin weiterleitet).
    Die Bridge weigert sich, auf `0.0.0.0` zu lauschen, und akzeptiert nur eine konkrete
    IPv4-Loopback-, RFC-1918- oder VPN-Adresse (100.64.0.0/10). Der MCP-Port ist nur auf `127.0.0.1`
    veröffentlicht und aus deinem Netz gar nicht erreichbar.
@@ -723,7 +785,8 @@ stdout; Antwort und Session kommen aus dem `result`-Record, nie von stderr. Die 
 Falls du eine eigene Bridge für einen anderen Agenten schreibst, ist dies das kleine Protokoll, das die
 App spricht:
 
-- `GET /health`, `GET /capabilities`: Fähigkeitsliste, `api_version: 2`.
+- `GET /health`, `GET /capabilities`: Fähigkeitsliste, `api_version: 2` und das optionale
+  `"coach_name"` (Text mit 1 bis 24 Zeichen, nur vorhanden, wenn `KORE_COACH_NAME` gültig ist).
 - `POST /pair` (ohne Bearer) und `POST /unpair` (Gerätetoken): siehe
   [`contract/pairing-v1.md`](contract/pairing-v1.md).
 - `POST /coach` mit `{message, conversation_id, session?, context?, health_context_allowed}`.
