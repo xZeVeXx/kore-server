@@ -69,10 +69,14 @@ if it was real).
 - Keep a change focused, and explain *why* in the description.
 - Add a test with a behavior change; for a bug fix, a test that fails without the fix.
 - Update `README.md` **and** `README.de.md` when commands, environment variables or behavior
-  change, and add a line to [`CHANGELOG.md`](CHANGELOG.md).
+  change, and add a line to [`CHANGELOG.md`](CHANGELOG.md). Both READMEs show the bridge unit; a test
+  fails when a directive of `coach-bridge/kore-coach-bridge.service` is missing from either.
 - Keep the guarantees: nothing listens on `0.0.0.0` on the host, no port forwarding advice, tokens
-  compared in constant time, no secrets or health values in logs, the prompt on stdin, the tool
-  list fixed by the bridge.
+  of at least 32 characters compared in constant time, the bearer check before the request body is
+  read, no secrets or health values in logs, the prompt on stdin with its fixed first line, the tool
+  list fixed by the bridge (no `web` in the health scope).
+- A new environment variable for a container must be added to that service's `environment:` list in
+  `docker-compose.yml`; Compose does not pass on `.env` as a whole.
 - Fixtures under `coach-bridge/fixtures/` come from real Hermes runs with synthetic content. If you
   record new ones, use made-up questions and data, and mark hand-built files as synthetic.
 - Examples and tests use only `10.0.0.x`, `192.0.2.x` and `100.64.0.x` addresses and no personal names or
