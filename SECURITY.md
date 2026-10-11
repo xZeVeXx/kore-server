@@ -20,7 +20,7 @@ vulnerability**. No other contact is needed.
 | In scope | Out of scope |
 | --- | --- |
 | `server/` (ingest API, MCP server), `coach-bridge/`, `scripts/kore-doctor`, `deploy/`, `Dockerfile`, `docker-compose.yml`, the example configurations | Hermes Agent itself, model providers, third-party MCP servers in the same profile |
-| Bypassing the token or origin checks (including the token check that runs before the request body is read), the pairing (one-time code, attempt limits, device tokens, revocation), the one-time ticket for plan proposals, the bridge's tool allowlist (no `web` in the health scope), its "only reduce" check for adjusted workouts or the bind rules | Operating against the documentation, for example ports forwarded to the internet or `0.0.0.0` forced |
+| Bypassing the token or origin checks (including the token check that runs before the request body is read), the pairing (one-time code, attempt limits, device tokens, revocation), the one-time ticket for plan proposals, the bridge's tool allowlist (no `web` in the health scope unless the request carries `health_web_allowed: true`; never in the adjustment of today's workout), its "only reduce" check for adjusted workouts or the bind rules | Operating against the documentation, for example ports forwarded to the internet or `0.0.0.0` forced |
 | Secrets, device tokens or health data in logs, error messages, the process list or responses | An already compromised machine, or root on your home network |
 
 ## Supported versions
@@ -42,7 +42,11 @@ welcome.
 
 - The profile's memory connects health chats and general chats: a health chat can store facts there,
   and a general chat, which has web search, reads them (a two-step path, health chats themselves have
-  no `web`).
+  no `web` unless the person switches it on).
+- Web search in the health chat is an explicit opt-in (`health_web_allowed`, off by default, at the
+  person's own risk): a manipulated page could talk the coach into sending health values to an
+  address of its choosing. Getting `web` into a health chat or into the adjustment of today's workout
+  *without* that request is a finding.
 - Another program of the same Linux user with terminal or file tools can read the secret files.
 - Bearer tokens have no attempt limit (only the pairing code has one); their protection is a length of
   at least 32 characters and a network you control.
@@ -74,7 +78,7 @@ Kontakt ist nicht nötig.
 | Im Rahmen | Nicht im Rahmen |
 | --- | --- |
 | `server/` (Ingest-API, MCP-Server), `coach-bridge/`, `scripts/kore-doctor`, `deploy/`, `Dockerfile`, `docker-compose.yml`, die Beispielkonfigurationen | Hermes Agent selbst, Modell-Anbieter, MCP-Server Dritter im selben Profil |
-| Umgehen der Token- oder Origin-Prüfung (auch der Token-Prüfung, die vor dem Lesen des Bodys läuft), der Kopplung (Einmalcode, Versuchsgrenzen, Gerätetokens, Widerruf), des Einmal-Tickets für Plan-Vorschläge, der Werkzeug-Allowlist der Bridge (kein `web` im Health-Scope), ihrer „Nur reduzieren“-Prüfung für angepasste Trainings oder der Bind-Regeln | Betrieb gegen die Anleitung, etwa Ports ins Internet freigegeben oder `0.0.0.0` erzwungen |
+| Umgehen der Token- oder Origin-Prüfung (auch der Token-Prüfung, die vor dem Lesen des Bodys läuft), der Kopplung (Einmalcode, Versuchsgrenzen, Gerätetokens, Widerruf), des Einmal-Tickets für Plan-Vorschläge, der Werkzeug-Allowlist der Bridge (kein `web` im Health-Scope, außer die Anfrage trägt `health_web_allowed: true`; nie bei der Tages-Anpassung), ihrer „Nur reduzieren“-Prüfung für angepasste Trainings oder der Bind-Regeln | Betrieb gegen die Anleitung, etwa Ports ins Internet freigegeben oder `0.0.0.0` erzwungen |
 | Geheimnisse, Gerätetokens oder Gesundheitsdaten in Logs, Fehlermeldungen, Prozessliste oder Antworten | Ein bereits kompromittierter Rechner oder Root im Heimnetz |
 
 ### Unterstützte Versionen
@@ -97,7 +101,11 @@ eines zu verschlimmern, oder ein Fix ist willkommen.
 
 - Das Gedächtnis des Profils verbindet Health-Chats und allgemeine Chats: Ein Health-Chat kann dort
   Fakten ablegen, und ein allgemeiner Chat, der die Websuche hat, liest sie (ein Weg in zwei Schritten;
-  die Health-Chats selbst haben kein `web`).
+  die Health-Chats selbst haben kein `web`, solange die Person es nicht einschaltet).
+- Die Websuche im Health-Chat ist ein ausdrücklicher Wunsch (`health_web_allowed`, standardmäßig aus,
+  auf eigenes Risiko der Person): Eine manipulierte Seite könnte den Coach dazu bringen, Gesundheitswerte
+  an eine Adresse ihrer Wahl zu schicken. `web` in einem Health-Chat oder in der Tages-Anpassung *ohne*
+  diesen Wunsch ist dagegen ein Befund.
 - Ein anderes Programm desselben Linux-Nutzers mit Terminal- oder Datei-Werkzeugen kann die
   Geheimnis-Dateien lesen.
 - Bearer-Tokens haben keine Versuchsgrenze (nur der Kopplungscode hat eine); geschützt sind sie durch

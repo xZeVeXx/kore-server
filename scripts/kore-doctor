@@ -9,7 +9,9 @@ Prueft:
 - Bridge laeuft und weist ohne Token ab (401); `/health` mit Token meldet jede Faehigkeit aus
   contract/app-required-capabilities.json, `prompt_transport == stdin` und unter
   `app_chat_toolsets` weder Terminal-, Datei-, Code-, Cron-, Computer- noch Browser-Werkzeuge,
-  im Health-Scope auch kein `web`.
+  im Health-Scope (`health`) auch kein `web`. Die optionale Websuche im Health-Chat auf
+  ausdruecklichen Wunsch (`health_web_opt_in_v1`, Anfragefeld `health_web_allowed`) steht getrennt
+  unter `health_with_web` und darf nur Health plus `web` enthalten.
 - KORE_BRIDGE_TOKEN (bridge.env) sowie KORE_INGEST_TOKEN und KORE_MCP_TOKEN (.env) haben
   mindestens 32 Zeichen.
 - Origin-Geheimnis (per Hash), KORE_INSTANCE_ID und KORE_PLAN_ORIGIN_PRINCIPAL sind in Server und
@@ -74,6 +76,8 @@ BRIDGE_API_VERSION = 2
 FORBIDDEN_TOOLSETS = ("terminal", "file", "code_execution", "cronjob", "computer_use", "browser")
 # Wie coach-bridge/bridge.py (HEALTH_SCOPE_EXCLUDED_TOOLSETS, MIN_TOKEN_CHARS).
 HEALTH_SCOPE_EXCLUDED_TOOLSETS = ("web",)
+# Optional (nicht im Pflichtvertrag): Websuche im Health-Chat nur auf ausdruecklichen Wunsch.
+OPT_IN_CAPABILITY = "health_web_opt_in_v1"
 MIN_TOKEN_CHARS = 32
 STATE_DIR_MODE = 0o750
 # Wie coach-bridge/pairing.py (FILE_MODES, PRIVATE_FILE_MODE); test_kore_doctor.py vergleicht beides.
@@ -252,6 +256,25 @@ def check_token_lengths(report: Report, env: dict, kind: str, label: str) -> Non
 
 # ---- Bridge ----------------------------------------------------------------------------------
 
+def check_health_web_opt_in(report, toolsets: dict, capabilities: set) -> None:
+    """Websuche im Health-Chat nur auf ausdruecklichen Wunsch: Faehigkeit und Liste muessen zusammen
+    stehen, und die Liste darf nur Health plus web enthalten. Fehlt beides (aeltere Bridge), ist das
+    kein Fehler — die Faehigkeit ist optional."""
+    offered = OPT_IN_CAPABILITY in capabilities
+    opt_in = toolsets.get("health_with_web")
+    if not offered and opt_in is None:
+        report.info(f"Websuche im Health-Chat: nicht angeboten (keine Faehigkeit {OPT_IN_CAPABILITY}).")
+    elif offered != (opt_in is not None):
+        report.fail(f"{OPT_IN_CAPABILITY} und app_chat_toolsets.health_with_web passen nicht zusammen.",
+                    "kore-server aktualisieren und die Bridge neu starten.")
+    elif set(opt_in) - set(toolsets.get("health", ())) - {"web"}:
+        report.fail("app_chat_toolsets.health_with_web enthaelt mehr als Health plus web.",
+                    "kore-server aktualisieren und die Bridge neu starten.")
+    else:
+        report.ok(f"{OPT_IN_CAPABILITY}: Websuche im Health-Chat nur mit health_web_allowed:true "
+                  f"({','.join(opt_in)}), Standard bleibt ohne web.")
+
+
 def check_bridge(report: Report, bridge_env: dict, contract: list) -> None:
     host = bridge_env.get("KORE_BRIDGE_BIND_HOST") or "127.0.0.1"
     port = bridge_env.get("KORE_BRIDGE_PORT") or "8090"
@@ -327,6 +350,7 @@ def check_bridge(report: Report, bridge_env: dict, contract: list) -> None:
             summary = "; ".join(f"{scope}: {','.join(names)}" for scope, names in sorted(toolsets.items()))
             report.ok(f"app_chat_toolsets ohne Terminal/Datei/Code/Cron/Computer/Browser, Health ohne web "
                       f"({summary}).")
+            check_health_web_opt_in(report, toolsets, capabilities)
 
     for key in ("session_retention_days", "turn_buffer_ttl_hours", "active_turns"):
         value = health.get(key)

@@ -28,6 +28,16 @@ First public release.
   space, hyphen, apostrophe, period). A valid name appears as `"coach_name"` in `/health` and
   `/capabilities`; an invalid one is ignored with one startup warning, the bridge still starts. The
   capability list is unchanged: the field's presence is the signal.
+- **Web search in the health chat, on explicit request.** Optional JSON boolean `health_web_allowed`
+  on `POST /coach` (synchronous and with `client_message_id`). `true` in the health scope
+  (`health_context_allowed: true`, consent scope 2) gives that turn `web,skills,memory,kore`
+  (`web,skills,memory` without an origin ticket); absent or `false` keeps `skills,memory,kore`. Any
+  other type is `400`; in the general scope the field is ignored; `POST /coach/adjust-today` answers
+  `400` to it and never gets `web`. Switching it between the turns of one chat keeps the session. New
+  optional capability `health_web_opt_in_v1` (not part of `contract/app-required-capabilities.json`),
+  and `/health` reports the list as `app_chat_toolsets.health_with_web`; `kore-doctor` checks that it
+  adds nothing but `web` to the health list. The person's own choice, at their own risk, off by
+  default; see Residual risks in the README and `contract/health-web-opt-in-v1.md`.
 - README: choosing a new or an existing Hermes profile, including the consequences of an existing one
   (health data in its general memory, Kore section in its `SOUL.md`, the `kore` MCP server in it, an
   external memory provider receives Kore chats, deleting in Kore does not reach them); model providers
@@ -63,7 +73,8 @@ First public release.
 - **Health chats have no web search.** The tool list of a health chat is now `skills,memory,kore`
   (before: `web,skills,memory,kore`); health context without an origin ticket, as when adjusting
   today's workout, gets `skills,memory` instead of the general list. The general chat keeps
-  `web,skills,memory`. `/health` reports it under `app_chat_toolsets`.
+  `web,skills,memory`. `/health` reports it under `app_chat_toolsets`. Only the explicit request
+  `health_web_allowed: true` adds `web` to a health chat (see Added).
 - **Hermes runs share one quota.** At most 2 run at once whichever route they come by; the
   synchronous `POST /coach` and `POST /coach/adjust-today` now answer `429` with `code: "busy"` when
   both places are taken, as the background turns did before. A turn keeps its place until Hermes has
@@ -82,7 +93,8 @@ Coach bridge:
   past the tool list. Every prompt now begins with `[KORE-APP-NACHRICHT]`.
 - **No `web` in the health scope.** Health context can no longer be sent out by a web tool; the
   adjustment of today's workout, which carries health context, lost it as well. `kore-doctor` fails
-  when the bridge reports `web` for the health scope.
+  when the bridge reports `web` for the health scope. Only the person's explicit request
+  (`health_web_allowed`, see Added) lifts this for a health chat, never for the adjustment.
 - **`skills.inline_shell` must be off.** With it on, Hermes runs shell commands from a skill's
   `SKILL.md`. The bridge does not start unless the profile's `config.yaml` has it missing or exactly
   `false`; `kore-doctor` checks it; the example profile sets it to `false`.
@@ -151,7 +163,8 @@ tokens, and the startup-only check of `skills.inline_shell`.
   in `docker compose logs ingest`.
 - **Two `Authorization` headers are rejected** by the ingest API (before, the first one counted).
 - **The health chat has no web search** any more; asking the coach in a health chat to search the web
-  no longer works. Use the general chat for that.
+  no longer works. Use the general chat for that, or switch web search on for the health chat in the
+  app (`health_web_allowed`, at your own risk).
 - **The bridge unit changed** (`TasksMax`, `MemoryMax`, `LimitNOFILE`); copy the unit from the README
   again.
 

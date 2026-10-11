@@ -594,12 +594,16 @@ Wer sie verletzt, betreibt etwas anderes als das hier beschriebene System.
    `Authorization`-Header; eine Anfrage mit zwei wird abgewiesen, auch an der Coach-Bridge.
    `/docs`, `/redoc` und
    `/openapi.json` gibt es nicht.
-10. **Keine Websuche dort, wo der Health-Kontext ist.** Ein Health-Chat (und die Tages-Anpassung, die
-    ebenfalls Health-Kontext trägt) bekommt die Werkzeuge `skills,memory,kore`, nie `web`; ein in so
-    einen Chat eingeschleuster Text hat also kein Werkzeug, um den Health-Kontext an eine Adresse
-    seiner Wahl zu schicken. Ein allgemeiner Chat hat die Websuche, bekommt aber weder Health-Kontext
-    noch das `kore`-MCP. Ein indirekter Weg in zwei Schritten über das Gedächtnis des Profils bleibt,
-    siehe [Was bleibt](#was-bleibt-restrisiken).
+10. **Keine Websuche dort, wo der Health-Kontext ist, außer auf deinen ausdrücklichen Wunsch.** Ein
+    Health-Chat (und die Tages-Anpassung, die ebenfalls Health-Kontext trägt) bekommt die Werkzeuge
+    `skills,memory,kore`, nie `web`; ein in so einen Chat eingeschleuster Text hat also kein Werkzeug,
+    um den Health-Kontext an eine Adresse seiner Wahl zu schicken. Nur wenn die Person die Websuche für
+    den Health-Chat in der App einschaltet (Anfragefeld `health_web_allowed: true`, standardmäßig aus),
+    bekommt dieser Chat `web,skills,memory,kore`; die Tages-Anpassung nie. Ein allgemeiner Chat hat die
+    Websuche, bekommt aber weder Health-Kontext noch das `kore`-MCP. Zwei Wege bleiben, siehe
+    [Was bleibt](#was-bleibt-restrisiken): der Wunsch selbst und ein indirekter Weg in zwei Schritten
+    über das Gedächtnis des Profils. Das Protokoll steht in
+    [`contract/health-web-opt-in-v1.md`](contract/health-web-opt-in-v1.md) (englisch).
 
 ### Netz
 
@@ -682,7 +686,7 @@ neues `KORE_BRIDGE_TOKEN` macht zusätzlich alle Chat-Referenzen ungültig: Jede
 | Sie darf | Sie darf nicht |
 | --- | --- |
 | `hermes` für genau das eine Profil aus `KORE_HERMES_PROFILE` starten, als ihr Dienstnutzer, mit dem Prompt über stdin | im App-Chat Terminal, Dateien, Code-Ausführung, Cronjobs, Computer- oder Browser-Steuerung freigeben; die Werkzeuge kommen aus einer festen Liste (`-t`), nicht aus einer Sperrliste |
-| im allgemeinen Chat `web,skills,memory` erlauben, im Health-Chat mit Herkunftsticket `skills,memory,kore`, wo Health-Kontext kein Ticket hat (Tages-Anpassung) `skills,memory` | `web` in die Nähe von Health-Kontext lassen oder Dienst-Geheimnisse an Hermes vererben: Das Kind bekommt nur `HOME`, `PATH` und sieben Schlüssel wie `LANG`/`TZ` |
+| im allgemeinen Chat `web,skills,memory` erlauben, im Health-Chat mit Herkunftsticket `skills,memory,kore`, wo Health-Kontext kein Ticket hat (Tages-Anpassung) `skills,memory`; im Health-Chat `web,skills,memory,kore` (ohne Ticket `web,skills,memory`) nur, wenn die Anfrage `health_web_allowed: true` sagt | `web` ohne diese ausdrückliche Anfrage in die Nähe von Health-Kontext lassen, der Tages-Anpassung in keinem Fall `web` geben oder Dienst-Geheimnisse an Hermes vererben: Das Kind bekommt nur `HOME`, `PATH` und sieben Schlüssel wie `LANG`/`TZ` |
 | jeden Prompt mit der festen ersten Zeile `[KORE-APP-NACHRICHT]` beginnen und jeden Hermes-Lauf in einem frischen, leeren temporären Ordner starten, der danach entfernt wird | eine Nachricht, die mit einem Dateipfad beginnt, diese Datei anhängen lassen oder Hermes `AGENTS.md`, `CLAUDE.md` und ähnliche Kontextdateien aus dem Home-Verzeichnis in den Prompt laden lassen |
 | das angepasste Training des Tages nur zurückgeben, wenn es leichter oder kürzer ist als das, was die App geschickt hat | ein schwereres oder längeres zurückgeben (mehr Sätze, Gewicht, Wiederholungen, längere Dauer, neue oder umbenannte Übungen): Die Antwort wird verworfen, die App bekommt 502 mit einem festen Satz |
 | Sessions der Quellen `kore-general`/`kore-health` lesen, um Titel und Vorgänger zu finden, und sie auf Wunsch oder nach 30 Tagen löschen; die Quelle jeder Session wird vor dem Löschen geprüft, auch beim Vergessen eines ganzen Scopes und beim Verfall | Sessions anderer Quellen anfassen oder das Gedächtnis oder die Konfiguration des Profils ändern |
@@ -713,12 +717,19 @@ dort frei. Was dein Bot danach damit tut, steuert Kore nicht:
   schreiben, und ein allgemeiner Chat, der die Websuche hat, liest dasselbe Gedächtnis. Theoretisch
   könnte eine manipulierte Webseite deshalb einen allgemeinen Chat dazu bringen, früher gemerkte
   Gesundheitsfakten nach draußen zu schicken: erst füllt sich das Gedächtnis in einem Health-Chat,
-  dann lenkt eine Webseite einen späteren allgemeinen Chat. Der Health-Chat selbst hat kein `web`.
-  Was hilft: Halte sensible Werte aus dem heraus, was der Coach speichert (bitte ihn, sie sich nicht
+  dann lenkt eine Webseite einen späteren allgemeinen Chat. Der Health-Chat selbst hat kein `web`,
+  solange du es nicht einschaltest (nächster Punkt). Was hilft: Halte sensible Werte aus dem heraus, was der Coach speichert (bitte ihn, sie sich nicht
   zu merken), sieh das Gedächtnis des Profils ab und zu durch und lösche, was nicht bleiben soll, und
   nimm für Kore ein eigenes Profil, damit nichts aus deinen anderen Kanälen hineinfließt. Health- und
   allgemeiner Chat von Kore teilen sich dieses Profil, ein eigenes Profil trennt sie also nicht
   voneinander.
+- **Websuche im Health-Chat, wenn du sie einschaltest.** Das ist deine ausdrückliche Entscheidung in
+  der App, auf eigenes Risiko, und standardmäßig aus. Ist sie an, stehen der Health-Kontext im Prompt
+  und die `kore`-Werkzeuge neben einem Werkzeug, das Adressen abrufen kann: Eine manipulierte
+  Webseite, die der Coach findet oder liest, könnte ihn dazu bringen, Gesundheitswerte an eine Adresse
+  ihrer Wahl zu schicken, und die Bridge kann das nicht verhindern. Schalte sie nur für eine Frage
+  ein, die sie braucht, und danach wieder aus. Die Tages-Anpassung hat nie Websuche, was auch immer die
+  App schickt (auf das Feld antwortet sie mit `400`).
 - **Externer Gedächtnis-Anbieter.** Nutzt das Profil einen, bringt `memory` dessen Werkzeuge mit, und
   Turns samt Health-Kontext können dorthin gehen. Prüfen mit `hermes -p <profil> memory status`.
 - **Skills.** `skill_manage` gehört zu `skills`. Der Bot kann damit Skills des Profils anlegen oder
@@ -823,7 +834,8 @@ Das Skript braucht nur die Standardbibliothek und gibt nie einen Geheimwert aus.
 - die Bridge ohne Token 401 liefert und ihr `/health` mit Token jede Fähigkeit aus
   [`contract/app-required-capabilities.json`](contract/app-required-capabilities.json),
   `prompt_transport: stdin` und `app_chat_toolsets` ohne Terminal-, Datei-, Code-, Cron-, Computer-
-  und Browser-Werkzeuge und im Health-Scope ohne `web` meldet;
+  und Browser-Werkzeuge und im Health-Scope ohne `web` meldet (die Wunsch-Liste `health_with_web`
+  darf nichts außer `web` hinzufügen);
 - `KORE_BRIDGE_TOKEN` (`bridge.env`) sowie `KORE_INGEST_TOKEN` und `KORE_MCP_TOKEN` (`.env` des
   Servers) mindestens 32 Zeichen haben;
 - `KORE_PLAN_ORIGIN_SECRET` (per Hash), `KORE_INSTANCE_ID` und `KORE_PLAN_ORIGIN_PRINCIPAL` in Server
@@ -947,12 +959,18 @@ App spricht:
   `"coach_name"` (Text mit 1 bis 24 Zeichen, nur vorhanden, wenn `KORE_COACH_NAME` gültig ist).
 - `POST /pair` (ohne Bearer) und `POST /unpair` (Gerätetoken): siehe
   [`contract/pairing-v1.md`](contract/pairing-v1.md).
-- `POST /coach` mit `{message, conversation_id, session?, context?, health_context_allowed}`.
+- `POST /coach` mit
+  `{message, conversation_id, session?, context?, health_context_allowed, health_web_allowed?}`.
   `conversation_id` ist eine kanonische kleingeschriebene UUID. `session` ist eine von der Bridge
   signierte Referenz `general:<id>.<sig>` bzw. `health:<id>.<sig>`, gebunden an Scope und Chat; passt
   sie nicht oder kennt Hermes die Session nicht mehr, beginnt der Kontext neu (`context: "reset"`)
   statt eines Fehlers. Ein Gesundheitskontext wird nur weitergereicht, wenn `health_context_allowed`
-  wörtlich `true` ist (fail-closed).
+  wörtlich `true` ist (fail-closed). Das optionale `health_web_allowed` (Fähigkeit
+  `health_web_opt_in_v1`, Einzelheiten in
+  [`contract/health-web-opt-in-v1.md`](contract/health-web-opt-in-v1.md)) muss ein JSON-Boolean sein,
+  sonst `400`. Nur `true` im Health-Scope nimmt `web` in die Werkzeuge dieses Turns auf; im
+  allgemeinen Scope bleibt es ohne Wirkung, und ein Wechsel zwischen den Turns eines Chats behält die
+  Session.
 - Mit zusätzlichem `client_message_id` (kanonische UUID) startet `POST /coach` einen Turn-Auftrag und
   antwortet sofort `202 {turn_id, status}`; dieselbe `client_message_id` im selben Chat liefert
   denselben Turn. Läuft im Chat schon ein Turn: `409`. Hermes-Läufe sind für die ganze Bridge auf zwei
@@ -966,7 +984,8 @@ App spricht:
 - `GET /coach/turns/{turn_id}` liefert Stand bzw. Ergebnis (ein fertiger Turn wird mit dieser Antwort
   gelöscht); `POST /coach/turns/{turn_id}/cancel` beendet Hermes, idempotent. Der Puffer liegt nur im
   Arbeitsspeicher, höchstens 24 Stunden.
-- `POST /coach/adjust-today`: JSON-Antwort mit dem angepassten Training des Tages. Erlaubt ist nur
+- `POST /coach/adjust-today`: JSON-Antwort mit dem angepassten Training des Tages. Es bekommt nie
+  Websuche: Eine Anfrage, die `health_web_allowed` überhaupt enthält, ist `400`. Erlaubt ist nur
   Reduzieren: Hat die Antwort des Coachs mehr Sätze, mehr Gewicht, mehr Wiederholungen oder eine
   längere Dauer, eine neue oder umbenannte Übung oder eine andere `session_id`, kommt nichts davon
   zurück, sondern
@@ -991,8 +1010,10 @@ App spricht:
   der `config.yaml` des Profils (die Meldung nennt Einstellung und Datei).
 - Werkzeuge per `-t`-Liste statt `--safe-mode` (`/health` meldet sie unter `app_chat_toolsets`):
   allgemein `web,skills,memory`; Health `skills,memory,kore`, ohne `web`. Health-Kontext ohne
-  Herkunftsticket (Tages-Anpassung) bekommt `skills,memory`: kein kore-MCP, kein `web`. Nie Terminal,
-  Dateien, Code-Ausführung, Cronjobs, Computer- oder Browser-Steuerung.
+  Herkunftsticket (Tages-Anpassung) bekommt `skills,memory`: kein kore-MCP, kein `web`. Nur bei
+  `health_web_allowed: true` bekommt ein Health-Chat `web,skills,memory,kore` (ohne Ticket
+  `web,skills,memory`); `/health` meldet diese Liste als `app_chat_toolsets.health_with_web`. Nie
+  Terminal, Dateien, Code-Ausführung, Cronjobs, Computer- oder Browser-Steuerung.
 - Grenzen des HTTP-Servers selbst: höchstens 64 Verbindungen gleichzeitig (weitere werden ohne
   Antwort geschlossen) und 20 s ab Verbindungsbeginn für Kopfzeilen und Body.
 

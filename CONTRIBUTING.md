@@ -74,7 +74,8 @@ if it was real).
 - Keep the guarantees: nothing listens on `0.0.0.0` on the host, no port forwarding advice, tokens
   of at least 32 characters compared in constant time, the bearer check before the request body is
   read, no secrets or health values in logs, the prompt on stdin with its fixed first line, the tool
-  list fixed by the bridge (no `web` in the health scope).
+  list fixed by the bridge (no `web` in the health scope, except on the explicit request
+  `health_web_allowed: true`, and never in the adjustment of today's workout).
 - A new environment variable for a container must be added to that service's `environment:` list in
   `docker-compose.yml`; Compose does not pass on `.env` as a whole.
 - Fixtures under `coach-bridge/fixtures/` come from real Hermes runs with synthetic content. If you

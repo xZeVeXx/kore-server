@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Kore Coach Bridge — verbindet den App-Coach-Tab mit deinem self-hosted Hermes-Agenten.
-Ablauf:  App  → POST /coach {message, conversation_id, session?, health_context_allowed, context?}
+Ablauf:  App  → POST /coach {message, conversation_id, session?, health_context_allowed, context?,
+                              health_web_allowed?}
          → diese Bridge
          → `hermes -p <KORE_HERMES_PROFILE> chat -Q --format stream-json --query-file -
             --max-turns N --source kore-<scope> -t <Allowlist> --run-budget <s> [--resume <id>]`
            (Prompt nur ueber stdin; stdout ist JSONL, Session aus dem result-Record)
          → Antwort des Coachs (Markdown, Absätze erhalten) + signierte Session → JSON zurück an die App.
-         POST /coach/adjust-today {session, health_context_allowed, context} → Tages-Anpassung als striktes JSON.
+         POST /coach/adjust-today {session, health_context_allowed, context} → Tages-Anpassung als striktes JSON
+         (nie mit health_web_allowed: das Feld dort ist ein 400).
          0.10: POST /coach mit client_message_id → 202 {turn_id}; Worker im Hintergrund, Puffer nur im RAM;
          GET /coach/turns/{id}[/events] (SSE) und POST /coach/turns/{id}/cancel.
          POST /coach/forget loescht Kore-Sessions (Chat oder Scope); Kore-Sessions verfallen nach
@@ -233,6 +235,9 @@ BRIDGE_CAPABILITIES = (
     "session_forget_v1",
     # 0.10: optionales `title` im Turn-Ergebnis; nicht im Pflichtvertrag der App.
     "turn_titles_v1",
+    # 0.13: optionales `health_web_allowed` — Websuche im Health-Chat nur auf ausdruecklichen Wunsch;
+    # nicht im Pflichtvertrag der App (fehlt sie, blendet die App den Schalter aus).
+    "health_web_opt_in_v1",
 )
 
 # Werkzeugsatz im App-Chat: eine positive Liste. Ohne -t
@@ -246,8 +251,13 @@ APP_CHAT_TOOLSETS = {
     "general": ("web", "skills", "memory"),
     "health": ("skills", "memory", "kore"),
 }
-# Werkzeuge, die im Health-Scope nie in -t stehen duerfen (auch ohne Ticket).
+# Werkzeuge, die im Health-Scope nie in -t stehen duerfen (auch ohne Ticket) — ausser auf den
+# ausdruecklichen Wunsch der Person (0.13 S13, Entscheidung 11.10.2026: `health_web_allowed`, Websuche
+# im Health-Chat auf eigenes Risiko, aus im Auslieferungszustand). Nur diese Liste und der
+# Parameter `allow_health_web` von hermes_args oeffnen den Weg; die Tages-Anpassung nie.
 HEALTH_SCOPE_EXCLUDED_TOOLSETS = ("web",)
+HEALTH_WITH_WEB_TOOLSETS = ("web", "skills", "memory", "kore")
+HEALTH_WEB_FIELD = "health_web_allowed"
 FORBIDDEN_TOOLSETS = ("terminal", "file", "code_execution", "cronjob", "computer_use", "browser")
 _APP_CHAT_TOOLSET_NAMES = frozenset(name for names in APP_CHAT_TOOLSETS.values() for name in names)
 # Hermes soll vor dem harten Kill der Bridge selbst abschliessen koennen.
@@ -440,7 +450,10 @@ def health_payload() -> dict:
     return {
         "ok": True,
         **capabilities_payload(),
-        "app_chat_toolsets": {scope: list(names) for scope, names in APP_CHAT_TOOLSETS.items()},
+        "app_chat_toolsets": {
+            **{scope: list(names) for scope, names in APP_CHAT_TOOLSETS.items()},
+            "health_with_web": list(HEALTH_WITH_WEB_TOOLSETS),
+        },
         "turn_buffer_ttl_hours": TURN_TTL_S // 3600,
         "session_retention_days": SESSION_RETENTION_DAYS,
         # Nur eine Zahl: vor einem Neustart pruefen, ob gerade ein Turn laeuft.
@@ -950,8 +963,23 @@ def consent_contract_error(data, require_health: bool = False):
     return None
 
 
+def health_web_flag_error(data):
+    """`health_web_allowed` ist ein JSON-Boolean oder fehlt; alles andere ist ein 400."""
+    if HEALTH_WEB_FIELD in data and type(data[HEALTH_WEB_FIELD]) is not bool:
+        return 400, {"error": "health_web_allowed muss ein JSON-Boolean sein"}
+    return None
+
+
+def health_web_requested(data) -> bool:
+    """Websuche im Health-Chat nur bei health_context_allowed:true UND health_web_allowed:true.
+    Im allgemeinen Chat wirkt das Feld nicht (er hat `web` ohnehin)."""
+    return data.get("health_context_allowed") is True and data.get(HEALTH_WEB_FIELD) is True
+
+
 def chat_contract_error(data):
     if error := consent_contract_error(data):
+        return error
+    if error := health_web_flag_error(data):
         return error
     message = data.get("message")
     if not isinstance(message, str) or not message.strip():
@@ -976,13 +1004,15 @@ def origin_ticket_for(scope: str, conversation_id):
     return create_plan_origin_ticket(conversation_id)
 
 
-def toolsets_for(scope: str, has_origin_ticket: bool) -> tuple:
+def toolsets_for(scope: str, has_origin_ticket: bool, health_web: bool = False) -> tuple:
     """-t-Liste pro Turn: kore-MCP nur im Health-Scope mit Ticket; der Health-Scope ohne Ticket
-    (z. B. die Tages-Anpassung) bekommt dieselbe Liste ohne kore — und damit auch ohne web."""
+    (z. B. die Tages-Anpassung) bekommt dieselbe Liste ohne kore — und damit auch ohne web.
+    `web` kommt im Health-Scope nur mit `health_web=True` (ausdruecklicher Wunsch, 0.13 S13); im
+    allgemeinen Scope aendert das Flag nichts."""
     if scope not in _SESSION_SCOPES:
         raise ValueError("scope is invalid")
     if scope == "health":
-        names = APP_CHAT_TOOLSETS["health"]
+        names = HEALTH_WITH_WEB_TOOLSETS if health_web is True else APP_CHAT_TOOLSETS["health"]
         return names if has_origin_ticket else tuple(name for name in names if name != "kore")
     return APP_CHAT_TOOLSETS["general"]
 
@@ -1000,9 +1030,10 @@ def _turn_limit(max_turns) -> int:
 
 
 def hermes_args(*, profile: str, scope: str, toolsets: tuple, run_budget_s: int,
-                max_turns: str, resume_id=None) -> list:
+                max_turns: str, resume_id=None, allow_health_web: bool = False) -> list:
     """Genau ein Aufrufmuster fuer Chat und Tages-Anpassung. Nie --safe-mode, nie
-    --ignore-rules (SOUL.md und Gedaechtnis des Profils bleiben), nie ein argv-Prompt."""
+    --ignore-rules (SOUL.md und Gedaechtnis des Profils bleiben), nie ein argv-Prompt.
+    `web` im Health-Scope nur mit `allow_health_web=True` (genau dieser Wert, kein Wahrheitswert)."""
     if not isinstance(profile, str) or _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(profile) is None:
         raise ValueError("profile is invalid")
     if scope not in _SESSION_SCOPES:
@@ -1013,7 +1044,11 @@ def hermes_args(*, profile: str, scope: str, toolsets: tuple, run_budget_s: int,
         or any(name in FORBIDDEN_TOOLSETS or name.startswith("hermes-") for name in toolsets)
     ):
         raise ValueError("toolsets are outside the app-chat allowlist")
-    if scope == "health" and any(name in HEALTH_SCOPE_EXCLUDED_TOOLSETS for name in toolsets):
+    if (
+        scope == "health"
+        and allow_health_web is not True
+        and any(name in HEALTH_SCOPE_EXCLUDED_TOOLSETS for name in toolsets)
+    ):
         raise ValueError("the health scope never runs with web tools")
     if type(run_budget_s) is not int or run_budget_s < 1:
         raise ValueError("run_budget_s must be a positive integer")
@@ -1611,13 +1646,15 @@ def _run_hermes_once(args, prompt_bytes, on_delta, on_process):
 
 def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
              origin_ticket, on_delta=None, max_turns: str = "6",
-             on_process=None) -> TurnOutcome:
+             on_process=None, health_web: bool = False) -> TurnOutcome:
     """Ein Coach-Turn ueber stream-json, fuer den synchronen Pfad und fuer Worker.
 
     - `origin_ticket` erzeugt der Aufrufer (`origin_ticket_for`); nur mit Ticket kommt `kore` in -t.
     - `on_delta` bekommt die ROHEN text-Deltas (ungeschwaerzt); wer sie ausliefert, schwaerzt das
       Ticket selbst gepuffert. `reply` im Ergebnis ist geschwaerzt.
     - `on_process` bekommt jeden gestarteten Hermes-Prozess (bei „expired" zwei).
+    - `health_web=True` (nur Health-Scope) nimmt `web` in -t auf; im allgemeinen Scope ohne Wirkung.
+      Die Session haengt nicht an der -t-Liste: ein Wechsel zwischen Turns setzt nichts zurueck.
     - Laufzeitfehler kommen als `error_code` zurueck, der bisher gestreamte Text als `reply`.
     """
     if PROMPT_TRANSPORT != "stdin":
@@ -1643,7 +1680,8 @@ def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
     # `--query-file -` liest stdin vollstaendig; der Gesundheitskontext beruehrt weder die
     # Prozessliste noch die Platte.
     prompt_bytes = prompt.encode("utf-8")
-    toolsets = toolsets_for(scope, origin_ticket is not None)
+    health_web = health and health_web is True
+    toolsets = toolsets_for(scope, origin_ticket is not None, health_web=health_web)
 
     if session_ref is None:
         resume_id, context_state, reset_reason = None, "new", None
@@ -1660,6 +1698,7 @@ def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
                 run_budget_s=run_budget_seconds(),
                 max_turns=turn_limit,
                 resume_id=resume,
+                allow_health_web=health_web,
             ),
             prompt_bytes,
             on_delta,
@@ -2111,7 +2150,8 @@ def validate_turn_prompt(message: str, scope: str, context, origin_ticket) -> No
     )
 
 
-def _turn_worker(store: TurnStore, turn: Turn, *, message, context, session_ref, origin_ticket):
+def _turn_worker(store: TurnStore, turn: Turn, *, message, context, session_ref, origin_ticket,
+                 health_web=False):
     """Ein Worker pro Turn. Die App-Verbindung spielt hier keine Rolle; beendet wird Hermes nur
     durch Stopp, Zeitlimit, Ausgabelimit oder den Aufraeum-Thread."""
     try:
@@ -2122,6 +2162,7 @@ def _turn_worker(store: TurnStore, turn: Turn, *, message, context, session_ref,
             session_ref=session_ref,
             context=context,
             origin_ticket=origin_ticket,
+            health_web=health_web,
             on_delta=lambda delta: store.append_delta(turn, delta),
             on_process=lambda process: store.attach_process(turn, process),
         )
@@ -2598,6 +2639,9 @@ def adjustment_escalates(original: dict, adjusted: dict) -> bool:
 def adjust_today(data) -> tuple:
     if error := consent_contract_error(data, require_health=True):
         return error
+    # Die Tages-Anpassung bekommt nie web: schon das Vorhandensein des Felds ist ein 400.
+    if HEALTH_WEB_FIELD in data:
+        return 400, {"error": "health_web_allowed gilt nicht für die Tages-Anpassung"}
     session_json = data.get("session")
     if not validate_session(session_json):
         return 400, {"error": "session fehlt oder ist ungültig"}
@@ -2856,6 +2900,7 @@ class Handler(BaseHTTPRequestHandler):
                 context=context,
                 session_ref=data.get("session"),
                 origin_ticket=origin_ticket,
+                health_web=health_web_requested(data),
             )
         self._send(202, {"turn_id": turn.turn_id, "status": turn.status})
 
@@ -2981,6 +3026,7 @@ class Handler(BaseHTTPRequestHandler):
                     session_ref=data.get("session"),
                     context=data.get("context"),
                     origin_ticket=origin_ticket_for(scope, conversation_id),
+                    health_web=health_web_requested(data),
                 )
             finally:
                 TURNS.release_run()

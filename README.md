@@ -575,12 +575,16 @@ violate them, you are running something other than the system described here.
    Exactly one `Authorization` header counts; a request with two is rejected, on the coach bridge too.
    `/docs`, `/redoc` and
    `/openapi.json` do not exist.
-10. **No web search where the health context is.** A health chat (and the adjustment of today's
-    workout, which carries health context too) gets the tools `skills,memory,kore`, never `web`, so
-    text smuggled into such a chat has no tool to send the health context to an address of its
-    choosing. A general chat has web search but gets neither health context nor the `kore` MCP. One
-    indirect, two-step path remains through the profile's memory, see
-    [Residual risks](#residual-risks).
+10. **No web search where the health context is, unless you ask for it.** A health chat (and the
+    adjustment of today's workout, which carries health context too) gets the tools
+    `skills,memory,kore`, never `web`, so text smuggled into such a chat has no tool to send the health
+    context to an address of its choosing. Only when the person switches web search on for the health
+    chat in the app (request field `health_web_allowed: true`, off by default) does that chat get
+    `web,skills,memory,kore`; the adjustment of today's workout never does. A general chat has web
+    search but gets neither health context nor the `kore` MCP. Two paths remain, see
+    [Residual risks](#residual-risks): the opt-in itself, and an indirect, two-step one through the
+    profile's memory. The protocol is in
+    [`contract/health-web-opt-in-v1.md`](contract/health-web-opt-in-v1.md).
 
 ### Network
 
@@ -660,7 +664,7 @@ after 30 days. Never change `KORE_INSTANCE_ID` or `KORE_PLAN_ORIGIN_PRINCIPAL` o
 | It may | It may not |
 | --- | --- |
 | run `hermes` for exactly the one profile in `KORE_HERMES_PROFILE`, as its service user, with the prompt on stdin | enable terminal, files, code execution, cron jobs, computer or browser control in the app chat; the tools come from a fixed list (`-t`), not from a block list |
-| allow `web,skills,memory` in the general chat; `skills,memory,kore` in a health chat with an origin ticket; `skills,memory` where health context has no ticket (adjusting today's workout) | allow `web` anywhere near health context, or pass service secrets on to Hermes: the child gets only `HOME`, `PATH` and seven keys such as `LANG`/`TZ` |
+| allow `web,skills,memory` in the general chat; `skills,memory,kore` in a health chat with an origin ticket; `skills,memory` where health context has no ticket (adjusting today's workout); `web,skills,memory,kore` (without ticket `web,skills,memory`) in a health chat only when the request says `health_web_allowed: true` | allow `web` near health context without that explicit request, give `web` to the adjustment of today's workout in any case, or pass service secrets on to Hermes: the child gets only `HOME`, `PATH` and seven keys such as `LANG`/`TZ` |
 | start every prompt with the fixed first line `[KORE-APP-NACHRICHT]` and run every Hermes run in a fresh, empty temporary directory that is removed afterwards | let a message that begins with a file path attach that file, or let Hermes load `AGENTS.md`, `CLAUDE.md` and similar context files from the home directory into the prompt |
 | return the adjusted workout of the day only if it is lighter or shorter than the one the app sent | return a heavier or longer one (more sets, weight, repetitions, longer duration, new or renamed exercises): the reply is dropped and the app gets a 502 with a fixed sentence |
 | read sessions of the sources `kore-general`/`kore-health` to find titles and predecessors, and delete them on request or after 30 days; the source of every session is checked before it is deleted, when forgetting a whole scope and on expiry as well | touch sessions of other sources, or change the profile's memory or configuration |
@@ -690,11 +694,18 @@ Kore sends health context only in chats with health sharing turned on, and the b
   health chat can write health facts into the profile's memory, and a general chat, which has web
   search, reads the same memory. In theory, a manipulated web page could therefore get a general chat
   to send out health facts remembered earlier: first the memory is filled in a health chat, then a web
-  page steers a later general chat. The health chat itself has no `web`. What helps: keep sensitive
+  page steers a later general chat. The health chat itself has no `web` unless you switch it on (next
+  point). What helps: keep sensitive
   values out of what the coach stores (ask it not to remember them), look through the profile's
   memory now and then and delete what you do not want kept, and use a dedicated profile for Kore so
   that nothing from your other channels mixes in. The health and the general chat of Kore share that
   profile, so a dedicated profile does not separate them from each other.
+- **Web search in the health chat, if you switch it on.** It is your explicit choice in the app, at
+  your own risk, and off by default. With it on, the health context in the prompt and the `kore` tools
+  sit next to a tool that can fetch addresses: a manipulated web page that the coach finds or reads
+  could talk it into sending health values to an address of its choosing, and the bridge cannot stop
+  that. Switch it on only for a question that needs it, and off again afterwards. The adjustment of
+  today's workout never has web search, whatever the app sends (it answers `400` to the field).
 - **External memory provider.** If the profile uses one, `memory` brings its tools along, and turns
   including the health context may go there. Check with `hermes -p <profile> memory status`.
 - **Skills.** `skill_manage` belongs to `skills`. The bot can create or change skills of the profile,
@@ -798,7 +809,8 @@ It needs only the standard library and never prints a secret. It checks that
 - the bridge returns 401 without a token, and its `/health` with a token reports every capability in
   [`contract/app-required-capabilities.json`](contract/app-required-capabilities.json),
   `prompt_transport: stdin` and `app_chat_toolsets` without terminal, file, code, cron, computer and
-  browser tools and, in the health scope, without `web`;
+  browser tools and, in the health scope, without `web` (the opt-in list `health_with_web` may add
+  nothing but `web`);
 - `KORE_BRIDGE_TOKEN` (`bridge.env`) and `KORE_INGEST_TOKEN` and `KORE_MCP_TOKEN` (server `.env`)
   have at least 32 characters;
 - `KORE_PLAN_ORIGIN_SECRET` (compared by hash), `KORE_INSTANCE_ID` and `KORE_PLAN_ORIGIN_PRINCIPAL` are
@@ -919,12 +931,16 @@ If you write your own bridge for another agent, this is the small protocol the a
   `"coach_name"` (a string of 1 to 24 characters, present only if `KORE_COACH_NAME` is valid).
 - `POST /pair` (no bearer) and `POST /unpair` (device token): see
   [`contract/pairing-v1.md`](contract/pairing-v1.md).
-- `POST /coach` with `{message, conversation_id, session?, context?, health_context_allowed}`.
+- `POST /coach` with
+  `{message, conversation_id, session?, context?, health_context_allowed, health_web_allowed?}`.
   `conversation_id` is a canonical lower-case UUID. `session` is a bridge-signed reference
   `general:<id>.<sig>` or `health:<id>.<sig>`, bound to scope and chat; if it does not match or
   Hermes no longer knows the session, the context starts anew (`context: "reset"`) instead of an
   error. Health context is passed on only if `health_context_allowed` is literally `true`
-  (fail-closed).
+  (fail-closed). The optional `health_web_allowed` (capability `health_web_opt_in_v1`, details in
+  [`contract/health-web-opt-in-v1.md`](contract/health-web-opt-in-v1.md)) must be a JSON boolean, else
+  `400`. Only `true` in the health scope adds `web` to the tools of that turn; in the general scope it
+  is ignored, and switching it between the turns of one chat keeps the session.
 - With an additional `client_message_id` (canonical UUID), `POST /coach` starts a turn job and answers
   at once `202 {turn_id, status}`; the same `client_message_id` in the same chat yields the same turn.
   A turn already running in the chat: `409`. Hermes runs are limited to two at once for the whole
@@ -937,7 +953,8 @@ If you write your own bridge for another agent, this is the small protocol the a
 - `GET /coach/turns/{turn_id}` returns state or result (a finished turn is deleted with this answer);
   `POST /coach/turns/{turn_id}/cancel` ends Hermes, idempotent. The buffer lives in memory only, at
   most 24 hours.
-- `POST /coach/adjust-today`: JSON answer with the adjusted workout of the day. Only reducing is
+- `POST /coach/adjust-today`: JSON answer with the adjusted workout of the day. It never gets web
+  search: a request that carries `health_web_allowed` at all is `400`. Only reducing is
   allowed: if the coach's reply has more sets, more weight, more repetitions or a longer duration, a
   new or renamed exercise, or another `session_id`, nothing of it is returned and the answer is
   `502 {"error": "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren.", "code": "escalation"}`.
@@ -960,7 +977,9 @@ If you write your own bridge for another agent, this is the small protocol the a
   names the setting and the file).
 - Tools per `-t` list instead of `--safe-mode` (`/health` reports them as `app_chat_toolsets`):
   general `web,skills,memory`; health `skills,memory,kore`, without `web`. Health context without an
-  origin ticket (adjusting today's workout) gets `skills,memory`: no kore MCP, no `web`. Never
+  origin ticket (adjusting today's workout) gets `skills,memory`: no kore MCP, no `web`. Only on
+  `health_web_allowed: true` does a health chat get `web,skills,memory,kore` (`web,skills,memory`
+  without ticket); `/health` reports that list as `app_chat_toolsets.health_with_web`. Never
   terminal, files, code execution, cron jobs, computer or browser control.
 - Limits of the HTTP server itself: at most 64 connections at once (further ones are closed without
   an answer) and 20 s from the start of a connection to read headers and body.

@@ -590,9 +590,12 @@ class StreamJsonRunnerTests(unittest.TestCase):
         self.assertIn("conversation_sessions_v2", capabilities)
         self.assertIn("app_chat_toolsets_v1", capabilities)
         self.assertNotIn("safe_mode_without_health_v1", capabilities)
+        # `health` bleibt der Standard ohne web; `health_with_web` ist die Liste fuer den
+        # ausdruecklichen Wunsch (health_web_allowed, 0.13 S13).
         self.assertEqual(health["app_chat_toolsets"], {
             "general": ["web", "skills", "memory"],
             "health": ["skills", "memory", "kore"],
+            "health_with_web": ["web", "skills", "memory", "kore"],
         })
 
     def post(self, path, payload):

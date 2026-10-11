@@ -111,11 +111,12 @@ class DoctorTestCase(unittest.TestCase):
         self.contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
 
         self.bridge_state = {
-            "capabilities": list(self.contract) + ["momentum_safety_v1"],
+            "capabilities": list(self.contract) + ["momentum_safety_v1", "health_web_opt_in_v1"],
             "api_version": 2,
             "prompt_transport": "stdin",
             "app_chat_toolsets": {"general": ["web", "skills", "memory"],
-                                  "health": ["skills", "memory", "kore"]},
+                                  "health": ["skills", "memory", "kore"],
+                                  "health_with_web": ["web", "skills", "memory", "kore"]},
             "open_without_token": False,
         }
         self.ingest_state = {"health_status": 200, "origin_status": 403}
@@ -245,6 +246,40 @@ class DoctorEndToEndTests(DoctorTestCase):
         self.assertIn("Hermes Agent v0.21.4", output)
         self.assertIn("session_retention_days", output)
         self.assertNotIn("FEHLER", output)
+
+    def test_the_health_web_opt_in_is_reported_and_the_default_still_has_no_web(self):
+        code, output = self.run_doctor()
+        self.assertEqual(code, 0, output)
+        self.assertIn("health_web_opt_in_v1", output)
+        self.assertIn("health_web_allowed", output)
+        self.assertNotIn("FEHLER", output)
+
+    def test_a_bridge_without_the_opt_in_is_still_healthy(self):
+        # Die Faehigkeit ist optional (nicht im Pflichtvertrag): aeltere Bridges bleiben ohne Fehler.
+        self.bridge_state["capabilities"].remove("health_web_opt_in_v1")
+        self.bridge_state["app_chat_toolsets"].pop("health_with_web")
+        code, output = self.run_doctor()
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("FEHLER", output)
+
+    def test_the_opt_in_list_must_stay_inside_health_plus_web(self):
+        for label, change, needle in (
+            ("zusaetzliches Werkzeug",
+             lambda: self.bridge_state["app_chat_toolsets"]["health_with_web"].append("session_search"),
+             "health_with_web"),
+            ("Fähigkeit ohne Liste",
+             lambda: self.bridge_state["app_chat_toolsets"].pop("health_with_web"),
+             "health_with_web"),
+            ("Liste ohne Fähigkeit",
+             lambda: self.bridge_state["capabilities"].remove("health_web_opt_in_v1"),
+             "health_web_opt_in_v1"),
+        ):
+            with self.subTest(label):
+                self.setUp()
+                change()
+                code, output = self.run_doctor()
+                self.assertNotEqual(code, 0, output)
+                self.assertIn(needle, output)
 
     def test_bridge_only_needs_neither_server_env_nor_ingest(self):
         self.server_env.unlink()
