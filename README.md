@@ -704,8 +704,12 @@ Kore sends health context only in chats with health sharing turned on, and the b
   your own risk, and off by default. With it on, the health context in the prompt and the `kore` tools
   sit next to a tool that can fetch addresses: a manipulated web page that the coach finds or reads
   could talk it into sending health values to an address of its choosing, and the bridge cannot stop
-  that. Switch it on only for a question that needs it, and off again afterwards. The adjustment of
-  today's workout never has web search, whatever the app sends (it answers `400` to the field).
+  that. As a soft mitigation, not a barrier, the bridge appends one fixed sentence to the end of the
+  prompt of such a turn (`[KORE-WEBSUCHE — BRIDGE-AUTORITATIV]`: do not put health values, names,
+  notes or plan contents into search queries or URLs, search in general terms only); a manipulated
+  text can talk the coach out of it. Switch it on only for a question that needs it, and off again
+  afterwards. The adjustment of today's workout never has web search, whatever the app sends (it
+  answers `400` to the field).
 - **External memory provider.** If the profile uses one, `memory` brings its tools along, and turns
   including the health context may go there. Check with `hermes -p <profile> memory status`.
 - **Skills.** `skill_manage` belongs to `skills`. The bot can create or change skills of the profile,
@@ -939,8 +943,9 @@ If you write your own bridge for another agent, this is the small protocol the a
   error. Health context is passed on only if `health_context_allowed` is literally `true`
   (fail-closed). The optional `health_web_allowed` (capability `health_web_opt_in_v1`, details in
   [`contract/health-web-opt-in-v1.md`](contract/health-web-opt-in-v1.md)) must be a JSON boolean, else
-  `400`. Only `true` in the health scope adds `web` to the tools of that turn; in the general scope it
-  is ignored, and switching it between the turns of one chat keeps the session.
+  `400`. Only `true` in the health scope adds `web` to the tools of that turn and the fixed
+  `[KORE-WEBSUCHE …]` sentence to the end of its prompt; in the general scope it is ignored, and
+  switching it between the turns of one chat keeps the session.
 - With an additional `client_message_id` (canonical UUID), `POST /coach` starts a turn job and answers
   at once `202 {turn_id, status}`; the same `client_message_id` in the same chat yields the same turn.
   A turn already running in the chat: `409`. Hermes runs are limited to two at once for the whole

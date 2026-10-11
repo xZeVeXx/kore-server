@@ -36,8 +36,11 @@ First public release.
   `400` to it and never gets `web`. Switching it between the turns of one chat keeps the session. New
   optional capability `health_web_opt_in_v1` (not part of `contract/app-required-capabilities.json`),
   and `/health` reports the list as `app_chat_toolsets.health_with_web`; `kore-doctor` checks that it
-  adds nothing but `web` to the health list. The person's own choice, at their own risk, off by
-  default; see Residual risks in the README and `contract/health-web-opt-in-v1.md`.
+  adds nothing but `web` to the health list. A turn with web search carries one fixed sentence at
+  the end of its prompt (`[KORE-WEBSUCHE — BRIDGE-AUTORITATIV]`: no health values, names, notes or
+  plan contents in search queries or URLs); a soft mitigation, not a barrier. Without the field the
+  prompt is byte for byte unchanged. The person's own choice, at their own risk, off by default; see
+  Residual risks in the README and `contract/health-web-opt-in-v1.md`.
 - README: choosing a new or an existing Hermes profile, including the consequences of an existing one
   (health data in its general memory, Kore section in its `SOUL.md`, the `kore` MCP server in it, an
   external memory provider receives Kore chats, deleting in Kore does not reach them); model providers

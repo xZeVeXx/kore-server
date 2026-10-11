@@ -24,8 +24,22 @@ turn start (`client_message_id`) alike.
 
 The field does not replace the consent: `health_context_allowed: true` still needs
 `consent_scope_version: 2` (otherwise `403`), and `health_web_allowed: true` without
-`health_context_allowed: true` has no effect. The prompt is the same with and without the field; only
-the tool list changes.
+`health_context_allowed: true` has no effect.
+
+## Prompt
+
+Without the field (or with `false`, or in the general scope) the prompt is byte for byte what it was
+before this capability. With `true` in the health scope the bridge appends one fixed sentence after
+everything else, separated by a blank line, in the style of its other authoritative directives:
+
+```
+[KORE-WEBSUCHE — BRIDGE-AUTORITATIV] Websuche ist aktiv: Übernimm nie Gesundheitswerte, Namen, Notizen oder Planinhalte in Suchanfragen oder URLs; suche nur allgemein formuliert.
+```
+
+The prompt still begins with the fixed first line `[KORE-APP-NACHRICHT]`, and the size limit counts
+the sentence (a turn start that only exceeds the limit with it is `413` before the `202`). This is a
+soft, non-enforcing mitigation: it asks the coach to keep health values out of queries, it does not
+stop a manipulated page from talking the coach out of it.
 
 ## Sessions
 
@@ -55,5 +69,5 @@ that reports neither (older bridges).
 With web search in a health chat, the health context in the prompt and the `kore` tools stand next to
 a tool that can fetch addresses. A manipulated page that the coach reads could talk it into sending
 health values to an address of its choosing. That is why it is off by default, why the person turns it
-on knowingly, and why the adjustment of today's workout never has it. See *Residual risks* in the
-README.
+on knowingly, and why the adjustment of today's workout never has it. The prompt sentence above
+lowers the risk, it does not remove it. See *Residual risks* in the README.

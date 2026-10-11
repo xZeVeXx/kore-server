@@ -1148,6 +1148,14 @@ def plan_origin_directive(origin_ticket=None) -> str:
     )
 
 
+# Nur bei Websuche im Health-Chat (health_web_allowed, 0.13 S13b): ein fester Hinweis ganz am Ende
+# des Prompts, im Stil der anderen Bridge-Direktiven. Weiche Massnahme, keine Sperre — ein
+# manipulierter Text kann sie uebergehen; die Bridge erzwingt hier nichts.
+HEALTH_WEB_DIRECTIVE = (
+    "[KORE-WEBSUCHE — BRIDGE-AUTORITATIV] Websuche ist aktiv: Übernimm nie Gesundheitswerte, Namen, "
+    "Notizen oder Planinhalte in Suchanfragen oder URLs; suche nur allgemein formuliert."
+)
+
 # Erste Zeile JEDES Prompts (0.13 S11a). Hermes prueft im Einmal-Modus den Anfang der Anfrage auf
 # einen Dateipfad (hermes_cli/cli_terminal_input.py: _detect_file_drop ueber _collect_query_images:
 # optional ein Anfuehrungszeichen, dann /, ~, ./, ../, file:// oder ein Laufwerk wie C:/) und haengt
@@ -1157,10 +1165,13 @@ PROMPT_HEADER = "[KORE-APP-NACHRICHT]"
 
 
 def build_prompt(message: str, context, health_context_allowed: bool,
-                 origin_ticket=None) -> str:
-    return f"{PROMPT_HEADER}\n" + _prompt_body(
-        message, context, health_context_allowed, origin_ticket=origin_ticket
-    )
+                 origin_ticket=None, health_web: bool = False) -> str:
+    body = _prompt_body(message, context, health_context_allowed, origin_ticket=origin_ticket)
+    # Der Hinweis gilt nur im Health-Scope und nur fuer das Boolean true; ohne ihn bleibt der Prompt
+    # Byte fuer Byte wie vor 0.13 S13b.
+    if health_context_allowed is True and health_web is True:
+        body = f"{body}\n\n{HEALTH_WEB_DIRECTIVE}"
+    return f"{PROMPT_HEADER}\n{body}"
 
 
 def _prompt_body(message: str, context, health_context_allowed: bool, origin_ticket=None) -> str:
@@ -1672,7 +1683,9 @@ def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
     turn_limit = str(_turn_limit(max_turns))
     health = scope == "health"
     scoped_context = context if health else None
-    prompt = build_prompt(message, scoped_context, health, origin_ticket=origin_ticket)
+    health_web = health and health_web is True
+    prompt = build_prompt(message, scoped_context, health, origin_ticket=origin_ticket,
+                          health_web=health_web)
     # Der tatsaechlich uebergebene Prompt wird bytegenau geprueft. Request- oder Kontextlimits
     # allein reichen nicht, weil JSON-Huelle, Sicherheitsdirektiven und Session gemeinsam in
     # genau einer Nutzlast landen.
@@ -1680,7 +1693,6 @@ def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
     # `--query-file -` liest stdin vollstaendig; der Gesundheitskontext beruehrt weder die
     # Prozessliste noch die Platte.
     prompt_bytes = prompt.encode("utf-8")
-    health_web = health and health_web is True
     toolsets = toolsets_for(scope, origin_ticket is not None, health_web=health_web)
 
     if session_ref is None:
@@ -2139,14 +2151,16 @@ class TurnStore:
 TURNS = TurnStore()
 
 
-def validate_turn_prompt(message: str, scope: str, context, origin_ticket) -> None:
+def validate_turn_prompt(message: str, scope: str, context, origin_ticket,
+                         health_web: bool = False) -> None:
     """Vor dem 202: dieselben Pruefungen, die run_turn vor dem Start macht, damit 413/503 als
     Antwort auf den POST kommen und nicht als Turn-Ende."""
     if PROMPT_TRANSPORT != "stdin":
         raise PromptTransportUnavailable("the turn path only sends prompts over stdin")
     health = scope == "health"
     validate_prompt_payload(
-        build_prompt(message, context if health else None, health, origin_ticket=origin_ticket)
+        build_prompt(message, context if health else None, health, origin_ticket=origin_ticket,
+                     health_web=health and health_web is True)
     )
 
 
@@ -2875,7 +2889,8 @@ class Handler(BaseHTTPRequestHandler):
         context = data.get("context")
         origin_ticket = origin_ticket_for(scope, conversation_id)
         try:
-            validate_turn_prompt(message, scope, context, origin_ticket)
+            validate_turn_prompt(message, scope, context, origin_ticket,
+                                 health_web=health_web_requested(data))
         except PromptTransportUnavailable:
             self._send_turn_error("transport_unavailable")
             return

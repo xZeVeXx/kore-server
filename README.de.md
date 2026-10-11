@@ -727,9 +727,12 @@ dort frei. Was dein Bot danach damit tut, steuert Kore nicht:
   der App, auf eigenes Risiko, und standardmäßig aus. Ist sie an, stehen der Health-Kontext im Prompt
   und die `kore`-Werkzeuge neben einem Werkzeug, das Adressen abrufen kann: Eine manipulierte
   Webseite, die der Coach findet oder liest, könnte ihn dazu bringen, Gesundheitswerte an eine Adresse
-  ihrer Wahl zu schicken, und die Bridge kann das nicht verhindern. Schalte sie nur für eine Frage
-  ein, die sie braucht, und danach wieder aus. Die Tages-Anpassung hat nie Websuche, was auch immer die
-  App schickt (auf das Feld antwortet sie mit `400`).
+  ihrer Wahl zu schicken, und die Bridge kann das nicht verhindern. Als weiche Maßnahme, nicht als
+  Sperre, hängt die Bridge dem Prompt eines solchen Turns am Ende einen festen Satz an
+  (`[KORE-WEBSUCHE — BRIDGE-AUTORITATIV]`: keine Gesundheitswerte, Namen, Notizen oder Planinhalte in
+  Suchanfragen oder URLs, nur allgemein suchen); ein manipulierter Text kann den Coach davon abbringen.
+  Schalte sie nur für eine Frage ein, die sie braucht, und danach wieder aus. Die Tages-Anpassung hat
+  nie Websuche, was auch immer die App schickt (auf das Feld antwortet sie mit `400`).
 - **Externer Gedächtnis-Anbieter.** Nutzt das Profil einen, bringt `memory` dessen Werkzeuge mit, und
   Turns samt Health-Kontext können dorthin gehen. Prüfen mit `hermes -p <profil> memory status`.
 - **Skills.** `skill_manage` gehört zu `skills`. Der Bot kann damit Skills des Profils anlegen oder
@@ -968,9 +971,9 @@ App spricht:
   wörtlich `true` ist (fail-closed). Das optionale `health_web_allowed` (Fähigkeit
   `health_web_opt_in_v1`, Einzelheiten in
   [`contract/health-web-opt-in-v1.md`](contract/health-web-opt-in-v1.md)) muss ein JSON-Boolean sein,
-  sonst `400`. Nur `true` im Health-Scope nimmt `web` in die Werkzeuge dieses Turns auf; im
-  allgemeinen Scope bleibt es ohne Wirkung, und ein Wechsel zwischen den Turns eines Chats behält die
-  Session.
+  sonst `400`. Nur `true` im Health-Scope nimmt `web` in die Werkzeuge dieses Turns auf und hängt den
+  festen Satz `[KORE-WEBSUCHE …]` ans Ende seines Prompts; im allgemeinen Scope bleibt es ohne
+  Wirkung, und ein Wechsel zwischen den Turns eines Chats behält die Session.
 - Mit zusätzlichem `client_message_id` (kanonische UUID) startet `POST /coach` einen Turn-Auftrag und
   antwortet sofort `202 {turn_id, status}`; dieselbe `client_message_id` im selben Chat liefert
   denselben Turn. Läuft im Chat schon ein Turn: `409`. Hermes-Läufe sind für die ganze Bridge auf zwei

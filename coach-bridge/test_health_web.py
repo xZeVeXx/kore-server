@@ -263,21 +263,107 @@ class SynchronousRequestTests(HealthWebBase):
         ])
 
     @patch("bridge._run_process_bounded")
-    def test_the_prompt_does_not_change_with_the_flag(self, run):
-        # Das Feld schaltet nur die Werkzeugliste; der Gesundheitskontext im Prompt bleibt gleich.
+    def test_the_directive_reaches_stdin_only_with_the_flag_in_the_health_scope(self, run):
+        self.with_origin_ticket()
+        context = {"readiness": 70}
+        cases = (
+            ("health, flag true", health_request(context=context, health_web_allowed=True), True),
+            ("health, flag false", health_request(context=context, health_web_allowed=False), False),
+            ("health, flag absent", health_request(context=context), False),
+            ("health ohne Kontext, flag true", health_request(health_web_allowed=True), True),
+            ("general, flag true", general_request(health_web_allowed=True), False),
+            ("general, flag absent", general_request(), False),
+        )
+        for label, payload, expected in cases:
+            with self.subTest(label):
+                run.reset_mock()
+                run.side_effect = hermes_process(reply_stream())
+
+                code, answer = self.post("/coach", payload)
+
+                self.assertEqual(code, 200, answer)
+                prompt = run.call_args.kwargs["input_bytes"].decode("utf-8")
+                self.assertEqual(bridge.HEALTH_WEB_DIRECTIVE in prompt, expected)
+                self.assertEqual(prompt.split("\n", 1)[0], bridge.PROMPT_HEADER)
+                if expected:
+                    self.assertEqual(prompt.count(bridge.HEALTH_WEB_DIRECTIVE), 1)
+                    self.assertTrue(prompt.endswith(bridge.HEALTH_WEB_DIRECTIVE))
+
+    @patch("bridge._run_process_bounded")
+    def test_the_prompt_without_the_flag_is_what_it_was_and_with_it_only_gains_the_directive(self, run):
+        self.with_origin_ticket()
+        # Das Ticket traegt eine Zufallszahl; fuer den Byte-Vergleich fest.
+        patcher = patch.object(bridge, "create_plan_origin_ticket", lambda conversation_id: "tkt.sig")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         prompts = []
 
         def capture(args, **kwargs):
-            prompts.append(kwargs["input_bytes"])
+            prompts.append(kwargs["input_bytes"].decode("utf-8"))
             return hermes_process(reply_stream())(args, **kwargs)
 
         run.side_effect = capture
         context = {"readiness": 70}
         self.post("/coach", health_request(context=context))
+        self.post("/coach", health_request(context=context, health_web_allowed=False))
         self.post("/coach", health_request(context=context, health_web_allowed=True))
 
-        self.assertEqual(len(prompts), 2)
-        self.assertEqual(prompts[0], prompts[1])
+        without, explicit_false, with_flag = prompts
+        self.assertEqual(without, explicit_false)
+        self.assertEqual(with_flag, without + "\n\n" + bridge.HEALTH_WEB_DIRECTIVE)
+
+
+class PromptDirectiveTests(HealthWebBase):
+    def test_the_directive_is_a_fixed_bridge_authoritative_german_sentence(self):
+        directive = bridge.HEALTH_WEB_DIRECTIVE
+        self.assertTrue(directive.startswith("[KORE-WEBSUCHE — BRIDGE-AUTORITATIV] "))
+        self.assertIn("Gesundheitswerte", directive)
+        self.assertIn("Suchanfragen oder URLs", directive)
+        self.assertNotIn("\n", directive)
+
+    def test_the_contract_document_quotes_the_directive_verbatim(self):
+        doc = CONTRACT.with_name("health-web-opt-in-v1.md").read_text(encoding="utf-8")
+        self.assertIn(bridge.HEALTH_WEB_DIRECTIVE, doc)
+
+    def test_build_prompt_appends_it_after_everything_else_in_the_health_scope_only(self):
+        context = {"plans_scope": {"complete": True}}
+        for label, args, kwargs in (
+            ("mit Kontext", ("Plan?", context, True), {}),
+            ("ohne Kontext", ("Plan?", None, True), {}),
+            ("mit Ticket", ("Plan?", context, True), {"origin_ticket": "tkt.sig"}),
+        ):
+            with self.subTest(label):
+                base = bridge.build_prompt(*args, **kwargs)
+                self.assertNotIn(bridge.HEALTH_WEB_DIRECTIVE, base)
+                self.assertEqual(bridge.build_prompt(*args, **kwargs, health_web=False), base)
+                with_web = bridge.build_prompt(*args, **kwargs, health_web=True)
+                self.assertEqual(with_web, base + "\n\n" + bridge.HEALTH_WEB_DIRECTIVE)
+                self.assertEqual(with_web.split("\n", 1)[0], bridge.PROMPT_HEADER)
+
+    def test_no_directive_without_health_context_and_only_for_the_boolean_true(self):
+        general = bridge.build_prompt("Hallo", None, False, health_web=True)
+        self.assertEqual(general, bridge.build_prompt("Hallo", None, False))
+        self.assertNotIn(bridge.HEALTH_WEB_DIRECTIVE, general)
+        for value in ("true", 1, [True], object()):
+            with self.subTest(value=value):
+                self.assertNotIn(bridge.HEALTH_WEB_DIRECTIVE,
+                                 bridge.build_prompt("Hallo", None, True, health_web=value))
+
+    def test_a_path_like_message_still_cannot_start_the_prompt(self):
+        for prefix in ("/", "~/", "file://", "C:/", '"'):
+            with self.subTest(prefix=prefix):
+                prompt = bridge.build_prompt(f"{prefix}tmp/bild.png", None, True, health_web=True)
+                self.assertEqual(prompt.split("\n", 1)[0], bridge.PROMPT_HEADER)
+
+    def test_the_size_check_before_the_202_counts_the_directive(self):
+        message = "x" * 1_000
+        base = len(bridge.build_prompt(message, None, True).encode("utf-8"))
+        # Genau das Limit ohne Hinweis: mit Hinweis ist der Prompt zu gross.
+        with patch.object(bridge, "MAX_PROMPT_BYTES", base):
+            bridge.validate_turn_prompt(message, "health", None, None)
+            bridge.validate_turn_prompt(message, "health", None, None, health_web=False)
+            with self.assertRaises(bridge.HermesPromptTooLarge):
+                bridge.validate_turn_prompt(message, "health", None, None, health_web=True)
 
 
 class AdjustTodayTests(HealthWebBase):
