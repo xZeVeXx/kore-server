@@ -62,7 +62,8 @@ pre-commit install
 The hook scans the staged changes with [`.gitleaks.toml`](.gitleaks.toml). That file extends the
 default rules and allows only the documented `change-me…` placeholders in example files, the README
 and tests. Do not widen the allowlist to silence a finding; remove the secret instead (and rotate it
-if it was real).
+if it was real). A false positive that is already in the history (a test placeholder, not a secret)
+goes into `.gitleaksignore` as its exact fingerprint, with a comment saying why it is harmless.
 
 ## Pull requests
 

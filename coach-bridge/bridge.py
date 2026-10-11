@@ -282,6 +282,10 @@ class HermesPromptTooLarge(ValueError):
     pass
 
 
+class HermesProfileUnsafe(RuntimeError):
+    """skills.inline_shell ist im Profil nicht mehr sicher aus (seit dem Start geaendert)."""
+
+
 class RequestTooLarge(ValueError):
     pass
 
@@ -566,6 +570,15 @@ _INLINE_SHELL_KEY = "inline_shell"
 _INLINE_SHELL_OFF = frozenset(("false", "False", "FALSE"))
 # Zeilenumbrueche im Sinne von YAML (nicht str.splitlines, das auch an \x0b, \x1c-\x1e trennt).
 _YAML_LINE_BREAK_RE = re.compile("\r\n|[\n\r\x85\u2028\u2029]")
+# Ein Schluessel endet am ersten ':' vor Leerraum oder Zeilenende (YAML-Blockkontext).
+_YAML_KEY_SEPARATOR_RE = re.compile(r":(?=[ \t]|$)")
+# Nur schlichte Schluessel: ein Anfuehrungszeichen oder Backslash erlaubt Escapes wie
+# "inline\x5fshell", Flow-Zeichen eine Zuordnung in der Zeile, ein Indikator am Anfang (Tag, Anker,
+# Alias, expliziter Schluessel, Blockskalar, Direktive) einen Schluessel, den keine Zeile zeigt.
+_YAML_UNPLAIN_KEY_CHARS = frozenset("\"'\\{}[]")
+_YAML_KEY_INDICATORS = frozenset("?:!&*|>%@`")
+# Ein Paar in einer Flow-Liste: `"k":1` oder `k: 1`; ein ':' mitten in einer Adresse ist keins.
+_YAML_FLOW_PAIR_RE = re.compile(r"[\"']:|:(?=[\s,\[\]{}]|$)")
 
 
 def _yaml_content(line: str) -> str:
@@ -574,6 +587,42 @@ def _yaml_content(line: str) -> str:
         return ""
     match = re.search(r"[ \t]#", line)
     return (line[:match.start()] if match else line).rstrip()
+
+
+def _yaml_key_value(text: str):
+    """(Schluessel, Wert) einer Zeile im Blockkontext; Schluessel None, wenn sie keinen traegt."""
+    match = _YAML_KEY_SEPARATOR_RE.search(text)
+    if match is None:
+        return None, text.strip()
+    return text[:match.start()].strip(), text[match.end():].strip()
+
+
+def _yaml_flow_with_keys(node: str) -> bool:
+    """True fuer einen Flow-Knoten, der Schluessel tragen kann: jedes Flow-Mapping ausser `{}`,
+    eine Flow-Liste mit Mapping, Paar oder Backslash. `[a, b]` und Adressen bleiben erlaubt."""
+    while node[:1] in ("&", "!"):  # Anker oder Tag vor dem Knoten
+        node = node.partition(" ")[2].lstrip()
+    if node.startswith("{"):
+        return node != "{}"
+    if node.startswith("["):
+        return any(char in node for char in "{}\\") or _YAML_FLOW_PAIR_RE.search(node) is not None
+    return False
+
+
+def _yaml_unplain(body: str) -> bool:
+    """True, wenn diese Zeile einen nicht schlichten Schluessel tragen kann (gequotet, mit
+    Backslash, Flow-Stil, mit Tag, Anker, Alias oder als expliziter Schluessel) — auf jeder Ebene."""
+    node = body
+    while node == "-" or node.startswith(("- ", "-\t")):  # Listeneintraege
+        node = node[1:].lstrip(" \t")
+    if node[:1] in ("?", ":") and (len(node) == 1 or node[1] in " \t"):
+        return True
+    key, value = _yaml_key_value(node)
+    if key is None:
+        return _yaml_flow_with_keys(value)
+    if not key or key[0] in _YAML_KEY_INDICATORS or _YAML_UNPLAIN_KEY_CHARS & set(key):
+        return True
+    return _yaml_flow_with_keys(value)
 
 
 def inline_shell_config_error(text: str):
@@ -586,7 +635,8 @@ def inline_shell_config_error(text: str):
     oberster Ebene; fehlt er, gilt der Hermes-Standard (aus). Alles Unklare gilt als an (fail
     closed): ein anderer Wert, ein skills-Wert in derselben Zeile (Flow-Mapping, Anker, Alias),
     ein Merge-Key `<<` im Block, jede andere Erwaehnung von inline_shell (gequotet, tiefer
-    verschachtelt, unter einem anderen Schluessel).
+    verschachtelt, unter einem anderen Schluessel) und auf jeder Ebene jeder Schluessel, der nicht
+    schlicht ist (_yaml_unplain): `"inline\x5fshell": true` nennt den Namen nicht einmal.
     """
     problem = ("skills.inline_shell is on or not unambiguously off in the Hermes profile; Hermes "
                "would run shell commands from skills. Set `inline_shell: false` under `skills:` "
@@ -599,11 +649,14 @@ def inline_shell_config_error(text: str):
             continue
         body = content.lstrip(" ")
         indent = len(content) - len(body)
-        key, separator, value = body.partition(":")
-        key, value = key.strip(), value.strip()
+        if _yaml_unplain(body):
+            return problem
+        key, value = _yaml_key_value(body)
+        separator = key is not None
+        key = key or ""
         mentions = _INLINE_SHELL_KEY in body and key != f"{_INLINE_SHELL_KEY}_timeout"
         if indent == 0:
-            in_skills = bool(separator) and key in ("skills", '"skills"', "'skills'")
+            in_skills = separator and key == "skills"
             child_indent = None
             if in_skills and value not in ("", "{}"):
                 return problem
@@ -642,6 +695,18 @@ def profile_inline_shell_error():
         return f"skills.inline_shell cannot be checked: {path} is not readable"
     error = inline_shell_config_error(text)
     return f"{error} ({path})" if error else None
+
+
+def require_safe_profile() -> None:
+    """Vor jedem Hermes-Lauf: dieselbe Pruefung wie beim Start, frisch von der Platte (eine kleine
+    Datei, zeilenweise). Wird das Profil nach dem Start unsicher, startet kein Lauf mehr; die
+    Ursache (ohne Geheimnis) steht im Journal, nie in der Antwort."""
+    if (error := profile_inline_shell_error()) is not None:
+        try:
+            print(f"kore-profile-unsafe {error}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        raise HermesProfileUnsafe()
 
 
 def runtime_configuration_error():
@@ -1424,6 +1489,15 @@ class StreamResult:
     result_record: "dict | None" = field(default=None, repr=False)
 
 
+def output_lines(text: str) -> list:
+    """Zeilen einer Hermes-Ausgabe, getrennt nur an \\n (ein \\r davor faellt weg).
+
+    Hermes schreibt JSON mit ensure_ascii=False: U+2028, U+2029 und U+0085 stehen roh in einem
+    Record. str.splitlines() trennte auch dort (und an \\x0b, \\x0c, \\x1c-\\x1e) und zerlegte
+    damit Records: 502 hermes_failed, Sessions, die sich nie vergessen liessen."""
+    return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+
+
 def _stream_record(line):
     """Ein stream-json-Record oder None. Alles andere auf stdout wird ignoriert, nie angezeigt."""
     if isinstance(line, bytes):
@@ -1500,7 +1574,7 @@ def is_unknown_session_error(result_record, stderr: str, resume_id: str) -> bool
     if not valid_session_token(resume_id):
         return False
     expected = f"Session not found: {resume_id}"
-    return any(line.strip() == expected for line in stderr.splitlines())
+    return any(line.strip() == expected for line in output_lines(stderr))
 
 
 # ---- Journal bei gescheitertem Turn (0.10) -----------------------------------------
@@ -1517,7 +1591,7 @@ def classify_hermes_failure(error_code, process, stream) -> str:
     if process is None:
         return "process_error"
     stderr = process.stderr if isinstance(process.stderr, str) else ""
-    if any(line.strip().startswith("Session not found: ") for line in stderr.splitlines()):
+    if any(line.strip().startswith("Session not found: ") for line in output_lines(stderr)):
         return "session_unknown"
     record = stream.result_record if stream is not None else None
     if record is None:
@@ -1631,6 +1705,7 @@ def _run_hermes_once(args, prompt_bytes, on_delta, on_process):
             if on_delta is not None:
                 on_delta(delta)
 
+    require_safe_profile()
     try:
         with hermes_working_dir() as cwd:
             process = _run_process_bounded(
@@ -1649,7 +1724,7 @@ def _run_hermes_once(args, prompt_bytes, on_delta, on_process):
         return None, None, "output_limit", streamed
     except HermesInvocationError:
         return None, None, "hermes_failed", streamed
-    stream = parse_stream_json(process.stdout.splitlines())
+    stream = parse_stream_json(output_lines(process.stdout))
     if process.returncode != 0 or not _result_succeeded(stream.result_record):
         return process, stream, "hermes_failed", streamed
     return process, stream, None, streamed
@@ -1791,6 +1866,8 @@ TURN_REQUEST_ERRORS = {
     "turn_unknown": (404, "Diese Antwort ist nicht mehr abrufbar."),
     "prompt_too_large": (413, "Coach-Anfrage erzeugt einen zu großen Hermes-Prompt."),
     "transport_unavailable": (503, "Hermes-Prompt-Transport ist nicht freigegeben."),
+    "profile_unsafe": (503, "Das Hermes-Profil der Bridge ist nicht mehr sicher konfiguriert "
+                            "(skills.inline_shell); die Bridge startet keinen Coach-Lauf."),
 }
 
 
@@ -2157,6 +2234,7 @@ def validate_turn_prompt(message: str, scope: str, context, origin_ticket,
     Antwort auf den POST kommen und nicht als Turn-Ende."""
     if PROMPT_TRANSPORT != "stdin":
         raise PromptTransportUnavailable("the turn path only sends prompts over stdin")
+    require_safe_profile()
     health = scope == "health"
     validate_prompt_payload(
         build_prompt(message, context if health else None, health, origin_ticket=origin_ticket,
@@ -2180,6 +2258,10 @@ def _turn_worker(store: TurnStore, turn: Turn, *, message, context, session_ref,
             on_delta=lambda delta: store.append_delta(turn, delta),
             on_process=lambda process: store.attach_process(turn, process),
         )
+    except HermesProfileUnsafe:
+        # Ende mit einem Code, den die App kennt; die Ursache steht nur im Journal.
+        store.finish(turn, None, failure_class="profile_unsafe")
+        return
     except Exception as error:
         store.finish(turn, None, failure_class=f"bridge_exception:{type(error).__name__}")
         return
@@ -2217,6 +2299,8 @@ def _sweep_turns_forever(store: TurnStore) -> None:
 # (`prune --dry-run`, `list`), geloescht jede ID einzeln mit `sessions delete --yes <id>` — das
 # hat diese Sperre nicht. Nie `--force`. `delete` loescht keine Kompressions-Vorgaenger (sie
 # werden verwaist); /coach/forget laeuft die Kette deshalb selbst ab.
+# `prune` laesst archivierte und angeheftete Sessions ohne --include-archived/--include-pinned
+# aus (hermes_cli/subcommands/sessions.py); `list` zeigt archivierte und versteckte nie.
 RETENTION_INTERVAL_S = 24 * 3600
 SESSION_CLI_TIMEOUT_S = 60
 FORGET_BUDGET_S = 120
@@ -2230,6 +2314,9 @@ FORGET_SCOPES = {"health": ("health",), "all": ("general", "health")}
 # Genau die Form aus hermes_state_ids.new_session_id (6 Hex bei CLI, 8 Gateway, 12 Import).
 _HERMES_SESSION_ID_RE = re.compile(r"[0-9]{8}_[0-9]{6}_[0-9a-f]{6,12}\Z")
 _SESSION_MAINTENANCE_LOCK = threading.Lock()
+PRUNE_INCLUDE_ALL = ("--include-archived", "--include-pinned")
+# `prune` zaehlt offene Sessions, die es auslaesst (hermes_cli/sessions_cmd.py).
+_OPEN_SESSIONS_NOTE_RE = re.compile(r"Note: ([0-9]{1,9}) open sessions? also match ")
 
 
 def _kore_source(scope: str) -> str:
@@ -2254,7 +2341,7 @@ def run_hermes_sessions(args, output_limit: int = MAX_OUTPUT_BYTES, timeout=None
 def _dry_run_session_ids(stdout: str, source: str) -> list:
     """IDs aus `sessions prune --dry-run`: Zeilen `  <id>  <Datum> <Quelle> …`."""
     ids = []
-    for line in stdout.splitlines():
+    for line in output_lines(stdout):
         if not line.startswith("  "):
             continue
         tokens = line.split()
@@ -2266,19 +2353,29 @@ def _dry_run_session_ids(stdout: str, source: str) -> list:
 def _listed_session_ids(stdout: str) -> list:
     """IDs aus `sessions list --source …`: die ID steht in jeder Tabellenzeile ganz rechts."""
     ids = []
-    for line in stdout.splitlines():
+    for line in output_lines(stdout):
         tokens = line.split()
         if tokens and _HERMES_SESSION_ID_RE.fullmatch(tokens[-1]):
             ids.append(tokens[-1])
     return ids
 
 
+def _open_session_count(stdout: str) -> int:
+    """Offene Sessions, die `prune --dry-run` laut seiner Notiz mitzaehlt, aber auslaesst."""
+    for line in output_lines(stdout):
+        if (match := _OPEN_SESSIONS_NOTE_RE.match(line)) is not None:
+            return int(match.group(1))
+    return 0
+
+
 def expired_session_ids(scope: str):
-    """Beendete Sessions der Quelle, deren letzte Aktivitaet laenger als die Frist zurueckliegt.
-    Hermes waehlt nach Inaktivitaet aus (`--older-than`); None, wenn Hermes nicht lesbar antwortet."""
+    """Beendete Sessions der Quelle (auch archivierte und angeheftete), deren letzte Aktivitaet
+    laenger als die Frist zurueckliegt. Hermes waehlt nach Inaktivitaet aus (`--older-than`);
+    None, wenn Hermes nicht lesbar antwortet."""
     source = _kore_source(scope)
     process = run_hermes_sessions([
-        "prune", "--older-than", str(SESSION_RETENTION_DAYS), "--source", source, "--dry-run",
+        "prune", "--older-than", str(SESSION_RETENTION_DAYS), "--source", source,
+        *PRUNE_INCLUDE_ALL, "--dry-run",
     ])
     if process is None or process.returncode != 0:
         return None
@@ -2286,20 +2383,24 @@ def expired_session_ids(scope: str):
 
 
 def scope_session_ids(scope: str):
-    """Alle Sessions der Quelle: beendete (auch Kompressions-Glieder) per `prune --dry-run`
-    ohne Altersgrenze, offene (z. B. nach einem Stopp) per `list`. None bei Lesefehler."""
+    """Alle Sessions der Quelle: beendete (auch Kompressions-Glieder, archivierte, angeheftete)
+    per `prune --dry-run` ohne Altersgrenze, offene (z. B. nach einem Stopp) per `list`.
+
+    Rueckgabe (IDs, verborgen) oder None bei Lesefehler. `verborgen` zaehlt offene Sessions, die
+    `prune` in seiner Notiz mitzaehlt, `list` aber nicht zeigt (archiviert oder versteckt): ihre
+    ID kennt die Bridge nicht, sie kann sie nicht loeschen und darf das nicht bestaetigen."""
     source = _kore_source(scope)
     listed = run_hermes_sessions(["list", "--source", source, "--limit", str(SESSION_LIST_LIMIT)],
                                  output_limit=SESSION_EXPORT_MAX_BYTES)
-    ended = run_hermes_sessions(["prune", "--source", source, "--dry-run"],
+    ended = run_hermes_sessions(["prune", "--source", source, *PRUNE_INCLUDE_ALL, "--dry-run"],
                                 output_limit=SESSION_EXPORT_MAX_BYTES)
     if listed is None or ended is None or listed.returncode != 0 or ended.returncode != 0:
         return None
-    ids = []
-    for sid in _dry_run_session_ids(ended.stdout, source) + _listed_session_ids(listed.stdout):
-        if sid not in ids:
-            ids.append(sid)
-    return ids
+    ended_ids = _dry_run_session_ids(ended.stdout, source)
+    open_ids = [sid for sid in dict.fromkeys(_listed_session_ids(listed.stdout))
+                if sid not in ended_ids]
+    hidden = max(0, _open_session_count(ended.stdout) - len(open_ids))
+    return list(dict.fromkeys(ended_ids + open_ids)), hidden
 
 
 def _session_record(hermes_session_id: str, timeout=None):
@@ -2309,7 +2410,7 @@ def _session_record(hermes_session_id: str, timeout=None):
                                   output_limit=SESSION_EXPORT_MAX_BYTES, timeout=timeout)
     if process is None or process.returncode != 0:
         return None
-    for line in process.stdout.splitlines():
+    for line in output_lines(process.stdout):
         if line.startswith("{"):
             try:
                 record = strict_json_loads(line)
@@ -2377,9 +2478,9 @@ def delete_listed_session(hermes_session_id: str, scope: str) -> str:
     """Loescht eine aus Hermes-Textausgaben (`list`, `prune --dry-run`) gelesene ID nur, wenn ihr
     eigener Export die Kore-Quelle dieses Scopes nennt: "deleted" | "not_found" | "failed".
 
-    Die Listen sind fuer Menschen gemacht; eine Vorschau oder ein Titel mit Zeilentrennern (U+2028,
-    \x0b, \x1c-\x1e, \x85 trennen fuer str.splitlines) kann eine fremde ID an ein Zeilenende
-    setzen. Deshalb entscheidet nie die Liste, sondern der Export der Session selbst."""
+    Die Listen sind fuer Menschen gemacht; die Bridge trennt sie nur an \\n (output_lines), aber
+    was in einer Zeile steht, kommt aus Titeln und Vorschauen. Deshalb entscheidet nie die Liste,
+    sondern der Export der Session selbst."""
     record = _session_record(hermes_session_id)
     if record == "not_found":
         return "not_found"
@@ -2398,8 +2499,9 @@ def forget(*, conversation_id=None, sessions=None, scope=None, store=None) -> di
     Puffer verschwinden, dann loescht die Bridge die Hermes-Sessions.
 
     Zaehlt Hermes-Sessions: `deleted`; `not_found` (schon weg); `failed` (Signatur passt nicht,
-    fremde Quelle, Hermes nicht lesbar, Zeitbudget erschoepft). Nur `failed == 0` ist eine
-    Bestaetigung — alles andere verfaellt spaetestens nach SESSION_RETENTION_DAYS Tagen.
+    fremde Quelle, Hermes nicht lesbar, Zeitbudget erschoepft, offene Session, die Hermes in der
+    Liste verbirgt). Nur `failed == 0` ist eine Bestaetigung — alles andere verfaellt spaetestens
+    nach SESSION_RETENTION_DAYS Tagen.
     """
     store = TURNS if store is None else store
     counts = _forget_counts()
@@ -2411,10 +2513,12 @@ def forget(*, conversation_id=None, sessions=None, scope=None, store=None) -> di
                 if time.monotonic() > deadline:
                     counts["failed"] += 1
                     continue
-                ids = scope_session_ids(kore_scope)
-                if ids is None:
+                listing = scope_session_ids(kore_scope)
+                if listing is None:
                     counts["failed"] += 1
                     continue
+                ids, hidden = listing
+                counts["failed"] += hidden
                 for position, sid in enumerate(ids):
                     if time.monotonic() > deadline:
                         counts["failed"] += len(ids) - position
@@ -2606,6 +2710,9 @@ ADJUST_ESCALATION_ERROR = "Die Anpassung des Coachs steigert die Session; erlaub
 # Felder, die der Vergleich gesondert behandelt; jedes andere Feld einer Uebung oder eines Satzes
 # muss in der Anfrage stehen und darf nicht hoeher sein (Zahl) bzw. muss gleich sein.
 _ADJUST_EXERCISE_FIELDS = frozenset(("name", "exercise_id", "note", "sets"))
+# Oberste Ebene der Session, wie die App sie schickt (CoachClient.sessionJSON); alles, was das
+# Modell dort dazuschreibt, faellt vor der Antwort weg (0.13 S14).
+ADJUST_SESSION_FIELDS = ("session_id", "name", "exercises")
 
 
 def _is_number(value) -> bool:
@@ -2691,6 +2798,7 @@ def adjust_today(data) -> tuple:
     # „Nur reduzieren" steht nicht nur im Prompt: die Bridge prueft es selbst (0.13 S11a).
     if adjustment_escalates(session_json, sess):
         return 502, {"error": ADJUST_ESCALATION_ERROR, "code": "escalation"}
+    sess = {key: sess[key] for key in ADJUST_SESSION_FIELDS if key in sess}
     changes = obj.get("changes")
     return 200, {
         "session": sess,
@@ -2894,6 +3002,9 @@ class Handler(BaseHTTPRequestHandler):
         except PromptTransportUnavailable:
             self._send_turn_error("transport_unavailable")
             return
+        except HermesProfileUnsafe:
+            self._send_turn_error("profile_unsafe")
+            return
         except HermesPromptTooLarge:
             self._send_turn_error("prompt_too_large")
             return
@@ -3055,6 +3166,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, turn_outcome_payload(outcome))
         except PromptTransportUnavailable:
             self._send(503, {"error": "Hermes-Prompt-Transport ist nicht freigegeben."})
+        except HermesProfileUnsafe:
+            self._send_turn_error("profile_unsafe")
         except HermesPromptTooLarge:
             self._send(413, {"error": "Coach-Anfrage erzeugt einen zu großen Hermes-Prompt."})
         except Exception as e:

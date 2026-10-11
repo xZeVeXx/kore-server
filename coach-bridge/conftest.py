@@ -20,3 +20,10 @@ def no_session_title_lookup(monkeypatch):
 def isolated_pairing_state(monkeypatch, tmp_path):
     """Never touch a real pairing state dir; this one does not exist unless a test creates it."""
     monkeypatch.setattr(bridge, "PAIRING", pairing.PairingStore(str(tmp_path / "pairing-state")))
+
+
+@pytest.fixture(autouse=True)
+def isolated_hermes_home(monkeypatch, tmp_path):
+    """Die Bridge prueft vor jedem Hermes-Lauf die config.yaml des Profils unter HOME; nie die des
+    Entwicklers. Tests, die ein Profil brauchen, setzen HOME selbst."""
+    monkeypatch.setattr(bridge, "HOME", str(tmp_path / "hermes-home"))

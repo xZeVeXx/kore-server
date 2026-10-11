@@ -1,0 +1,4 @@
+# Falsch positive Funde im Verlauf, je genau ein Fingerabdruck (Commit:Datei:Regel:Zeile). Nur fuer
+# Werte, die nachweislich keine Geheimnisse sind; ein echter Fund wird behoben, nie hier eingetragen.
+# 9fa754e: der Testvergleichswert `value == "Bearer device-token"` (kein Token, ein fester Platzhalter).
+9fa754e3501f4c08b7648da4128b4b53bc051c6c:server/tests/test_auth_gate.py:generic-api-key:169

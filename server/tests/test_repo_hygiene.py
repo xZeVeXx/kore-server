@@ -136,6 +136,10 @@ class ContainerHardeningTests(unittest.TestCase):
         for key in ("interval", "timeout", "retries"):
             self.assertIn(key, check)
 
+    def test_the_mcp_container_turns_the_fastmcp_update_check_off(self) -> None:
+        # Quoted on purpose: a bare `off` is the boolean false in YAML 1.1.
+        self.assertEqual(_compose()["mcp"]["environment"]["FASTMCP_CHECK_FOR_UPDATES"], "off")
+
     def test_no_service_loads_the_whole_env_file(self) -> None:
         compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertNotIn("env_file", compose)

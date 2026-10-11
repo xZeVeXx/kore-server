@@ -120,7 +120,7 @@ class MCPOriginGuardTests(unittest.TestCase):
         cls.mcp_server = importlib.import_module("mcp_server")
         # Exactly the middleware list that `mcp.run(transport="http", ...)` is given.
         cls.app = cls.mcp_server.mcp.http_app(
-            middleware=cls.mcp_server.origin_guard_middleware()
+            middleware=cls.mcp_server.http_middleware()
         )
         cls.client_context = TestClient(cls.app)
         cls.client = cls.client_context.__enter__()

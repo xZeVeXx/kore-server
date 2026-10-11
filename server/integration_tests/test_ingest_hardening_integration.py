@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -156,26 +157,59 @@ class IngestHardeningTests(unittest.TestCase):
         self.assertEqual(self.client.get("/health").json(), {"ok": True})
 
     def test_the_gate_covers_every_route_except_health(self) -> None:
-        # A route added later without gate coverage would again parse its body before the token
-        # check. Fail here instead of in production.
+        # Default deny (0.13 S14): only the exact paths in ANONYMOUS_PATHS skip the gate, so a
+        # route added later is covered without anyone remembering to list it.
+        self.assertEqual(self.ingest_api.ANONYMOUS_PATHS, frozenset({"/health"}))
         sample = {"plan_id": "6f9619ff-8b86-d011-b42d-00c04fc964ff"}
-        paths = [route.path.format(**sample) for route in self.ingest_api.app.routes
-                 if isinstance(route, APIRoute)]
-        self.assertIn("/ingest", paths)
-        for path in paths:
+        routes = [(method, route.path.format(**sample)) for route in self.ingest_api.app.routes
+                  if isinstance(route, APIRoute) for method in route.methods]
+        self.assertIn(("POST", "/ingest"), routes)
+        for method, path in routes:
             if path == "/health":
                 continue
-            with self.subTest(path=path):
-                self.assertTrue(self.ingest_api.is_protected_path(path))
-        self.assertFalse(self.ingest_api.is_protected_path("/health"))
+            with self.subTest(method=method, path=path):
+                status, upload = self.asgi(method, path, [(b"content-length", b"100")])
+                self.assertEqual(status, 401)
+                self.assertEqual(upload.calls, 0)
+
+    def test_a_path_with_a_trailing_newline_cannot_skip_the_first_lock(self) -> None:
+        # `/ingest%0A` arrives as path "/ingest\n" and Starlette's `^/ingest$` still routes it to
+        # /ingest. It used to miss the gate's protected-path list: FastAPI read and parsed the body
+        # before the route dependency answered 401.
+        for path in ("/ingest\n", "/ingest/\n", "/plan/pending\n",
+                     "/plan/6f9619ff-8b86-d011-b42d-00c04fc964ff/ack\n", "/health\n"):
+            for method in ("POST", "GET"):
+                with self.subTest(method=method, path=path):
+                    headers = [(b"content-type", b"application/json"), (b"content-length", b"100")]
+                    status, upload = self.asgi(method, path, headers)
+                    self.assertEqual(status, 401)
+                    self.assertEqual(upload.calls, 0, "the body must stay unread")
+
+    def test_unknown_paths_need_the_token_first(self) -> None:
+        self.assertEqual(self.client.get("/nope").status_code, 401)
+        self.assertEqual(self.client.get("/health/").status_code, 401)
+        authorized = {"Authorization": f"Bearer {self.token}"}
+        self.assertEqual(self.client.get("/nope", headers=authorized).status_code, 404)
+
+    def test_serve_hands_uvicorn_a_concurrency_limit_and_a_keep_alive_timeout(self) -> None:
+        # uvicorn 0.48 has no header or read timeout; these are the limits it does have (0.13 S14).
+        with mock.patch.dict(os.environ, {"KORE_INGEST_HOST": "", "KORE_BIND_ADDRESS": ""}), \
+                mock.patch("uvicorn.run") as run:
+            self.ingest_api.serve()
+        run.assert_called_once()
+        self.assertIs(run.call_args.args[0], self.ingest_api.app)
+        kwargs = run.call_args.kwargs
+        self.assertEqual((kwargs["host"], kwargs["port"]), ("127.0.0.1", 8081))
+        self.assertEqual(kwargs["limit_concurrency"], 64)
+        self.assertEqual(kwargs["timeout_keep_alive"], 5)
 
     # -- 2. no interactive docs ---------------------------------------------------------------
 
     def test_docs_redoc_and_openapi_are_gone_with_and_without_a_token(self) -> None:
         for path in ("/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"):
-            for headers in ({}, {"Authorization": f"Bearer {self.token}"}):
+            for headers, expected in (({}, 401), ({"Authorization": f"Bearer {self.token}"}, 404)):
                 with self.subTest(path=path, authenticated=bool(headers)):
-                    self.assertEqual(self.client.get(path, headers=headers).status_code, 404)
+                    self.assertEqual(self.client.get(path, headers=headers).status_code, expected)
 
     def test_the_app_object_has_no_docs_urls(self) -> None:
         app = self.ingest_api.app

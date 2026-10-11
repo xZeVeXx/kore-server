@@ -19,12 +19,13 @@ Prueft:
 - Das Profil aus KORE_HERMES_PROFILE existiert, `hermes -p <Profil> mcp test kore` gelingt;
   `hermes --version` wird ausgegeben.
 - Hermes laeuft dabei mit GENAU dem Kind-Env der Bridge (HOME, PATH aus KORE_HERMES_CHILD_PATH,
-  sonst dem Standard-PATH der Bridge). Der Modell-Anbieter des Profils findet dort seine Programme
-  (z. B. `claude` fuer claude-subscription-directsdk-*) — ohne Modellaufruf, nur `--version` und
-  der PATH-Abgleich.
+  sonst dem Standard-PATH der Bridge). Fehlt einem Modell-Anbieter dort ein Programm (etwa einem
+  Anbieter aus einem Plugin unter `plugins.enabled`, der ein lokales Programm startet), meldet
+  Hermes das beim Start auf stderr — ohne Modellaufruf, nur `--version`. Der Doctor nennt Anbieter
+  und Plugins des Profils und raet kein Programm.
 - Die SOUL.md des Profils enthaelt hermes/kore-app-chat-soul.md in der aktuellen Fassung.
-- `skills.inline_shell` ist in der config.yaml des Profils aus (fehlt oder steht auf false); sonst
-  startet die Bridge nicht.
+- `skills.inline_shell` ist in der config.yaml des Profils aus (fehlt oder steht auf false, nur
+  schlichte YAML-Schluessel); sonst startet die Bridge nicht bzw. lehnt jeden Coach-Lauf ab.
 
 - Der Zustandsordner der Geraete-Kopplung (KORE_STATE_DIR) existiert mit den Rechten aus
   contract/pairing-v1.md (Ordner 0750, devices.json 0640, Rest 0600); ist KORE_STATE_GID gesetzt,
@@ -111,12 +112,11 @@ DEFAULT_CHILD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/b
 _SAFE_CHILD_ENV_KEYS = (
     "LANG", "LC_ALL", "LC_CTYPE", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR", "SSL_CERT_FILE", "TZ",
 )
-# Modell-Anbieter, die ein lokales Programm starten (Praefix des Anbieternamens → Programm).
-PROVIDER_PROGRAMS = (("claude-subscription", "claude"),)
 # Hermes meldet ein fehlendes Anbieter-Programm beim Start auf stderr, z. B.
-# "Claude Code is not installed (no `claude` on PATH)". Nur der Programmname wird gelesen.
+# "<Anbieter>: … is not installed (no `<programm>` on PATH)". Nur der Programmname wird gelesen.
 _MISSING_PROGRAM_RE = re.compile(r"no `([A-Za-z0-9._+-]{1,64})` on PATH")
 _PROVIDER_RE = re.compile(r"[A-Za-z0-9._:/-]{1,80}")
+_PLUGIN_RE = re.compile(r"[A-Za-z0-9._@/-]{1,80}")
 
 
 def read_env_file(path) -> dict:
@@ -397,6 +397,45 @@ def profile_model_provider(config_path: Path):
     return None
 
 
+def _yaml_scalar(text: str) -> str:
+    """Ein schlichter oder gequoteter Einzelwert ohne Kommentar."""
+    return text.split(" #", 1)[0].strip().strip("\"'")
+
+
+def profile_enabled_plugins(config_path: Path) -> list:
+    """Namen unter `plugins.enabled` (Block- oder Flow-Liste) aus der config.yaml des Profils; nur
+    Namen aus [A-Za-z0-9._@/-], alles andere faellt weg. [] ohne Datei oder Eintrag."""
+    try:
+        lines = config_path.read_text(encoding="utf-8").split("\n")
+    except (OSError, UnicodeDecodeError):
+        return []
+    names = []
+    in_plugins = in_enabled = False
+    enabled_indent = 0
+    for raw in lines:
+        line = raw.rstrip("\r")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        body = line.strip()
+        if indent == 0:
+            in_plugins = body.split("#", 1)[0].strip() == "plugins:"
+            in_enabled = False
+            continue
+        if not in_plugins:
+            continue
+        if in_enabled and indent > enabled_indent and body.startswith("- "):
+            names.append(_yaml_scalar(body[2:]))
+            continue
+        key, sep, value = body.partition(":")
+        in_enabled = bool(sep) and key.strip() == "enabled"
+        enabled_indent = indent
+        value = value.split(" #", 1)[0].strip()
+        if in_enabled and value.startswith("[") and value.endswith("]"):
+            names.extend(_yaml_scalar(item) for item in value[1:-1].split(",") if item.strip())
+    return [name for name in names if _PLUGIN_RE.fullmatch(name)]
+
+
 def _path_hint(program: str) -> str:
     found = shutil.which(program)
     folder = os.path.dirname(found) if found else f"<Ordner mit {program}>"
@@ -404,25 +443,32 @@ def _path_hint(program: str) -> str:
             f"KORE_HERMES_CHILD_PATH={folder}:{DEFAULT_CHILD_PATH}, dann die Bridge neu starten.")
 
 
-def check_provider_programs(report: Report, profile_dir: Path, child_env: dict, reported: set) -> None:
-    provider = profile_model_provider(profile_dir / "config.yaml")
+def check_provider(report: Report, profile_dir: Path) -> None:
+    """Nennt Anbieter und Plugins des Profils. Ob ein Anbieter ein Programm braucht, weiss nur
+    Hermes; ein fehlendes meldet es beim Start (check_hermes liest das aus stderr)."""
+    config = profile_dir / "config.yaml"
+    provider = profile_model_provider(config)
+    plugins = profile_enabled_plugins(config)
     if provider is None:
         report.skip("Modell-Anbieter: in config.yaml des Profils nicht lesbar.")
-        return
-    program = next((name for prefix, name in PROVIDER_PROGRAMS if provider.startswith(prefix)), None)
-    if program is None:
-        report.info(f"Modell-Anbieter des Profils: {provider}.")
-    elif shutil.which(program, path=child_env["PATH"]):
-        report.ok(f"Modell-Anbieter {provider}: `{program}` liegt auf dem Kind-PATH der Bridge.")
-    elif program not in reported:
-        report.fail(f"Modell-Anbieter {provider} braucht `{program}`, das auf dem Kind-PATH der "
-                    "Bridge fehlt.", _path_hint(program))
+    else:
+        source = next((name for name in plugins if provider.startswith(name)), None)
+        origin = f" (aus dem Plugin {source})" if source else ""
+        report.info(f"Modell-Anbieter des Profils: {provider}{origin}.")
+    if plugins:
+        report.info(f"Plugins im Profil: {', '.join(plugins)}. Startet ein Anbieter-Plugin ein lokales "
+                    "Programm, muss es auf dem Kind-PATH der Bridge liegen; fehlt es, meldet Hermes "
+                    "das beim Start (siehe oben).")
 
 
 # Wie coach-bridge/bridge.py (inline_shell_config_error); test_kore_doctor.py vergleicht beides.
 _INLINE_SHELL_KEY = "inline_shell"
 _INLINE_SHELL_OFF = frozenset(("false", "False", "FALSE"))
 _YAML_LINE_BREAK_RE = re.compile("\r\n|[\n\r\x85\u2028\u2029]")
+_YAML_KEY_SEPARATOR_RE = re.compile(r":(?=[ \t]|$)")
+_YAML_UNPLAIN_KEY_CHARS = frozenset("\"'\\{}[]")
+_YAML_KEY_INDICATORS = frozenset("?:!&*|>%@`")
+_YAML_FLOW_PAIR_RE = re.compile(r"[\"']:|:(?=[\s,\[\]{}]|$)")
 
 
 def _yaml_content(line: str) -> str:
@@ -430,6 +476,38 @@ def _yaml_content(line: str) -> str:
         return ""
     match = re.search(r"[ \t]#", line)
     return (line[:match.start()] if match else line).rstrip()
+
+
+def _yaml_key_value(text: str):
+    match = _YAML_KEY_SEPARATOR_RE.search(text)
+    if match is None:
+        return None, text.strip()
+    return text[:match.start()].strip(), text[match.end():].strip()
+
+
+def _yaml_flow_with_keys(node: str) -> bool:
+    while node[:1] in ("&", "!"):
+        node = node.partition(" ")[2].lstrip()
+    if node.startswith("{"):
+        return node != "{}"
+    if node.startswith("["):
+        return any(char in node for char in "{}\\") or _YAML_FLOW_PAIR_RE.search(node) is not None
+    return False
+
+
+def _yaml_unplain(body: str) -> bool:
+    """Nur schlichte Schluessel auf jeder Ebene; sonst fail closed (wie die Bridge)."""
+    node = body
+    while node == "-" or node.startswith(("- ", "-\t")):
+        node = node[1:].lstrip(" \t")
+    if node[:1] in ("?", ":") and (len(node) == 1 or node[1] in " \t"):
+        return True
+    key, value = _yaml_key_value(node)
+    if key is None:
+        return _yaml_flow_with_keys(value)
+    if not key or key[0] in _YAML_KEY_INDICATORS or _YAML_UNPLAIN_KEY_CHARS & set(key):
+        return True
+    return _yaml_flow_with_keys(value)
 
 
 def inline_shell_config_error(text: str):
@@ -443,11 +521,14 @@ def inline_shell_config_error(text: str):
             continue
         body = content.lstrip(" ")
         indent = len(content) - len(body)
-        key, separator, value = body.partition(":")
-        key, value = key.strip(), value.strip()
+        if _yaml_unplain(body):
+            return problem
+        key, value = _yaml_key_value(body)
+        separator = key is not None
+        key = key or ""
         mentions = _INLINE_SHELL_KEY in body and key != f"{_INLINE_SHELL_KEY}_timeout"
         if indent == 0:
-            in_skills = bool(separator) and key in ("skills", '"skills"', "'skills'")
+            in_skills = separator and key == "skills"
             child_indent = None
             if in_skills and value not in ("", "{}"):
                 return problem
@@ -490,7 +571,8 @@ def check_inline_shell(report: Report, profile_dir: Path, profile: str) -> None:
         report.fail(f"skills.inline_shell ist im Profil {profile} an oder nicht eindeutig aus; Hermes "
                     "fuehrt damit Shell-Befehle aus Skills aus, und die Bridge startet nicht.",
                     f"In {config} unter `skills:` genau `inline_shell: false` setzen oder den "
-                    "Schluessel entfernen.")
+                    "Schluessel entfernen; nur schlichte Schluessel (keine Anfuehrungszeichen, "
+                    "Backslash-Escapes oder {…}).")
 
 
 def _normalized(text: str) -> str:
@@ -541,15 +623,15 @@ def check_hermes(report: Report, bridge_env: dict) -> None:
                                  env=child_env, cwd=home)
     except (OSError, subprocess.TimeoutExpired):
         version = None
-    reported = set()
     if version is None or version.returncode != 0 or not version.stdout.strip():
         report.fail("hermes --version laeuft mit dem Kind-Env der Bridge nicht.",
                     "KORE_HERMES_BIN, KORE_HERMES_HOME und KORE_HERMES_CHILD_PATH in bridge.env pruefen.")
     else:
-        report.info(f"Hermes: {version.stdout.strip().splitlines()[0][:120]}")
+        # Nur an \n trennen (U+2028 & Co. zerlegen sonst die Zeile, siehe bridge.output_lines).
+        first_line = version.stdout.strip().split("\n")[0].rstrip()
+        report.info(f"Hermes: {first_line[:120]}")
     # stderr wird nie ausgegeben; nur der Name eines fehlenden Programms zaehlt.
     for program in dict.fromkeys(_MISSING_PROGRAM_RE.findall(version.stderr if version else "")):
-        reported.add(program)
         report.fail(f"Hermes findet mit dem Kind-PATH der Bridge `{program}` nicht "
                     "(vom Modell-Anbieter des Profils gebraucht).", _path_hint(program))
 
@@ -563,7 +645,7 @@ def check_hermes(report: Report, bridge_env: dict) -> None:
         report.fail(f"Hermes-Profil {profile} existiert nicht unter {home}/.hermes.",
                     f"{hermes} profile create {profile} (ohne --clone), dann {PROFILE_EXAMPLE} eintragen.")
         return
-    check_provider_programs(report, profile_dir, child_env, reported)
+    check_provider(report, profile_dir)
     check_soul(report, profile_dir, profile)
     check_inline_shell(report, profile_dir, profile)
 

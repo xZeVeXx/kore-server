@@ -19,6 +19,12 @@ from collections.abc import Mapping
 
 PUBLISHED_BIND_ENV = "KORE_PUBLISHED_BIND"
 LOOPBACK = "127.0.0.1"
+# Fuer uvicorn.run (Ingest) und FastMCPs uvicorn_config (MCP), wie MAX_CONNECTIONS der Bridge: ab
+# 64 offenen Verbindungen oder laufenden Anfragen beantwortet uvicorn jede weitere Anfrage sofort
+# mit 503; eine ruhende Keep-Alive-Verbindung schliesst nach 5 s. uvicorn 0.48 hat keine Frist fuer
+# Kopfzeilen oder Body (README, Residual risks): wer sie tropfenweise schickt, haelt eine
+# Verbindung offen, und sie zaehlt zu den 64.
+UVICORN_LIMITS = {"limit_concurrency": 64, "timeout_keep_alive": 5}
 _WILDCARDS = ("0.0.0.0", "::")
 _ALLOWED_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "127.0.0.0/8",

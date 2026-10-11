@@ -271,8 +271,13 @@ skills:
 With `true`, Hermes runs `` !`command` `` lines from a skill's `SKILL.md` through bash as soon as the
 skill is shown, and the app chat has the `skills` toolset. The bridge therefore **does not start**
 while the setting is on or not clearly off (`true`, `yes`, `"false"` in quotes, a variable, an
-unusual layout; the message names the setting and the file), and `kore-doctor` flags it. The check
-runs at startup, so restart the bridge after changing the file.
+unusual layout; the message names the setting and the file), and `kore-doctor` flags it. Only plain
+YAML keys count as clear anywhere in this file: a quoted key (`"skills":`), a key with a backslash
+escape (`"inline\x5fshell"` spells `inline_shell`) or a key in a flow mapping (`{…}`) is treated as
+on. The bridge checks again before every Hermes run: if the file becomes unsafe while the bridge is
+running, every coach call is refused with `503` (`code: profile_unsafe`) until it is fixed, and the
+journal names the setting and the file. If the bridge refused to start, start it again after fixing
+the file.
 
 **6. Set up the coach bridge.**
 
@@ -385,10 +390,12 @@ How it works and what it guarantees:
 
 - The code has 20 characters (100 bits), is valid for **10 minutes** and works **once**: a successful
   pairing uses it up. A request that does not carry a well-formed code at all (wrong length or
-  characters, no string, no JSON) does not touch the open code. After **5 failed attempts** with a
-  well-formed code, that code is dead and you create a new one. Creating a new code also replaces the
-  open one. From one address the server accepts at most 5 failed attempts per minute and then answers
-  429; the check and the count are one step, so parallel requests cannot slip past the limit.
+  characters, no string, no JSON) does not touch the open code. After **1000 failed attempts** with a
+  well-formed code, that code is dead and you create a new one. The limit is high on purpose: 100 bits
+  cannot be guessed in 10 minutes anyway, and a low limit would let anyone in your network kill your
+  open code with a few wrong requests. Creating a new code also replaces the open one. From one
+  address the server accepts at most 5 failed attempts per minute and then answers 429; the check and
+  the count are one step, so parallel requests cannot slip past the limit.
 - The link never contains a long-lived token. A device token is 256 bits of randomness; the server
   stores only its SHA-256 hash, in the state directory, and logs neither codes nor tokens.
 - The device token is valid for the bridge and the ingest API, nothing else. The MCP server accepts
@@ -567,14 +574,14 @@ violate them, you are running something other than the system described here.
    descriptions. In the profile that sees `kore`, use only tool servers whose source you know. This
    server cannot solve that for you; it can only keep small what there is to fetch (point 1).
 8. **Pairing is single-use, short and revocable.** Codes are random, valid 10 minutes, usable once,
-   dead after 5 failed attempts and rate-limited per address. Device tokens are random, stored only
+   dead after 1000 failed attempts and rate-limited per address. Device tokens are random, stored only
    as hashes and can be revoked at any time. Neither codes nor tokens are logged.
 9. **Authentication comes before the body.** The ingest API checks the bearer token in a layer in
    front of the web framework, before it reads a single byte of the request: without a valid token the
-   answer is 401 at once, even for a 16 MiB upload. Anything unauthenticated may send at most 4 KiB.
-   Exactly one `Authorization` header counts; a request with two is rejected, on the coach bridge too.
-   `/docs`, `/redoc` and
-   `/openapi.json` do not exist.
+   answer is 401 at once, even for a 16 MiB upload. Only the exact path `/health` is open (and may
+   receive at most 4 KiB); every other path, unknown ones included, needs the token first. Exactly one
+   `Authorization` header counts; a request with two is rejected, on the coach bridge and the MCP
+   server too. `/docs`, `/redoc` and `/openapi.json` do not exist.
 10. **No web search where the health context is, unless you ask for it.** A health chat (and the
     adjustment of today's workout, which carries health context too) gets the tools
     `skills,memory,kore`, never `web`, so text smuggled into such a chat has no tool to send the health
@@ -666,17 +673,20 @@ after 30 days. Never change `KORE_INSTANCE_ID` or `KORE_PLAN_ORIGIN_PRINCIPAL` o
 | run `hermes` for exactly the one profile in `KORE_HERMES_PROFILE`, as its service user, with the prompt on stdin | enable terminal, files, code execution, cron jobs, computer or browser control in the app chat; the tools come from a fixed list (`-t`), not from a block list |
 | allow `web,skills,memory` in the general chat; `skills,memory,kore` in a health chat with an origin ticket; `skills,memory` where health context has no ticket (adjusting today's workout); `web,skills,memory,kore` (without ticket `web,skills,memory`) in a health chat only when the request says `health_web_allowed: true` | allow `web` near health context without that explicit request, give `web` to the adjustment of today's workout in any case, or pass service secrets on to Hermes: the child gets only `HOME`, `PATH` and seven keys such as `LANG`/`TZ` |
 | start every prompt with the fixed first line `[KORE-APP-NACHRICHT]` and run every Hermes run in a fresh, empty temporary directory that is removed afterwards | let a message that begins with a file path attach that file, or let Hermes load `AGENTS.md`, `CLAUDE.md` and similar context files from the home directory into the prompt |
-| return the adjusted workout of the day only if it is lighter or shorter than the one the app sent | return a heavier or longer one (more sets, weight, repetitions, longer duration, new or renamed exercises): the reply is dropped and the app gets a 502 with a fixed sentence |
-| read sessions of the sources `kore-general`/`kore-health` to find titles and predecessors, and delete them on request or after 30 days; the source of every session is checked before it is deleted, when forgetting a whole scope and on expiry as well | touch sessions of other sources, or change the profile's memory or configuration |
+| return the adjusted workout of the day only if it is lighter or shorter than the one the app sent, with nothing but `session_id`, `name` and `exercises` at its top level | return a heavier or longer one (more sets, weight, repetitions, longer duration, new or renamed exercises): the reply is dropped and the app gets a 502 with a fixed sentence |
+| read sessions of the sources `kore-general`/`kore-health` to find titles and predecessors, and delete them on request or after 30 days, pinned and archived ones included; the source of every session is checked before it is deleted, when forgetting a whole scope and on expiry as well | touch sessions of other sources, or change the profile's memory or configuration |
 | write one `kore-turn-failed` line (class, code, exit) to the journal when a turn fails | write prompts, answers, tokens, health values or Hermes stderr to the journal or to the app |
-| run at most 2 Hermes runs at once, whichever route they come by (a background turn, a synchronous chat, the adjustment of today's workout; a third gets 429 `busy`), and keep 64 answers in memory for up to 24 hours | start without token (at least 32 characters), origin secret and principal, start with `skills.inline_shell` on, listen on a public address, or gain privileges through `sudo`/setuid (`NoNewPrivileges=yes`) |
+| run at most 2 Hermes runs at once, whichever route they come by (a background turn, a synchronous chat, the adjustment of today's workout; a third gets 429 `busy`), and keep 64 answers in memory for up to 24 hours | start without token (at least 32 characters), origin secret and principal, start or run Hermes with `skills.inline_shell` on (checked at startup and before every run), listen on a public address, or gain privileges through `sudo`/setuid (`NoNewPrivileges=yes`) |
 
 Fixed limits: a request is at most 256 KiB, a prompt 120 KiB, Hermes output 512 KiB, run time 150 s;
 at most 64 connections at once (further ones are closed without an answer), 20 s from the start of a
 connection to read headers and body (on top of the 30 s socket timeout, so a slow sender cannot hold
-a thread open); the ingest API accepts at most 16 MiB, and only with a valid token. Tokens are
-compared in constant time in all three services; the MCP server compares SHA-256 digests of equal
-length, so not even the token's length shows in the timing.
+a thread open); the ingest API accepts at most 16 MiB, and only with a valid token. Ingest and MCP
+answer every further request with 503 once 64 connections are open or 64 requests are running, and
+close an idle keep-alive connection after 5 s (uvicorn has no deadline for headers or body, see
+[Residual risks](#residual-risks)). Tokens are compared in constant time in all three services; the
+MCP server compares SHA-256 digests of equal length, so not even the token's length shows in the
+timing.
 
 ### Residual risks
 
@@ -704,10 +714,14 @@ Kore sends health context only in chats with health sharing turned on, and the b
   your own risk, and off by default. With it on, the health context in the prompt and the `kore` tools
   sit next to a tool that can fetch addresses: a manipulated web page that the coach finds or reads
   could talk it into sending health values to an address of its choosing, and the bridge cannot stop
-  that. As a soft mitigation, not a barrier, the bridge appends one fixed sentence to the end of the
-  prompt of such a turn (`[KORE-WEBSUCHE — BRIDGE-AUTORITATIV]`: do not put health values, names,
-  notes or plan contents into search queries or URLs, search in general terms only); a manipulated
-  text can talk the coach out of it. Switch it on only for a question that needs it, and off again
+  that. Switching it on in the middle of a chat exposes more than the current message: the run with
+  web search continues the same session, so the earlier turns of that health chat, with the health
+  context they carried, are in front of the coach as well. Start a new chat for a question that needs
+  the web if the earlier ones should stay out of it. As a soft mitigation, not a barrier, the bridge
+  appends one fixed sentence to the end of the prompt of such a turn
+  (`[KORE-WEBSUCHE — BRIDGE-AUTORITATIV]`: do not put health values, names, notes or plan contents
+  into search queries or URLs, search in general terms only); a manipulated text can talk the coach
+  out of it. Switch it on only for a question that needs it, and off again
   afterwards. The adjustment of today's workout never has web search, whatever the app sends (it
   answers `400` to the field).
 - **External memory provider.** If the profile uses one, `memory` brings its tools along, and turns
@@ -716,9 +730,9 @@ Kore sends health context only in chats with health sharing turned on, and the b
   also when a text from a web search talks it into it. Such a skill keeps working in all channels of
   the profile. Look at new or changed skills if something seems strange. Shell commands inside
   skills (`skills.inline_shell`) must stay off, see step 5 of the setup. The bridge checks this at
-  startup only, and the check covers neither Hermes' managed configuration overlay nor the older
-  backup that Hermes falls back to when `config.yaml` is broken. After changes to the profile, restart
-  the bridge and run `kore-doctor`.
+  startup and again before every Hermes run, but the check covers neither Hermes' managed
+  configuration overlay nor the older backup that Hermes falls back to when `config.yaml` is broken.
+  After changes to the profile, run `kore-doctor`.
 - **Searching earlier chats.** The app chat has no `session_search`. Other channels of the same
   profile can still find Kore sessions with their own search until they are deleted or expire. A
   profile used only for Kore avoids this.
@@ -741,6 +755,12 @@ Kore sends health context only in chats with health sharing turned on, and the b
 - **The connection limit is global, not per address.** Someone in your network can keep the bridge's
   64 connections busy for up to 20 s each. That blocks the bridge for the time being but binds no
   unlimited threads or memory.
+- **Ingest and MCP have no deadline for headers or body.** uvicorn 0.48, which serves both, offers
+  none. Both answer every further request with 503 once 64 connections are open or 64 requests are
+  running, and close an idle keep-alive connection after 5 s. But a sender in your network that
+  trickles its headers keeps such a connection open as long as it likes, and 64 of them block the
+  ingest API (the MCP server listens on loopback only) until they close. Memory per connection stays
+  small; the systemd units also cap open files at 4096.
 - **Authenticated uploads still cost memory.** With a valid token, a 16 MiB snapshot needs roughly
   400 to 500 MiB while the ingest API parses it; the memory limit of the container or unit caps a
   runaway. Without a valid token, nothing is read.
@@ -750,8 +770,9 @@ Kore sends health context only in chats with health sharing turned on, and the b
 ## Data and privacy
 
 Your data stays on **your** server. Kore sends your health data only to the server you pair, and
-this repository contains no analytics, telemetry or outbound calls of its own. What each part
-stores:
+this repository contains no analytics, telemetry or outbound calls of its own. FastMCP's own check
+for a newer release on PyPI at startup is switched off (`FASTMCP_CHECK_FOR_UPDATES=off`, set by
+`mcp_server.py` itself and in the Compose file and the systemd unit). What each part stores:
 
 | Where | What |
 | --- | --- |
@@ -776,15 +797,16 @@ Kore names the next step under Experimental features. Test the bridge there with
 | "The bridge is running but not fully set up (503)." | It answers but has no token; deliberately an error rather than open access. | Set `KORE_BRIDGE_TOKEN` in `bridge.env` and restart. |
 | "Your coach bridge is too old (API 1, needs 2). Update kore-server." | The bridge speaks an older protocol version. | Update kore-server to the version Kore names and restart the bridge. |
 | "Your coach bridge is missing: …" | The bridge does not report a capability Kore requires; the name is in the text. | Update kore-server. If `plan_origin_v1` is missing, also check `KORE_PLAN_ORIGIN_SECRET` and `KORE_PLAN_ORIGIN_PRINCIPAL` in `bridge.env`; both must be set. If `device_pairing_v1` is missing, the state directory is unusable (see the two pairing rows below). |
-| Pairing fails (401 `pairing_failed`) | The code is wrong, expired (10 minutes), already used, dead after 5 failed attempts, or pairing is unavailable on the server. | Run `kore-doctor pair` again for a fresh link. If it keeps failing: `journalctl -u kore-coach-bridge` and look for `Device pairing unavailable`. |
-| Pairing keeps failing with 401, although the link is fresh | Five failed attempts with a well-formed code kill that code, also if the attempts came from an old link or a typo. A request that is not a well-formed code does not count. | Create a new code with `kore-doctor pair`; a code that failed five times does not come back. |
+| Pairing fails (401 `pairing_failed`) | The code is wrong, expired (10 minutes), already used, dead after 1000 failed attempts, or pairing is unavailable on the server. | Run `kore-doctor pair` again for a fresh link. If it keeps failing: `journalctl -u kore-coach-bridge` and look for `Device pairing unavailable`. |
+| Pairing keeps failing with 401, although the link is fresh | 1000 failed attempts with a well-formed code kill that code; something in your network kept trying it. A request that is not a well-formed code does not count. | Create a new code with `kore-doctor pair` (a dead code does not come back) and look for the device that keeps sending: the journal names the address of every failed attempt. |
 | Pairing: 429 `rate_limited` | Five failed attempts within a minute from one address. | Wait a minute and use a new code. |
 | Journal: `Device pairing unavailable: …` | The state directory is missing or the bridge cannot write to it. | `kore-doctor init-state`, then check ownership. With the hardened unit, `<HOME>/kore-server/state` must be in `ReadWritePaths`. |
 | `docker compose up` stops with "set KORE_STATE_GID …" | `KORE_STATE_GID` is missing in `.env`. | Run `kore-doctor init-state` and copy the printed line into `.env`. |
 | `docker compose up` stops with "set KORE_… in .env" for another key | Compose needs that key for a container and finds none. | Add the key to `.env` (compare with `.env.example`). |
 | A service does not start and the message says "is too short: at least 32 characters are required" (ingest, MCP) or "KORE_BRIDGE_TOKEN must contain at least 32 characters" (bridge) | Since 0.13 the three bearer tokens need 32 characters. | Generate a new one with `openssl rand -hex 24`, enter it, restart, and update the other side (Hermes profile `.env`, or Kore on the expert path). |
 | The ingest container restarts in a loop; the log says "… must be a concrete IPv4 loopback, RFC 1918 or VPN (100.64.0.0/10) address" | `KORE_BIND_ADDRESS` is `0.0.0.0`, a host name or a public address. | `docker compose logs ingest`; put the LAN address of this machine into `KORE_BIND_ADDRESS`, then `docker compose up -d`. The same message from `python ingest_api.py` or `python mcp_server.py` without Docker names `KORE_INGEST_HOST`, `KORE_BIND_ADDRESS` or `KORE_MCP_HOST`. |
-| The bridge does not start and names `skills.inline_shell` | The profile's `config.yaml` has shell commands in skills on, or not clearly off. | Under `skills:` set exactly `inline_shell: false` (or remove the key), see step 5 of the setup, and restart. |
+| The bridge does not start and names `skills.inline_shell` | The profile's `config.yaml` has shell commands in skills on, or not clearly off; a quoted, escaped or flow-style key anywhere in the file counts as not clearly off. | Under `skills:` set exactly `inline_shell: false` (or remove the key) and use plain keys only, see step 5 of the setup, and restart. |
+| Coach calls fail with 503; the journal says `kore-profile-unsafe skills.inline_shell …` | The profile's `config.yaml` was changed while the bridge runs and is no longer clearly safe. The bridge starts no Hermes run until it is. | Fix the file as in the row above; the next call works without a restart. `kore-doctor` shows the verdict. |
 | Kore shows "Die Bridge ist gerade ausgelastet." (429 `busy`) | Two Hermes runs are already going (a chat, a background turn or an adjusted workout); the bridge takes no third. A stopped turn holds its place until Hermes has really ended. | Wait a moment and try again; a run ends after 150 s at the latest. |
 | Adjusting today's workout shows "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren." (502 `escalation`) | The coach's reply would make the session heavier or longer, or add or rename exercises. The bridge drops it. | Nothing is broken; try again. If it keeps happening, look at the instructions in the profile's `SOUL.md`. |
 | Journal of the bridge: `fork failed`, `Too many open files` or an out-of-memory kill | The unit's `TasksMax`, `LimitNOFILE` or `MemoryMax` is too low for your Hermes runs. | Raise the value in `kore-coach-bridge.service`, `sudo systemctl daemon-reload`, restart. |
@@ -822,7 +844,10 @@ It needs only the standard library and never prints a secret. It checks that
 - the profile exists, `hermes -p <profile> mcp test kore` succeeds, Hermes runs with exactly the
   environment the bridge gives it, and the profile's `SOUL.md` contains the current
   [`kore-app-chat-soul.md`](hermes/kore-app-chat-soul.md);
-- `skills.inline_shell` is off in the profile's `config.yaml` (missing or `false`);
+- `skills.inline_shell` is off in the profile's `config.yaml` (missing or `false`, plain YAML keys
+  only);
+- it names the profile's model provider and its enabled plugins; a program that a provider plugin
+  cannot find on the bridge's `PATH` shows up as Hermes' own start warning and is a deviation;
 - the pairing state directory exists with the right permissions and `KORE_STATE_GID` is its group.
 
 Exit code 0 only without any deviation. `--bridge-only` leaves out ingest, MCP and the server `.env`,
@@ -915,8 +940,10 @@ If you decline, nothing happens.
 `GET /health` (no token). Everything else needs `Authorization: Bearer <token>`, where the token is
 `KORE_INGEST_TOKEN` or a paired device's token. The token is checked before the body is read: a
 missing or wrong token (or two `Authorization` headers) gets `401` with `Connection: close` and no
-body is parsed; a request without a valid token may send at most 4 KiB. The API has no `/docs`,
-`/redoc` or `/openapi.json`.
+body is parsed. Only the exact path `/health` is open (it may receive at most 4 KiB); every other
+path, unknown ones and variants such as `/ingest%0A` included, gets `401` without a token. The API
+has no `/docs`, `/redoc` or `/openapi.json`. The MCP server, too, refuses a request with two
+`Authorization` headers with `401` before reading its body.
 
 ### Coach bridge protocol
 
@@ -963,23 +990,30 @@ If you write your own bridge for another agent, this is the small protocol the a
   allowed: if the coach's reply has more sets, more weight, more repetitions or a longer duration, a
   new or renamed exercise, or another `session_id`, nothing of it is returned and the answer is
   `502 {"error": "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren.", "code": "escalation"}`.
-  Omitting exercises or sets, lighter weights, fewer repetitions and a changed note are fine.
+  Omitting exercises or sets, lighter weights, fewer repetitions and a changed note are fine. The
+  returned `session` carries only `session_id`, `name` and `exercises` at its top level; anything else
+  the coach puts there is dropped.
 - `POST /coach/forget` with `{conversation_id, sessions: [<signed reference>, …]}` or
   `{scope: "health" | "all"}`: stops running turns, deletes their buffers and then the Hermes
   sessions including compression predecessors. Reply `{deleted, not_found, failed}`; deletion is
   confirmed only with `failed: 0`. Before a session is deleted, its source is read: only a session of
-  the source `kore-<scope>` is deleted, anything else counts as `failed`. With very many sessions the
-  120 s budget can end first; the rest counts as `failed` and expiry catches up.
+  the source `kore-<scope>` is deleted, anything else counts as `failed`. Pinned and archived sessions
+  are included (`sessions prune --dry-run --include-archived --include-pinned`). An open session that
+  Hermes hides from its list (archived or hidden) cannot be found by its id; forgetting a scope counts
+  it as `failed` instead of confirming. With very many sessions the 120 s budget can end first; the
+  rest counts as `failed` and expiry catches up.
 - Expiry: Kore sessions without activity for `KORE_BRIDGE_SESSION_RETENTION_DAYS` days (default and
-  maximum 30) are deleted at startup and daily, never while a turn runs, and with the same source
-  check.
+  maximum 30), pinned and archived ones included, are deleted at startup and daily, never while a turn
+  runs, and with the same source check.
 - Without a valid `Authorization: Bearer` (static bridge token or device token), or with two
   `Authorization` headers: 401, before any of the body is read. An unfinished
   installation is an error, never open access: if `KORE_BRIDGE_TOKEN`, `KORE_PLAN_ORIGIN_SECRET` or
   `KORE_PLAN_ORIGIN_PRINCIPAL` is empty or still `change-me…`, the bridge does not start and names the
   key (never the value). It also does not start with a `KORE_BRIDGE_TOKEN` shorter than 32 characters
   or with `skills.inline_shell` on or not clearly off in the profile's `config.yaml` (the message
-  names the setting and the file).
+  names the setting and the file). The same check runs before every Hermes run: if the file has become
+  unsafe, a coach call gets `503 {"error": …, "code": "profile_unsafe"}` (a turn start before its
+  `202`; a background turn already accepted ends with `hermes_failed`).
 - Tools per `-t` list instead of `--safe-mode` (`/health` reports them as `app_chat_toolsets`):
   general `web,skills,memory`; health `skills,memory,kore`, without `web`. Health context without an
   origin ticket (adjusting today's workout) gets `skills,memory`: no kore MCP, no `web`. Only on

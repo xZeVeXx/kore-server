@@ -51,12 +51,13 @@ def reply_stream(text="Antwort", session_id="20260924_120000_aaaaaa") -> str:
 
 def hermes_process(stdout: str, stderr: str = "", returncode: int = 0):
     """side_effect fuer _run_process_bounded: speist stdout zeilenweise in den Callback wie der
-    echte Reader und liefert danach das CompletedProcess-aehnliche Ergebnis."""
+    echte Reader (getrennt nur an \\n) und liefert danach das CompletedProcess-aehnliche Ergebnis."""
     def run(args, **kwargs):
         callback = kwargs.get("on_stdout_line")
         if callback is not None:
-            for line in stdout.splitlines():
-                callback(line)
+            for line in stdout.split("\n"):
+                if line:
+                    callback(line)
         return SimpleNamespace(args=args, stdout=stdout, stderr=stderr, returncode=returncode)
     return run
 
@@ -325,6 +326,31 @@ class StreamJsonRunnerTests(unittest.TestCase):
         self.assertIsNone(outcome.error_code)
         self.assertFalse(outcome.used_kore)
         self.assertEqual(bridge.verify_session(outcome.session, "general", CONVERSATION), FIXTURE_SESSION)
+
+    @patch("bridge._run_process_bounded")
+    def test_line_separators_inside_a_record_do_not_split_it(self, run):
+        # Hermes schreibt JSON mit ensure_ascii=False: U+2028, U+2029 und U+0085 stehen roh in der
+        # Zeile. str.splitlines() trennte dort und machte aus einer guten Antwort 502 hermes_failed.
+        text = "Erste\u2028zweite\u2029dritte\x85vierte Zeile"
+        run.side_effect = hermes_process(reply_stream(text))
+        deltas = []
+
+        outcome = bridge.run_turn(
+            "Hallo", scope="general", conversation_id=CONVERSATION, session_ref=None,
+            context=None, origin_ticket=None, on_delta=deltas.append,
+        )
+
+        self.assertIsNone(outcome.error_code)
+        self.assertEqual(outcome.reply, text)
+        self.assertEqual(deltas, [text])
+        self.assertIsNotNone(outcome.session)
+
+    def test_hermes_output_is_split_only_at_newlines(self):
+        self.assertEqual(
+            bridge.output_lines("a\u2028b\x0bc\x1cd\x85e\r\nf\ng"),
+            ["a\u2028b\x0bc\x1cd\x85e", "f", "g"],
+        )
+        self.assertEqual(bridge.output_lines(""), [""])
 
     @patch("bridge._run_process_bounded")
     def test_stderr_session_line_and_provider_secret_never_reach_the_app(self, run):

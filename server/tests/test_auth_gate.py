@@ -8,7 +8,6 @@ Token kostete ~400 MiB RSS und blockierte die Event-Loop. Die Gate-Schicht antwo
 from __future__ import annotations
 
 import asyncio
-import re
 import sys
 import unittest
 from pathlib import Path
@@ -17,10 +16,14 @@ from pathlib import Path
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVER_ROOT))
 
-from auth_gate import ANONYMOUS_MAX_BODY_BYTES, BearerGateMiddleware  # noqa: E402
+from auth_gate import (  # noqa: E402
+    ANONYMOUS_MAX_BODY_BYTES,
+    BearerGateMiddleware,
+    SingleAuthorizationMiddleware,
+)
 
 GOOD = "Bearer good-token"
-PROTECTED = re.compile(r"/(?:ingest|plan/pending|plan/[^/]+/ack)/?").fullmatch
+ANONYMOUS = frozenset({"/health"})
 
 
 def authorize(value: str) -> bool:
@@ -84,7 +87,7 @@ def call(app, *, path="/ingest", method="POST", headers=(), receive=None, scope_
 
 def gate(inner=None, **options):
     inner = inner or ReadingApp()
-    return inner, BearerGateMiddleware(inner, authorize=authorize, protected=PROTECTED, **options)
+    return inner, BearerGateMiddleware(inner, authorize=authorize, anonymous_paths=ANONYMOUS, **options)
 
 
 def bearer(value: str = GOOD):
@@ -128,6 +131,22 @@ class GateRejectsBeforeReadingTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assert_unauthorized_without_reading([], path=path, method=method)
 
+    def test_default_deny_every_path_but_the_exact_anonymous_ones_is_gated(self) -> None:
+        # 0.13 S14: Starlette's route regex ends in `$`, which also matches before a final "\n":
+        # `/ingest%0A` reached the ingest route but missed a protected-path list, so the first
+        # lock was skipped and FastAPI read the body before the second one said 401.
+        for path in ("/ingest\n", "/ingest/\n", "/plan/pending\n", "/health\n", "/health/",
+                     "/HEALTH", "/nope", "/", "", "/health\r", "//health", "/health?x"):
+            with self.subTest(path=path):
+                self.assert_unauthorized_without_reading([], path=path)
+
+    def test_without_anonymous_paths_everything_is_gated(self) -> None:
+        inner = ReadingApp()
+        app = BearerGateMiddleware(inner, authorize=authorize)
+        status, *_ = call(app, path="/health", method="GET")
+        self.assertEqual(status, 401)
+        self.assertFalse(inner.called)
+
     def test_other_methods_on_a_protected_path_are_gated_too(self) -> None:
         for method in ("PUT", "DELETE", "OPTIONS", "HEAD", "GET"):
             with self.subTest(method=method):
@@ -149,7 +168,7 @@ class GateRejectsBeforeReadingTests(unittest.TestCase):
             seen.append(value)
             return False
 
-        app = BearerGateMiddleware(ReadingApp(), authorize=spy, protected=PROTECTED)
+        app = BearerGateMiddleware(ReadingApp(), authorize=spy, anonymous_paths=ANONYMOUS)
         call(app, headers=[(b"authorization", "Bearer töken".encode("latin-1"))])
         self.assertEqual(seen, ["Bearer töken"])
 
@@ -166,7 +185,8 @@ class GateLetsValidRequestsThroughTests(unittest.TestCase):
     def test_the_decision_belongs_to_the_authorize_callable(self) -> None:
         # A device token is just another value the callable accepts.
         app = BearerGateMiddleware(
-            ReadingApp(), authorize=lambda value: value == "Bearer device-token", protected=PROTECTED
+            ReadingApp(), authorize=lambda value: value == "Bearer device-token",
+            anonymous_paths=ANONYMOUS,
         )
         status, *_ = call(app, headers=[(b"authorization", b"Bearer device-token")])
         self.assertEqual(status, 200)
@@ -177,6 +197,30 @@ class GateLetsValidRequestsThroughTests(unittest.TestCase):
         inner, app = gate()
         call(app, scope_type="lifespan")
         self.assertTrue(inner.called)
+
+
+class SingleAuthorizationTests(unittest.TestCase):
+    """The MCP server's guard: FastMCP checks the token, this only refuses a second header."""
+
+    def test_two_headers_are_401_without_reading_the_body(self) -> None:
+        for headers in (bearer() + bearer(), bearer() + [(b"Authorization", b"")]):
+            with self.subTest(headers=headers):
+                inner = ReadingApp()
+                upload = CountingReceive(chunks=256)
+                status, response_headers, body, _ = call(
+                    SingleAuthorizationMiddleware(inner), headers=headers, receive=upload)
+                self.assertEqual((status, body), (401, b'{"detail":"Unauthorized"}'))
+                self.assertEqual(response_headers[b"connection"], b"close")
+                self.assertEqual(upload.calls, 0)
+                self.assertFalse(inner.called)
+
+    def test_one_or_no_header_is_left_to_the_app(self) -> None:
+        for headers in (bearer(), [(b"authorization", b"Bearer wrong")], []):
+            with self.subTest(headers=headers):
+                inner = ReadingApp()
+                status, *_ = call(SingleAuthorizationMiddleware(inner), headers=headers)
+                self.assertEqual(status, 200)
+                self.assertTrue(inner.called)
 
 
 class AnonymousBodyCapTests(unittest.TestCase):
@@ -201,7 +245,7 @@ class AnonymousBodyCapTests(unittest.TestCase):
     def test_a_stream_without_content_length_is_cut_at_the_cap(self) -> None:
         inner, app = gate()
         upload = CountingReceive(chunks=256)
-        status, *_ = call(app, path="/nope", method="POST", receive=upload)
+        status, *_ = call(app, path="/health", method="POST", receive=upload)
         self.assertEqual(status, 413)
         self.assertLess(upload.bytes_read, 16 * 1024 * 1024)
 

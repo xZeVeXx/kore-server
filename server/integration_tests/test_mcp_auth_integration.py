@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import fastmcp
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastapi.testclient import TestClient
 
@@ -28,7 +29,7 @@ _FRESH_MODULES = ("mcp_server", "store", "models", "origin_ticket")
 _ENV_KEYS = (
     "KORE_DB_PATH", "KORE_INSTANCE_ID", "KORE_MCP_TOKEN", "KORE_MCP_CLIENT_ID",
     "KORE_PLAN_ORIGIN_PRINCIPAL", "KORE_PLAN_ORIGIN_SECRET", "FASTMCP_LOG_LEVEL",
-    "KORE_MCP_ALLOWED_ORIGINS",
+    "KORE_MCP_ALLOWED_ORIGINS", "FASTMCP_CHECK_FOR_UPDATES", "KORE_MCP_HOST", "KORE_MCP_PORT",
 )
 
 
@@ -119,7 +120,7 @@ class McpHttpAuthTests(_McpEnvironment):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        cls.app = cls.mcp_server.mcp.http_app(middleware=cls.mcp_server.origin_guard_middleware())
+        cls.app = cls.mcp_server.mcp.http_app(middleware=cls.mcp_server.http_middleware())
         cls.client_context = TestClient(cls.app)
         cls.client = cls.client_context.__enter__()
 
@@ -137,6 +138,77 @@ class McpHttpAuthTests(_McpEnvironment):
             "/mcp/", json={}, headers={"Authorization": f"Bearer {self.token}"}
         )
         self.assertNotIn(right.status_code, (401, 403))
+
+    def test_two_authorization_headers_are_refused_before_the_body_is_read(self) -> None:
+        # 0.13 S14, like bridge and ingest: a duplicate is ambiguous, not "the first one wins"
+        # (FastMCP's bearer backend reads only the first).
+        valid = (b"authorization", f"Bearer {self.token}".encode())
+        for second in (valid, (b"authorization", b"Bearer other"), (b"Authorization", b"")):
+            with self.subTest(second=second[1][:12]):
+                calls = []
+
+                async def receive():
+                    calls.append(1)
+                    return {"type": "http.request", "body": b"{}", "more_body": False}
+
+                sent = []
+
+                async def send(message):
+                    sent.append(message)
+
+                scope = {
+                    "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                    "method": "POST", "path": "/mcp/", "raw_path": b"/mcp/", "query_string": b"",
+                    "root_path": "", "scheme": "http", "server": ("127.0.0.1", 8000),
+                    "client": ("127.0.0.1", 50000),
+                    "headers": [valid, second, (b"content-type", b"application/json"),
+                                (b"content-length", b"2")],
+                }
+                asyncio.run(self.app(scope, receive, send))
+                start = next(m for m in sent if m["type"] == "http.response.start")
+                self.assertEqual(start["status"], 401)
+                self.assertEqual(calls, [], "the body must stay unread")
+
+    def test_two_authorization_headers_over_http(self) -> None:
+        response = self.client.post("/mcp/", json={}, headers=[
+            ("Authorization", f"Bearer {self.token}"), ("Authorization", f"Bearer {self.token}"),
+        ])
+        self.assertEqual(response.status_code, 401)
+
+
+
+class McpServeTests(_McpEnvironment):
+    """How `python mcp_server.py` starts uvicorn (0.13 S14): connection limits, no update check."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Asked for by the environment or a previous import: the server still turns it off.
+        fastmcp.settings.check_for_updates = "stable"
+        super().setUpClass()
+
+    def test_the_fastmcp_update_check_is_off(self) -> None:
+        # FastMCP 3.4 asks PyPI for a newer version when it prints its banner unless
+        # FASTMCP_CHECK_FOR_UPDATES is "off" (fastmcp/settings.py, utilities/version_check.py).
+        self.assertEqual(fastmcp.settings.check_for_updates, "off")
+        self.assertEqual(os.environ["FASTMCP_CHECK_FOR_UPDATES"], "off")
+
+    def test_serve_hands_uvicorn_the_limits_and_makes_no_outbound_call(self) -> None:
+        captured = {}
+
+        async def fake_serve(server, sockets=None):
+            captured["config"] = server.config
+
+        os.environ.pop("KORE_MCP_HOST", None)
+        os.environ["KORE_MCP_PORT"] = "8000"
+        with mock.patch("uvicorn.Server.serve", fake_serve), mock.patch(
+            "fastmcp.utilities.version_check.get_latest_version"
+        ) as latest:
+            self.mcp_server.serve()
+        latest.assert_not_called()
+        config = captured["config"]
+        self.assertEqual((config.host, config.port), ("127.0.0.1", 8000))
+        self.assertEqual(config.limit_concurrency, 64)
+        self.assertEqual(config.timeout_keep_alive, 5)
 
 
 if __name__ == "__main__":

@@ -77,10 +77,10 @@ FAKE_HERMES = textwrap.dedent("""\
     from pathlib import Path
     config = json.loads((Path(__file__).resolve().parent / "fake-hermes.json").read_text())
     args = sys.argv[1:]
-    # Wie Hermes v0.21.5 mit dem Anbieter claude-subscription-directsdk-experimental: fehlt das
+    # Wie Hermes v0.21.5 mit einem Anbieter-Plugin, das ein lokales Programm startet: fehlt das
     # Programm auf dem PATH des Prozesses, steht beim Start eine Warnung auf stderr.
     if config.get("needs") and shutil.which(config["needs"]) is None:
-        print("Claude Subscription DirectSDK (Experimental): Claude Code is not installed "
+        print("Example Provider: example-cli is not installed "
               "(no `" + config["needs"] + "` on PATH).", file=sys.stderr)
     with open(Path(__file__).resolve().parent / "fake-hermes-env.json", "w") as handle:
         json.dump(dict(os.environ), handle)
@@ -154,23 +154,24 @@ class DoctorTestCase(unittest.TestCase):
         self.profile_dir = self.home / ".hermes" / "profiles" / "kore-coach"
         self.profile_dir.mkdir(parents=True)
         (self.profile_dir / "config.yaml").write_text(
-            "model:\n  default: sonnet\n  provider: claude-subscription-directsdk-experimental\n"
+            "model:\n  default: example-model\n  provider: example-provider\n"
             "  base_url: ''\nauxiliary:\n  title_generation:\n    provider: auto\n"
+            "plugins:\n  enabled:\n    - example-provider\n  disabled: []\n"
         )
         (self.profile_dir / "SOUL.md").write_text("## Coach\n\nAllgemeines.\n\n" + SOUL.read_text())
-        # `claude` liegt in einem eigenen Ordner, der nur ueber KORE_HERMES_CHILD_PATH dazukommt.
-        self.claude_dir = root / "claude-bin"
-        self.claude_dir.mkdir()
-        claude = self.claude_dir / "claude"
-        claude.write_text("#!/bin/sh\nexit 0\n")
-        claude.chmod(0o755)
+        # `example-cli` liegt in einem eigenen Ordner, der nur ueber KORE_HERMES_CHILD_PATH dazukommt.
+        self.program_dir = root / "provider-bin"
+        self.program_dir.mkdir()
+        program = self.program_dir / "example-cli"
+        program.write_text("#!/bin/sh\nexit 0\n")
+        program.chmod(0o755)
         bin_dir = root / "bin"
         bin_dir.mkdir()
         self.hermes = bin_dir / "hermes"
         self.hermes.write_text(FAKE_HERMES.format(python=sys.executable))
         self.hermes.chmod(0o755)
         self.hermes_config = {"profile": "kore-coach", "mcp_exit": 0, "leak": self.mcp_token,
-                              "needs": "claude"}
+                              "needs": "example-cli"}
         self.write_hermes_config()
 
         # Zustandsordner der Kopplung, wie `init-state` ihn anlegt.
@@ -187,7 +188,7 @@ class DoctorTestCase(unittest.TestCase):
             "KORE_BRIDGE_PORT": str(self.bridge.port),
             "KORE_HERMES_BIN": str(self.hermes),
             "KORE_HERMES_HOME": str(self.home),
-            "KORE_HERMES_CHILD_PATH": f"{self.claude_dir}:/usr/bin:/bin",
+            "KORE_HERMES_CHILD_PATH": f"{self.program_dir}:/usr/bin:/bin",
             "KORE_HERMES_PROFILE": "kore-coach",
             "KORE_INSTANCE_ID": "kore",
             "KORE_PLAN_ORIGIN_PRINCIPAL": "kore",
@@ -357,7 +358,8 @@ class DoctorEndToEndTests(DoctorTestCase):
 
 
 class DoctorHermesChildEnvTests(DoctorTestCase):
-    """`claude` lag nur auf dem PATH der Shell, nicht auf dem Kind-PATH der Bridge."""
+    """Das Programm eines Anbieter-Plugins lag nur auf dem PATH der Shell, nicht auf dem Kind-PATH
+    der Bridge."""
 
     def hermes_env(self) -> dict:
         return json.loads((self.hermes.parent / "fake-hermes-env.json").read_text())
@@ -366,9 +368,9 @@ class DoctorHermesChildEnvTests(DoctorTestCase):
         code, output = self.run_doctor(bridge_only=True)
 
         self.assertEqual(code, 0, output)
-        self.assertIn("claude-subscription-directsdk-experimental", output)
+        self.assertIn("Modell-Anbieter des Profils: example-provider", output)
         env = self.hermes_env()
-        self.assertEqual(env["PATH"], f"{self.claude_dir}:/usr/bin:/bin")
+        self.assertEqual(env["PATH"], f"{self.program_dir}:/usr/bin:/bin")
         self.assertEqual(env["HOME"], str(self.home))
         self.assertNotIn("KORE_BRIDGE_TOKEN", env)
         allowed = {"HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "REQUESTS_CA_BUNDLE",
@@ -386,15 +388,17 @@ class DoctorHermesChildEnvTests(DoctorTestCase):
                     self.bridge_env_values["KORE_HERMES_CHILD_PATH"] = child_path
                 self.write_envs()
 
-                code, output = self.run_doctor(bridge_only=True, own_path_prefix=str(self.claude_dir))
+                code, output = self.run_doctor(bridge_only=True, own_path_prefix=str(self.program_dir))
 
                 self.assertNotEqual(code, 0, output)
-                self.assertIn("`claude`", output)
+                self.assertIn("`example-cli`", output)
                 self.assertIn("KORE_HERMES_CHILD_PATH", output)
-                # Der Hinweis nennt den Ordner, in dem der Doctor `claude` selbst findet.
-                self.assertIn(f"KORE_HERMES_CHILD_PATH={self.claude_dir}:", output)
+                # Der Hinweis nennt den Ordner, in dem der Doctor das Programm selbst findet.
+                self.assertIn(f"KORE_HERMES_CHILD_PATH={self.program_dir}:", output)
 
-    def test_missing_program_without_a_hermes_warning_is_found_from_the_config(self):
+    def test_a_plugin_provider_is_named_without_guessing_its_program(self):
+        # 0.13 S14: kein fest eingebauter Anbieter mehr. Ob ein Plugin ein Programm braucht, sagt
+        # nur Hermes selbst (Warnung beim Start); ohne Warnung ist nichts abweichend.
         self.hermes_config["needs"] = None
         self.write_hermes_config()
         self.bridge_env_values["KORE_HERMES_CHILD_PATH"] = "/usr/bin:/bin"
@@ -402,10 +406,12 @@ class DoctorHermesChildEnvTests(DoctorTestCase):
 
         code, output = self.run_doctor(bridge_only=True)
 
-        self.assertNotEqual(code, 0, output)
-        self.assertIn("braucht `claude`", output)
+        self.assertEqual(code, 0, output)
+        self.assertIn("Modell-Anbieter des Profils: example-provider (aus dem Plugin example-provider)",
+                      output)
+        self.assertIn("Kind-PATH", output)
 
-    def test_a_provider_without_local_program_is_only_named(self):
+    def test_a_provider_without_plugins_is_only_named(self):
         (self.profile_dir / "config.yaml").write_text("model:\n  provider: openrouter\n")
         self.hermes_config["needs"] = None
         self.write_hermes_config()
@@ -413,7 +419,8 @@ class DoctorHermesChildEnvTests(DoctorTestCase):
         code, output = self.run_doctor(bridge_only=True)
 
         self.assertEqual(code, 0, output)
-        self.assertIn("Modell-Anbieter des Profils: openrouter", output)
+        self.assertIn("Modell-Anbieter des Profils: openrouter.", output)
+        self.assertNotIn("Plugin", output)
 
 
 class DoctorS11aTests(DoctorTestCase):
@@ -458,7 +465,7 @@ class DoctorS11aTests(DoctorTestCase):
         for extra in ("", "skills:\n  inline_shell: false\n"):
             with self.subTest(extra=extra):
                 config = self.profile_dir / "config.yaml"
-                config.write_text("model:\n  provider: claude-subscription-directsdk-experimental\n" + extra)
+                config.write_text("model:\n  provider: example-provider\n" + extra)
                 code, output = self.run_doctor(bridge_only=True)
                 self.assertEqual(code, 0, output)
                 self.assertIn("[OK]     skills.inline_shell", output)
@@ -568,14 +575,35 @@ class DoctorUnitTests(unittest.TestCase):
     def test_provider_is_read_only_from_the_model_block(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.yaml"
-            config.write_text("auxiliary:\n  provider: auto\nmodel:\n  default: sonnet\n"
-                              "  provider: 'claude-subscription-directsdk-experimental' # Abo\n"
+            config.write_text("auxiliary:\n  provider: auto\nmodel:\n  default: example-model\n"
+                              "  provider: 'example-provider' # Abo\n"
                               "toolsets:\n  - web\n")
-            self.assertEqual(self.doctor.profile_model_provider(config),
-                             "claude-subscription-directsdk-experimental")
+            self.assertEqual(self.doctor.profile_model_provider(config), "example-provider")
             config.write_text("model:\n  provider: $(rm -rf /)\n")
             self.assertIsNone(self.doctor.profile_model_provider(config))
             self.assertIsNone(self.doctor.profile_model_provider(Path(tmp) / "fehlt.yaml"))
+
+    def test_enabled_plugins_are_read_only_from_the_plugins_block(self):
+        cases = {
+            "Blockliste": ("plugins:\n  disabled: [x]\n  enabled:\n    - homeassistant\n"
+                           "    - 'example-provider'  # Anbieter\nmodel:\n  provider: x\n",
+                           ["homeassistant", "example-provider"]),
+            "Flow-Liste": ("plugins:\n  enabled: [a-plugin, \"b.plugin\"]\n", ["a-plugin", "b.plugin"]),
+            "leer": ("plugins:\n  enabled: []\n", []),
+            "anderer Block": ("other:\n  enabled:\n    - nope\n", []),
+            "unsicherer Name": ("plugins:\n  enabled:\n    - $(rm -rf /)\n    - ok\n", ["ok"]),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            for name, (text, expected) in cases.items():
+                with self.subTest(name):
+                    config.write_text(text)
+                    self.assertEqual(self.doctor.profile_enabled_plugins(config), expected)
+            self.assertEqual(self.doctor.profile_enabled_plugins(Path(tmp) / "fehlt.yaml"), [])
+
+    def test_no_provider_to_program_table_is_built_in(self):
+        # Ob ein Anbieter ein Programm braucht, meldet Hermes selbst; der Doctor raet nicht.
+        self.assertFalse(hasattr(self.doctor, "PROVIDER_PROGRAMS"))
 
     def test_without_the_soul_file_next_to_the_doctor_the_check_is_skipped(self):
         report = self.doctor.Report(secrets_to_hide=(), stream=open(os.devnull, "w"))

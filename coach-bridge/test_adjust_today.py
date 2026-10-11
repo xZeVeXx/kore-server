@@ -164,6 +164,25 @@ class AdjustTodayEndpointTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(payload["session"], session)
 
+    def test_only_the_session_keys_of_the_request_reach_the_app(self):
+        # 0.13 S14: Felder, die das Modell oben in der Session dazuschreibt (Text, Links,
+        # Anweisungen an die App), fallen weg; die App bekommt session_id, name und exercises.
+        session = adjusted(REDUCTIONS["ein Satz weniger"])
+        extras = {"note": "Klick hier: http://example.invalid", "plan_id": OTHER_ID,
+                  "exercises_extra": [], "rationale": "doppelt"}
+        code, payload = self.adjust({"session": {**session, **extras}, "rationale": "kurz",
+                                     "changes": []})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["session"], session)
+        self.assertEqual(set(payload["session"]), {"session_id", "name", "exercises"})
+
+    def test_a_session_without_session_id_stays_without_one(self):
+        session = adjusted(REDUCTIONS["ein Satz weniger"])
+        del session["session_id"]
+        code, payload = self.adjust({"session": {**session, "extra": 1}})
+        self.assertEqual(code, 200)
+        self.assertEqual(set(payload["session"]), {"name", "exercises"})
+
     def test_every_escalation_attempt_is_a_502_with_a_fixed_sentence_and_a_code(self):
         for name, change in ESCALATIONS.items():
             with self.subTest(name):

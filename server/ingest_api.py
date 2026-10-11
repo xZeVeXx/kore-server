@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hmac
 import os
-import re
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.exceptions import RequestValidationError
@@ -14,7 +13,7 @@ from pydantic import ValidationError
 import auth_devices
 import store
 from auth_gate import BearerGateMiddleware
-from bind_guard import listen_host
+from bind_guard import UVICORN_LIMITS, listen_host
 from body_limit import BodyLimitMiddleware
 from models import PlanAck, Snapshot
 from origin_guard import OriginGuardMiddleware, allowed_origins_from_env
@@ -48,12 +47,9 @@ def authorization_ok(authorization: str) -> bool:
     return static_ok or device_ok
 
 
-# Every route that requires the bearer token. Trailing slash included: FastAPI would redirect it.
-_PROTECTED_PATH = re.compile(r"/(?:ingest|plan/pending|plan/[^/]+/ack)/?")
-
-
-def is_protected_path(path: str) -> bool:
-    return _PROTECTED_PATH.fullmatch(path) is not None
+# Default deny: these exact paths are the only ones without a token. Everything else, unknown
+# paths and router-matched variants such as "/ingest\n" included, needs it before the body.
+ANONYMOUS_PATHS = frozenset({"/health"})
 
 
 # No /docs, /redoc or /openapi.json: they would hand every unauthenticated caller the full schema.
@@ -65,7 +61,7 @@ app = FastAPI(
 app.add_middleware(BodyLimitMiddleware)
 # Between the body limit and the origin guard: a request without a valid token is answered 401
 # before FastAPI reads or parses a single byte of its (up to 16 MiB) body.
-app.add_middleware(BearerGateMiddleware, authorize=authorization_ok, protected=is_protected_path)
+app.add_middleware(BearerGateMiddleware, authorize=authorization_ok, anonymous_paths=ANONYMOUS_PATHS)
 # Outermost layer on purpose: a rejected origin must not reach routing, validation or the
 # token check, so a probing page learns nothing from response shape or timing. /health is
 # covered too — it is the cheapest existence oracle on the box.
@@ -152,8 +148,13 @@ def ack_plan(plan_id: str, ack: PlanAck) -> dict[str, object]:
     return {"ok": True, "status": "accepted" if ack.accepted else "rejected"}
 
 
-if __name__ == "__main__":
+def serve() -> None:
     import uvicorn
 
     # KORE_INGEST_HOST (Docker) before KORE_BIND_ADDRESS (systemd); loopback when neither is set.
-    uvicorn.run(app, host=listen_host("KORE_INGEST_HOST", fallback="KORE_BIND_ADDRESS"), port=PORT)
+    uvicorn.run(app, host=listen_host("KORE_INGEST_HOST", fallback="KORE_BIND_ADDRESS"), port=PORT,
+                **UVICORN_LIMITS)
+
+
+if __name__ == "__main__":
+    serve()

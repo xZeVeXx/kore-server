@@ -1,7 +1,7 @@
 """Device pairing for the Kore coach bridge (contract/pairing-v1.md). Standard library only.
 
 A one-time code (20 Base32 characters, valid 600 s, used up by its first successful redeem or by
-five failed attempts with a well-formed code) is exchanged for a device token (256 bit). The token leaves the server exactly once, in the
+1000 failed attempts with a well-formed code) is exchanged for a device token (256 bit). The token leaves the server exactly once, in the
 `POST /pair` response; on disk there is only its SHA-256.
 
 State lives in `KORE_STATE_DIR` (default: `state/` in the repository root, next to
@@ -58,8 +58,10 @@ CODE_LENGTH = 20  # 100 bit
 CODE_TTL_S = 600
 # Failed attempts with a well-formed code before the open code is dead. A request without a
 # well-formed code (CODE_LENGTH characters of CODE_ALPHABET after trimming/upper-casing) never
-# reaches the code, so a stray or malformed request cannot burn it.
-MAX_FAILED_ATTEMPTS_PER_CODE = 5
+# reaches the code, so a stray or malformed request cannot burn it. The code has 100 bits: a cap
+# adds nothing against guessing, while a low one let anyone in the network kill the open code with
+# five requests. 1000 only bounds the writes to pairing.json during the 10 minutes.
+MAX_FAILED_ATTEMPTS_PER_CODE = 1000
 MAX_FAILURES_PER_WINDOW = 5
 RATE_WINDOW_S = 60
 DEVICE_NAME_MAX = 40

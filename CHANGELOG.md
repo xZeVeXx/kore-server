@@ -9,7 +9,7 @@ First public release.
 ### Added
 
 - **Pairing.** `kore-doctor pair` creates a one-time code (20 characters, valid 10 minutes, used up by
-  the first successful pairing and dead after 5 failed attempts with a well-formed code; at most 5
+  the first successful pairing and dead after 1000 failed attempts with a well-formed code; at most 5
   failed attempts per minute per address) and prints a `kore://pair` link and,
   with `qrencode` installed, a QR code. The app exchanges it at the new bridge route `POST /pair` for
   a per-device token that works for the bridge and the ingest API; the server stores only its SHA-256.
@@ -84,6 +84,9 @@ First public release.
   really ended.
 - `coach-bridge/fixtures/` and the fixture notes no longer carry the model name or the memory
   provider of the machine they were recorded on (placeholders `<modell>` and `<provider>`).
+- `kore-doctor` no longer has a built-in table of one provider and its program. It names the
+  profile's model provider and the plugins under `plugins.enabled`; a program a provider plugin misses
+  on the bridge's `PATH` is reported from Hermes' own start warning. Its tests use neutral fixtures.
 
 ### Security
 
@@ -100,12 +103,19 @@ Coach bridge:
   (`health_web_allowed`, see Added) lifts this for a health chat, never for the adjustment.
 - **`skills.inline_shell` must be off.** With it on, Hermes runs shell commands from a skill's
   `SKILL.md`. The bridge does not start unless the profile's `config.yaml` has it missing or exactly
-  `false`; `kore-doctor` checks it; the example profile sets it to `false`.
+  `false`; `kore-doctor` checks it; the example profile sets it to `false`. Only plain YAML keys count
+  as clear: a quoted key, a key with a backslash escape (`"inline\x5fshell"` spells the name without
+  showing it) or a key in flow style anywhere in the file counts as on. The bridge checks the file
+  again before every Hermes run; if it became unsafe after the start, every coach call gets
+  `503 {"code": "profile_unsafe"}` (a background turn already accepted ends with `hermes_failed`) and
+  the journal names the setting and the file.
 - **"Only reduce" is enforced.** The adjusted workout of the day is compared with the one the app sent;
   more sets, weight, repetitions or duration, new or renamed exercises or another session id make the
   bridge answer `502` with a fixed sentence and return nothing of the reply. It used to be only an
   instruction in the prompt. The body carries `"code": "escalation"` next to the sentence, so the app
-  can tell this rejection from other 502s without matching text.
+  can tell this rejection from other 502s without matching text. The returned session carries only
+  `session_id`, `name` and `exercises` at its top level; whatever else the coach writes there is
+  dropped.
 - **One quota for every Hermes run** (see Changed) instead of a limit that covered only background
   turns.
 - **Exactly one `Authorization` header** counts on the bridge, as on the ingest API: a request with two
@@ -114,10 +124,19 @@ Coach bridge:
   connection for headers and body; a slow sender can no longer hold a thread open. The unit gets
   `TasksMax=512`, `MemoryMax=2G` and `LimitNOFILE=4096`.
 - **Pairing codes.** A request without a well-formed code no longer uses up the open code; the code is
-  used up by the first success and dead after 5 failed attempts with it. The per-address limit checks
-  and counts in one step, so parallel requests cannot exceed it.
+  used up by the first success and dead after 1000 failed attempts with it. (A limit of 5 added nothing
+  against guessing 100 bits and let anyone in the network kill the open code.) The per-address limit
+  checks and counts in one step, so parallel requests cannot exceed it.
 - **Bridge token of at least 32 characters** (the token also keys the session references).
 - **Forget and expiry check the source** of every listed session (`kore-<scope>`) before deleting it.
+- **Forget and expiry reach pinned and archived sessions.** Hermes' `sessions prune` skips them unless
+  asked; the bridge now selects with `--include-archived --include-pinned`. An open session that Hermes
+  hides from `sessions list` (archived or hidden) cannot be found by its id: forgetting a scope counts
+  it as `failed` instead of reporting success.
+- **Hermes output is split only at line feeds.** Hermes writes JSON with `ensure_ascii=False`, so
+  U+2028, U+2029 and U+0085 appear unescaped; `str.splitlines()` split records there. A reply
+  containing one failed with `502 hermes_failed`, and a session whose title or history contained one
+  could never be forgotten or expire. `kore-doctor` reads the `hermes --version` line the same way.
 - **Each Hermes run gets a fresh, empty working directory** instead of the home directory, so
   `AGENTS.md`, `CLAUDE.md` and similar context files there are not loaded into the prompt.
 
@@ -125,8 +144,18 @@ Server:
 
 - **Authentication before the body (ingest).** The bearer token is checked in front of the web
   framework, before any of the body is read. A request without a valid token used to make the server
-  read and parse up to 16 MiB first; it now gets `401` with `Connection: close` at once, and anything
-  unauthenticated may send at most 4 KiB. Exactly one `Authorization` header counts.
+  read and parse up to 16 MiB first; it now gets `401` with `Connection: close` at once. Default deny:
+  only the exact path `/health` is open (at most 4 KiB); every other path, unknown ones and variants
+  such as `/ingest%0A` included (Starlette's routing still matched those), needs the token first.
+  Exactly one `Authorization` header counts.
+- **The MCP server refuses two `Authorization` headers** with `401` before reading the body, like the
+  ingest API and the bridge (FastMCP's own check would take the first).
+- **Connection limits for ingest and MCP.** uvicorn gets `limit_concurrency=64` (every further request
+  is answered `503`) and `timeout_keep_alive=5`. uvicorn 0.48 has no deadline for headers or body; the
+  README lists this under Residual risks.
+- **No outbound call from the MCP server.** FastMCP asked PyPI for a newer release when it printed its
+  start banner; `FASTMCP_CHECK_FOR_UPDATES=off` is now forced in `mcp_server.py` and set in
+  `docker-compose.yml` and `deploy/kore-mcp.service`.
 - **No `/docs`, `/redoc` or `/openapi.json`** on the ingest API.
 - **MCP token compared in constant time** (SHA-256 digests of equal length, no dictionary lookup of the
   token).
@@ -145,15 +174,21 @@ Server:
 
 Documented residual risks, now in the README: the profile's memory as a two-step path from health
 chats to web search, the Linux user as the trust boundary, plain HTTP also for pairing, Docker before
-28 and loopback ports, the global (not per-address) connection limit, no brake on guessing bearer
-tokens, and the startup-only check of `skills.inline_shell`.
+28 and loopback ports, the global (not per-address) connection limit, no deadline for headers or
+body in ingest and MCP, no brake on guessing bearer tokens, the limits of the `skills.inline_shell`
+check (Hermes' configuration overlay and backup), and that switching web search on in the middle of a
+health chat exposes the earlier turns of that chat to the web-enabled run, not only the current
+message (also in `contract/health-web-opt-in-v1.md`).
 
 ### Breaking for self-hosters
 
 - **Tokens under 32 characters stop the services.** `KORE_BRIDGE_TOKEN`, `KORE_INGEST_TOKEN` and
   `KORE_MCP_TOKEN` need at least 32 characters (`openssl rand -hex 24` gives 48). Replace a short one,
   restart, and update the other side (Kore on the expert path, the profile's `.env` for the MCP token).
-- **`skills.inline_shell` on stops the bridge.** Set it to `false` or remove it.
+- **`skills.inline_shell` on stops the bridge.** Set it to `false` or remove it. A quoted, escaped or
+  flow-style key anywhere in the profile's `config.yaml` stops it too; use plain keys.
+- **Unknown paths on the ingest API answer `401` without a token** (before: `404`). Only `/health`
+  is open.
 - **Extra `.env` keys must be mapped in `docker-compose.yml`.** Compose reads `.env` only to fill in
   values; each service gets exactly the keys listed under its `environment:`. A key you added yourself
   reaches a container only when you add it there.
@@ -164,7 +199,8 @@ tokens, and the startup-only check of `skills.inline_shell`.
 - **A listen address outside loopback, RFC 1918 and `100.64.0.0/10` stops the services**, `0.0.0.0`
   included: with `KORE_BIND_ADDRESS=0.0.0.0` the ingest container now restarts in a loop with a message
   in `docker compose logs ingest`.
-- **Two `Authorization` headers are rejected** by the ingest API (before, the first one counted).
+- **Two `Authorization` headers are rejected** by the ingest API and the MCP server (before, the first
+  one counted).
 - **The health chat has no web search** any more; asking the coach in a health chat to search the web
   no longer works. Use the general chat for that, or switch web search on for the health chat in the
   app (`health_web_allowed`, at your own risk).

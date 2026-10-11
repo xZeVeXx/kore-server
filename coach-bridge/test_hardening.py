@@ -5,6 +5,9 @@
 - 0.13 S11a: feste Kopfzeile vor jedem Prompt, skills.inline_shell sperrt den Start, Token-Länge,
   leerer Arbeitsordner für Hermes, Verbindungsgrenze und Gesamtfrist fürs Lesen einer Anfrage.
 """
+import contextlib
+import http.client
+import io
 import json
 import os
 import socket
@@ -15,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -175,10 +179,21 @@ INLINE_SHELL_SAFE = {
                        "  inline_shell: false\n",
     "leere Zuordnung": "skills: {}\n",
     "Kommentar hinter skills": "skills:   # Skills\n  inline_shell: false\n",
-    "gequoteter skills-Schluessel": '"skills":\n  inline_shell: false\n',
     "Windows-Zeilenenden": "skills:\r\n  inline_shell: false\r\n",
     "verschachtelte Werte anderer Schluessel": "skills:\n  external_dirs:\n    - /srv/skills\n"
                                                "  inline_shell: false\n",
+    # 0.13 S14: nur schlichte Schluessel — gequotete Werte, Listen und URLs bleiben erlaubt.
+    "Flow-Liste schlichter Werte": "toolsets: [hermes-cli, web]\nplugins:\n  enabled:\n"
+                                   "    - example-plugin\n  disabled: []\n",
+    "gequotete Werte und URL": 'model:\n  default: "example/model-1.0"\n'
+                               "  base_url: https://example.invalid/api/v1\n",
+    "gequotete Listeneintraege": "names:\n  - \"web\"\n  - 'skills'\n",
+    "Klammern in einem gequoteten Wert": 'prompt: "Antwort mit {platzhalter}"\n',
+    "Backslash in einem Wert": 'pfad: "C:\\\\temp"\n',
+    "Adressen in einer Flow-Liste": 'hosts: [https://example.invalid/a, "http://10.0.0.10:8000/mcp/"]\n',
+    "MCP-Block wie im Beispielprofil": "mcp_servers:\n  kore:\n    url: http://127.0.0.1:8000/mcp/\n"
+                                       "    headers:\n      Authorization: Bearer ${MCP_KORE_API_KEY}\n"
+                                       "skills:\n  inline_shell: false\n",
 }
 INLINE_SHELL_UNSAFE = {
     "true": "skills:\n  inline_shell: true\n",
@@ -202,6 +217,25 @@ INLINE_SHELL_UNSAFE = {
     "JSON": '{"skills": {"inline_shell": true}}\n',
     "Tab-Einrueckung": "skills:\n\tinline_shell: true\n",
     "Anker am Wert": "skills:\n  inline_shell: &aus false\n",
+    # 0.13 S14: YAML-Escapes erzeugen einen Schluessel, ohne dass sein Name im Text steht.
+    "Escape im Schluessel unter skills": 'skills:\n  "inline\\x5fshell": true\n',
+    "Escape im skills-Schluessel": '"sk\\x69lls":\n  inline_shell: false\n',
+    "beide Schluessel mit Escape": '"sk\\x69lls": {"inline\\x5fshell": true}\n',
+    "Flow-Mapping als Dokument": '{"inline\\x5fshell": true}\n',
+    "Flow-Mapping mit Escape als Wert": 'skills:\n  inline_shell: false\nx: {"inline\\x5fshell": true}\n',
+    "Flow-Mapping in einer Liste": 'skills:\n  inline_shell: false\nx: [{"inline\\x5fshell": true}]\n',
+    "Paar in einer Flow-Liste": 'skills:\n  inline_shell: false\nx: ["inline\\x5fshell": true]\n',
+    "JSON-Paar in einer Flow-Liste": 'skills:\n  inline_shell: false\nx: ["k":1]\n',
+    "schlichtes Paar in einer Flow-Liste": "skills:\n  inline_shell: false\nx: [k: 1]\n",
+    "gequoteter skills-Schluessel": '"skills":\n  inline_shell: false\n',
+    "einfach gequoteter Schluessel": "skills:\n  inline_shell: false\n  'x': 1\n",
+    "gequoteter Schluessel in einer Liste": 'skills:\n  inline_shell: false\nx:\n  - "a\\x5fb": 1\n',
+    "Backslash in einem schlichten Schluessel": "skills:\n  inline_shell: false\nplain\\x5fkey: 1\n",
+    "expliziter Schluessel": 'skills:\n  inline_shell: false\n? "x"\n: 1\n',
+    "Anker am Schluessel": "skills:\n  inline_shell: false\n&a key: 1\n",
+    "Tag am Schluessel": "skills:\n  inline_shell: false\n!!str key: 1\n",
+    "Flow-Mapping hinter Anker": "skills:\n  inline_shell: false\nkey: &x {a: 1}\n",
+    "gebrochener gequoteter Schluessel": 'skills:\n  ? "inline_\\\n    shell"\n  : true\n',
 }
 
 
@@ -215,6 +249,10 @@ class InlineShellConfigTests(BridgeDefaultsCase):
                 error = bridge.inline_shell_config_error(text)
                 self.assertIsNotNone(error)
                 self.assertIn("skills.inline_shell", error)
+
+    def test_the_example_profile_of_the_repo_is_safe(self):
+        example = BRIDGE_DIR.parent / "hermes" / "kore-coach-profile.example.yaml"
+        self.assertIsNone(bridge.inline_shell_config_error(example.read_text(encoding="utf-8")))
 
     def test_profile_config_path_matches_kore_doctor(self):
         self.assertEqual(bridge.profile_config_path(),
@@ -269,6 +307,121 @@ class InlineShellConfigTests(BridgeDefaultsCase):
 
 
 # ---- 8. Token-Laenge --------------------------------------------------------------------------------
+
+class InlineShellRuntimeTests(BridgeDefaultsCase):
+    """0.13 S14: die Pruefung laeuft vor jedem Hermes-Lauf erneut, nicht nur beim Start. Wird das
+    Profil danach unsicher, startet die Bridge keinen Lauf mehr und antwortet mit festem 503."""
+
+    UNSAFE = "skills:\n  inline_shell: true\n"
+
+    def setUp(self):
+        super().setUp()
+        self.store = bridge.TurnStore()
+        patcher = patch.object(bridge, "TURNS", self.store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.assertIsNone(bridge.runtime_configuration_error())  # beim Start sicher
+
+    def post(self, path, payload):
+        body = json.dumps(payload).encode("utf-8")
+        handler = object.__new__(bridge.Handler)
+        handler.path = path
+        handler.headers = http.client.HTTPMessage()
+        handler.headers["Authorization"] = f"Bearer {TEST_TOKEN}"
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = io.BytesIO(body)
+        sent = []
+        handler._send = lambda code, obj: sent.append((code, obj))
+        handler.do_POST()
+        return sent[0]
+
+    def assert_refused(self, code, payload, path):
+        self.assertEqual(code, 503)
+        self.assertEqual(payload, {"error": bridge.TURN_REQUEST_ERRORS["profile_unsafe"][1],
+                                   "code": "profile_unsafe"})
+        self.assertNotIn(str(path), json.dumps(payload))
+
+    @patch("bridge._run_process_bounded")
+    def test_the_synchronous_chat_is_refused(self, run):
+        path = self.write_profile_config(self.UNSAFE)
+        journal = io.StringIO()
+        with contextlib.redirect_stderr(journal):
+            code, payload = self.post("/coach", {
+                "message": "Hallo", "conversation_id": CONVERSATION, "health_context_allowed": False,
+            })
+        self.assert_refused(code, payload, path)
+        run.assert_not_called()
+        # Der Betreiber sieht im Journal, warum: Schluessel und Datei, kein Inhalt.
+        self.assertIn("kore-profile-unsafe skills.inline_shell", journal.getvalue())
+        self.assertIn(str(path), journal.getvalue())
+
+    @patch("bridge._run_process_bounded")
+    def test_a_turn_start_is_refused_before_the_202(self, run):
+        path = self.write_profile_config(self.UNSAFE)
+        code, payload = self.post("/coach", {
+            "message": "Hallo", "conversation_id": CONVERSATION, "health_context_allowed": False,
+            "client_message_id": str(uuid.uuid4()),
+        })
+        self.assert_refused(code, payload, path)
+        self.assertEqual(self.store.active_count(), 0)
+        run.assert_not_called()
+
+    @patch("bridge._run_process_bounded")
+    def test_the_daily_adjustment_is_refused(self, run):
+        path = self.write_profile_config("skills:\n  \"inline\\x5fshell\": true\n")
+        code, payload = self.post("/coach/adjust-today", {
+            "session": {"name": "Push", "exercises": [
+                {"name": "Bank", "sets": [{"reps": 8, "weight_kg": 80}]}]},
+            "health_context_allowed": True,
+            "consent_scope_version": bridge.CONSENT_SCOPE_VERSION,
+        })
+        self.assert_refused(code, payload, path)
+        run.assert_not_called()
+
+    @patch("bridge._run_process_bounded")
+    def test_the_run_itself_checks_again_after_the_request_checks(self, run):
+        # Zwischen Annahme (202) und Start des Laufs geaendert: der Lauf startet nicht.
+        self.write_profile_config(self.UNSAFE)
+        with self.assertRaises(bridge.HermesProfileUnsafe):
+            bridge.run_turn("Hallo", scope="general", conversation_id=CONVERSATION,
+                            session_ref=None, context=None, origin_ticket=None)
+        run.assert_not_called()
+
+    @patch("bridge._run_process_bounded")
+    def test_a_running_turn_ends_with_a_code_the_app_knows(self, run):
+        turn, _ = self.store.create(CONVERSATION, str(uuid.uuid4()), "general")
+        self.write_profile_config(self.UNSAFE)
+        journal = io.StringIO()
+        with contextlib.redirect_stderr(journal):
+            bridge._turn_worker(self.store, turn, message="Hallo", context=None,
+                                session_ref=None, origin_ticket=None)
+        self.assertEqual(turn.status, "failed")
+        self.assertEqual(turn.error["code"], "hermes_failed")
+        self.assertIn("class=profile_unsafe", journal.getvalue())
+        run.assert_not_called()
+
+    @patch("bridge._run_process_bounded")
+    def test_an_unreadable_profile_at_run_time_is_refused_too(self, run):
+        if os.geteuid() == 0:
+            self.skipTest("root liest auch Dateien ohne Leserecht")
+        path = self.write_profile_config("skills:\n  inline_shell: false\n")
+        os.chmod(path, 0)
+        self.addCleanup(os.chmod, path, stat.S_IRUSR | stat.S_IWUSR)
+        code, payload = self.post("/coach", {
+            "message": "Hallo", "conversation_id": CONVERSATION, "health_context_allowed": False,
+        })
+        self.assert_refused(code, payload, path)
+        run.assert_not_called()
+
+    @patch("bridge._run_process_bounded")
+    def test_a_safe_profile_runs_as_before(self, run):
+        run.side_effect = hermes_process(reply_stream("OK"))
+        self.write_profile_config("skills:\n  inline_shell: false\n")
+        code, payload = self.post("/coach", {
+            "message": "Hallo", "conversation_id": CONVERSATION, "health_context_allowed": False,
+        })
+        self.assertEqual((code, payload["reply"]), (200, "OK"))
+
 
 class TokenStrengthTests(BridgeDefaultsCase):
     def test_the_bridge_token_needs_at_least_32_characters(self):

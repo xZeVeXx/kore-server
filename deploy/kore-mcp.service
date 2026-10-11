@@ -9,6 +9,8 @@ WorkingDirectory=/opt/kore-server
 # Bindet auf KORE_MCP_HOST aus der .env, Standard 127.0.0.1 (Agent auf demselben Rechner).
 # mcp_server.py prueft die Adresse vor dem Start (Loopback, RFC 1918, 100.64.0.0/10) und
 # verweigert Wildcard und oeffentliche Adressen.
+# Keine Update-Abfrage bei PyPI beim Start (mcp_server.py erzwingt das ohnehin).
+Environment=FASTMCP_CHECK_FOR_UPDATES=off
 EnvironmentFile=/opt/kore-server/.env
 ExecStart=/opt/kore-server/.venv/bin/python /opt/kore-server/mcp_server.py
 Restart=on-failure

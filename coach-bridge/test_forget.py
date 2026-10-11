@@ -27,9 +27,10 @@ ROOT = "20260901_070000_cccccc"
 
 
 def session(source, *, parent=None, end_reason="cli_exit", ended=True, idle_days=1, title=None,
-            preview="Wie war mein Schlaf diese Woche?"):
+            preview="Wie war mein Schlaf diese Woche?", archived=False, pinned=False, hidden=False):
     return {"source": source, "parent": parent, "end_reason": end_reason, "ended": ended,
-            "idle_days": idle_days, "title": title, "preview": preview}
+            "idle_days": idle_days, "title": title, "preview": preview,
+            "archived": archived, "pinned": pinned, "hidden": hidden}
 
 
 class FakeSessionsCLI:
@@ -66,9 +67,12 @@ class FakeSessionsCLI:
     def _list(self, rest):
         source = self._option(rest, "--source")
         limit = int(self._option(rest, "--limit", "20"))
+        # Wie list_sessions_rich: archivierte und versteckte Sessions fehlen, ein Flag dafuer gibt
+        # es bei `sessions list` nicht.
         rows = [
             (sid, row) for sid, row in self.sessions.items()
             if row["source"] == source and row["parent"] is None
+            and not row["archived"] and not row["hidden"]
         ][:limit]
         if not rows:
             return "No sessions found.\n", 0
@@ -83,15 +87,29 @@ class FakeSessionsCLI:
                     "/srv/coach/.hermes/profiles/kore-coach/state.db\n"), 1
         source = self._option(rest, "--source")
         older = self._option(rest, "--older-than")
-        candidates = [
-            (sid, row) for sid, row in self.sessions.items()
-            if row["source"] == source and row["ended"]
-            and (older is None or row["idle_days"] > float(older))
-        ]
+        # Wie _cmd_prune_or_archive: archivierte und angeheftete Sessions nur mit den Flags,
+        # offene nie (nur die Notiz zaehlt sie).
+        include_archived = "--include-archived" in rest
+        include_pinned = "--include-pinned" in rest
+
+        def matches(row):
+            return (row["source"] == source
+                    and (older is None or row["idle_days"] > float(older))
+                    and (include_archived or not row["archived"])
+                    and (include_pinned or not row["pinned"]))
+
+        candidates = [(sid, row) for sid, row in self.sessions.items() if matches(row) and row["ended"]]
+        lines = []
+        open_count = sum(1 for row in self.sessions.values() if matches(row) and not row["ended"])
+        if open_count:
+            lines.append(f"Note: {open_count} open session{'' if open_count == 1 else 's'} also match "
+                         "these filters but will be skipped because prune only deletes ended "
+                         "sessions. Use `hermes sessions delete <id>` to remove one explicitly.")
         if not candidates:
-            return f"No sessions match (source={source}).\n", 0
-        lines = [f"{len(candidates)} session(s) match (source={source}; oldest activity "
-                 "2026-08-01 10:00, newest activity 2026-08-20 10:00):"]
+            lines.append(f"No sessions match (source={source}).")
+            return "\n".join(lines) + "\n", 0
+        lines.append(f"{len(candidates)} session(s) match (source={source}; oldest activity "
+                     "2026-08-01 10:00, newest activity 2026-08-20 10:00):")
         for sid, row in candidates:
             lines.append(f"  {sid}  {'2026-08-01 10:00':<17} {row['source']:<10} "
                          f"{'example-model':<24} {3:>4} msgs  {(row['title'] or '')[:36]}")
@@ -192,6 +210,20 @@ class ForgetBySessionTests(ForgetTestCase):
         self.assertIn([HERMES, "-p", PROFILE, "sessions", "delete", "--yes", TIP], cli.calls)
         self.assertIn("20260924_130000_dddddd", cli.sessions)
         self.assertNotIn("prune", cli.actions())
+
+    def test_a_line_separator_in_the_export_keeps_the_chain_readable(self):
+        # Hermes exportiert mit ensure_ascii=False; U+2028/U+2029/U+0085 im Titel oder Verlauf
+        # stehen roh in der Zeile. splitlines() zerlegte den Record: Kette unlesbar, nie bestaetigt.
+        cli = self.use_cli({
+            ROOT: session("kore-health", end_reason="compression", title="Schlaf\u2028Woche"),
+            TIP: session("kore-health", parent=ROOT, title="Plan\u2029neu\x85"),
+        })
+        ref = bridge.sign_session("health", CONVERSATION, TIP)
+
+        result = bridge.forget(conversation_id=CONVERSATION, sessions=[ref], store=self.store)
+
+        self.assertEqual(result, {"deleted": 2, "not_found": 0, "failed": 0})
+        self.assertEqual(cli.deleted_ids(), [TIP, ROOT])
 
     def test_signature_is_checked_before_anything_is_deleted(self):
         cli = self.use_cli({TIP: session("kore-general")})
@@ -362,7 +394,9 @@ class ForgetByScopeTests(ForgetTestCase):
 
     def test_a_crafted_preview_cannot_smuggle_a_foreign_id_into_the_deletion(self):
         # splitlines() trennt auch an U+2028, \x0b, \x1c-\x1e, \x85: eine Vorschauzeile, die so eine
-        # fremde ID ans Zeilenende setzt, ergab frueher einen Loeschauftrag fuer diese Session.
+        # fremde ID ans Zeilenende setzte, ergab frueher einen Loeschauftrag fuer diese Session.
+        # Seit die Bridge Hermes-Ausgaben nur an \n trennt, wird die fremde ID gar nicht erst
+        # gelesen; die Quellenpruefung je ID bleibt trotzdem (siehe Verfall).
         foreign = "20260905_070000_000005"
         cli = self.use_cli({
             "20260901_070000_000001": session("kore-health", ended=False,
@@ -374,7 +408,56 @@ class ForgetByScopeTests(ForgetTestCase):
 
         self.assertIn(foreign, cli.sessions)
         self.assertNotIn(foreign, cli.deleted_ids())
-        self.assertEqual(result, {"deleted": 1, "not_found": 0, "failed": 1})
+        self.assertNotIn(foreign, [call[-1] for call in cli.calls if call[4] == "export"])
+        self.assertEqual(result, {"deleted": 1, "not_found": 0, "failed": 0})
+
+    def test_a_line_separator_in_the_export_does_not_make_a_session_unforgettable(self):
+        cli = self.use_cli({
+            "20260901_070000_000001": session("kore-health", title="Schlaf\u2028Woche\u2029\x85"),
+            "20260902_070000_000002": session("kore-health", ended=False, title="offen\u2028"),
+        })
+
+        result = bridge.forget(scope="health", store=self.store)
+
+        self.assertEqual(result, {"deleted": 2, "not_found": 0, "failed": 0})
+        self.assertEqual(cli.sessions, {})
+
+    def test_pinned_archived_and_hidden_sessions_are_deleted_too(self):
+        # Hermes `sessions prune` laesst archivierte und angeheftete Sessions ohne
+        # --include-archived/--include-pinned aus; `list` zeigt archivierte und versteckte nie.
+        cli = self.use_cli({
+            "20260901_070000_000001": session("kore-health", pinned=True),
+            "20260902_070000_000002": session("kore-health", archived=True),
+            "20260903_070000_000003": session("kore-health", archived=True, hidden=True),
+            "20260904_070000_000004": session("kore-health", archived=True, pinned=True),
+            "20260905_070000_000005": session("kore-health", ended=False, pinned=True),
+            "20260906_070000_000006": session("telegram", pinned=True, archived=True),
+        })
+
+        result = bridge.forget(scope="health", store=self.store)
+
+        self.assertEqual(result, {"deleted": 5, "not_found": 0, "failed": 0})
+        self.assertEqual(list(cli.sessions), ["20260906_070000_000006"])
+        prunes = [call for call in cli.calls if call[4] == "prune"]
+        self.assertEqual(len(prunes), 1)
+        for flag in ("--include-archived", "--include-pinned", "--dry-run"):
+            self.assertIn(flag, prunes[0])
+
+    def test_an_open_session_hermes_hides_from_the_list_is_not_confirmed(self):
+        # Offen UND archiviert (z. B. sessions.auto_archive nach einem Stopp) oder versteckt: `list`
+        # zeigt sie nicht, `prune` loescht nur beendete. Die Bridge kennt ihre ID nicht und meldet
+        # sie als failed statt einer falschen Bestaetigung.
+        cli = self.use_cli({
+            "20260901_070000_000001": session("kore-health"),
+            "20260902_070000_000002": session("kore-health", ended=False),
+            "20260903_070000_000003": session("kore-health", ended=False, archived=True),
+            "20260904_070000_000004": session("kore-health", ended=False, hidden=True),
+        })
+
+        result = bridge.forget(scope="health", store=self.store)
+
+        self.assertEqual(result, {"deleted": 2, "not_found": 0, "failed": 2})
+        self.assertEqual(sorted(cli.sessions), ["20260903_070000_000003", "20260904_070000_000004"])
 
     def test_every_listed_id_is_checked_before_it_is_deleted(self):
         cli = self.use_cli(self.SESSIONS)
@@ -415,9 +498,9 @@ class ExpiryTests(ForgetTestCase):
         prunes = [call for call in cli.calls if call[4] == "prune"]
         self.assertEqual(prunes, [
             [HERMES, "-p", PROFILE, "sessions", "prune", "--older-than", "30",
-             "--source", "kore-general", "--dry-run"],
+             "--source", "kore-general", "--include-archived", "--include-pinned", "--dry-run"],
             [HERMES, "-p", PROFILE, "sessions", "prune", "--older-than", "30",
-             "--source", "kore-health", "--dry-run"],
+             "--source", "kore-health", "--include-archived", "--include-pinned", "--dry-run"],
         ])
         self.assertEqual(sorted(cli.deleted_ids()),
                          ["20260801_070000_000001", "20260802_070000_000002"])
@@ -444,6 +527,20 @@ class ExpiryTests(ForgetTestCase):
         self.assertNotIn(foreign, cli.deleted_ids())
         self.assertEqual(result["deleted"], 2)
         self.assertEqual(result["failed"], 2)  # einmal je Quelle gelistet, nie geloescht
+
+    def test_pinned_and_archived_sessions_expire_too(self):
+        cli = self.use_cli({
+            "20260801_070000_000001": session("kore-general", idle_days=31, pinned=True),
+            "20260802_070000_000002": session("kore-health", idle_days=45, archived=True),
+            "20260803_070000_000003": session("kore-health", idle_days=40, archived=True,
+                                              pinned=True, hidden=True),
+            "20260920_070000_000004": session("kore-health", idle_days=4, pinned=True),
+        })
+
+        result = bridge.prune_expired(self.store)
+
+        self.assertEqual(result, {"deleted": 3, "not_found": 0, "failed": 0})
+        self.assertEqual(list(cli.sessions), ["20260920_070000_000004"])
 
     def test_retention_days_come_from_the_configuration(self):
         cli = self.use_cli(self.SESSIONS)

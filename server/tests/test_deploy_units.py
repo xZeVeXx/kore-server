@@ -51,6 +51,11 @@ class DeployUnitTests(unittest.TestCase):
         service = _read_unit(UNITS[1])["Service"]
         self.assertEqual(service["ExecStart"], "/opt/kore-server/.venv/bin/python /opt/kore-server/mcp_server.py")
 
+    def test_mcp_unit_turns_the_fastmcp_update_check_off(self) -> None:
+        # No outbound call to PyPI at start (mcp_server.py forces it off as well).
+        self.assertEqual(_read_unit(UNITS[1])["Service"].get("Environment"),
+                         "FASTMCP_CHECK_FOR_UPDATES=off")
+
     def test_server_units_are_sandboxed_like_the_bridge_unit(self) -> None:
         common = {
             "NoNewPrivileges": "yes", "PrivateTmp": "yes", "ProtectSystem": "strict",

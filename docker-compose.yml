@@ -83,6 +83,8 @@ services:
       KORE_MCP_ALLOWED_ORIGINS: "${KORE_MCP_ALLOWED_ORIGINS:-}"
       KORE_LEGACY_DB_OWNER_CONFIRMATION: "${KORE_LEGACY_DB_OWNER_CONFIRMATION:-}"
       FASTMCP_LOG_LEVEL: "${FASTMCP_LOG_LEVEL:-ERROR}"
+      # No update check against PyPI at start (mcp_server.py forces this as well).
+      FASTMCP_CHECK_FOR_UPDATES: "off"
       KORE_DB_PATH: /data/kore.db
       KORE_MCP_HOST: 0.0.0.0
       KORE_MCP_PORT: "8000"

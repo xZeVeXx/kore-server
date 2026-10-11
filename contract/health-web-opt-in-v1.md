@@ -47,6 +47,12 @@ The signed session reference binds scope and chat, not the tool list. The field 
 turn of a health chat to the next, in either direction: the session continues (`context:
 "continued"`), no reset, only `-t` differs for that turn.
 
+Because the session continues, a turn with `health_web_allowed: true` in the middle of a chat runs
+with the **earlier turns of that health chat** in front of the coach, including the health context
+they carried, not only with the current message. Switching web search on mid-chat therefore exposes
+the whole conversation so far to the web-enabled run. An app that wants only the current question
+next to `web` starts a new chat (no `session`) for it.
+
 ## What `/health` reports
 
 `app_chat_toolsets` keeps the keys `general` and `health` (the default, never with `web`) and adds
@@ -69,5 +75,6 @@ that reports neither (older bridges).
 With web search in a health chat, the health context in the prompt and the `kore` tools stand next to
 a tool that can fetch addresses. A manipulated page that the coach reads could talk it into sending
 health values to an address of its choosing. That is why it is off by default, why the person turns it
-on knowingly, and why the adjustment of today's workout never has it. The prompt sentence above
+on knowingly, and why the adjustment of today's workout never has it. Switched on in the middle of a
+chat, it exposes the earlier turns of that chat as well (see *Sessions*). The prompt sentence above
 lowers the risk, it does not remove it. See *Residual risks* in the README.

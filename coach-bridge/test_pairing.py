@@ -79,8 +79,9 @@ class CodeTests(StoreCase):
     def wrong_attempts(self, count, now=T0):
         for n in range(count):
             with self.assertRaises(pairing.PairingFailed):
-                # Another address each time: this is about the code, not the per-address limit.
-                self.store.redeem("A" * 20, "iPhone", f"192.0.2.{100 + n}", now=now)
+                # Five per address and then the next one: this is about the code, not the
+                # per-address limit (192.0.2.1 to 192.0.2.200 for 1000 attempts).
+                self.store.redeem("A" * 20, "iPhone", f"192.0.2.{n // 5 + 1}", now=now)
 
     def test_four_failed_attempts_leave_the_code_usable(self):
         code = self.new_code()
@@ -88,13 +89,25 @@ class CodeTests(StoreCase):
         self.assertEqual(json.loads((self.state_dir / "pairing.json").read_text())["attempts"], 4)
         self.assertIn("token", self.store.redeem(code, "iPhone", "10.0.0.10", now=T0 + 1))
 
-    def test_the_fifth_failed_attempt_burns_the_code(self):
+    def test_the_thousandth_failed_attempt_burns_the_code(self):
+        # 0.13 S14: 5 was a lever for anyone in the network to kill the operator's open code; it
+        # added nothing against guessing a 100-bit code. 1000 keeps a bound on the file writes.
+        self.assertEqual(pairing.MAX_FAILED_ATTEMPTS_PER_CODE, 1000)
         code = self.new_code()
         self.wrong_attempts(pairing.MAX_FAILED_ATTEMPTS_PER_CODE)
-        self.assertEqual(pairing.MAX_FAILED_ATTEMPTS_PER_CODE, 5)
         with self.assertRaises(pairing.PairingFailed):
             self.store.redeem(code, "iPhone", "10.0.0.10", now=T0 + 1)
         self.assertEqual(self.store.list_devices(), [])
+
+    def test_one_failure_short_of_the_cap_leaves_the_code_usable(self):
+        code = self.new_code()
+        self.wrong_attempts(pairing.MAX_FAILED_ATTEMPTS_PER_CODE - 1)
+        self.assertEqual(json.loads((self.state_dir / "pairing.json").read_text())["attempts"],
+                         pairing.MAX_FAILED_ATTEMPTS_PER_CODE - 1)
+        self.assertIn("token", self.store.redeem(code, "iPhone", "10.0.0.10", now=T0 + 1))
+        # Single use stays: the code is spent after the first success.
+        with self.assertRaises(pairing.PairingFailed):
+            self.store.redeem(code, "iPad", "10.0.0.11", now=T0 + 2)
 
     def test_requests_without_a_well_formed_code_do_not_count_against_it(self):
         code = self.new_code()
