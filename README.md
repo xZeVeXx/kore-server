@@ -572,7 +572,8 @@ violate them, you are running something other than the system described here.
 9. **Authentication comes before the body.** The ingest API checks the bearer token in a layer in
    front of the web framework, before it reads a single byte of the request: without a valid token the
    answer is 401 at once, even for a 16 MiB upload. Anything unauthenticated may send at most 4 KiB.
-   Exactly one `Authorization` header counts; a request with two is rejected. `/docs`, `/redoc` and
+   Exactly one `Authorization` header counts; a request with two is rejected, on the coach bridge too.
+   `/docs`, `/redoc` and
    `/openapi.json` do not exist.
 10. **No web search where the health context is.** A health chat (and the adjustment of today's
     workout, which carries health context too) gets the tools `skills,memory,kore`, never `web`, so
@@ -770,7 +771,7 @@ Kore names the next step under Experimental features. Test the bridge there with
 | The ingest container restarts in a loop; the log says "… must be a concrete IPv4 loopback, RFC 1918 or VPN (100.64.0.0/10) address" | `KORE_BIND_ADDRESS` is `0.0.0.0`, a host name or a public address. | `docker compose logs ingest`; put the LAN address of this machine into `KORE_BIND_ADDRESS`, then `docker compose up -d`. The same message from `python ingest_api.py` or `python mcp_server.py` without Docker names `KORE_INGEST_HOST`, `KORE_BIND_ADDRESS` or `KORE_MCP_HOST`. |
 | The bridge does not start and names `skills.inline_shell` | The profile's `config.yaml` has shell commands in skills on, or not clearly off. | Under `skills:` set exactly `inline_shell: false` (or remove the key), see step 5 of the setup, and restart. |
 | Kore shows "Die Bridge ist gerade ausgelastet." (429 `busy`) | Two Hermes runs are already going (a chat, a background turn or an adjusted workout); the bridge takes no third. A stopped turn holds its place until Hermes has really ended. | Wait a moment and try again; a run ends after 150 s at the latest. |
-| Adjusting today's workout shows "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren." (502) | The coach's reply would make the session heavier or longer, or add or rename exercises. The bridge drops it. | Nothing is broken; try again. If it keeps happening, look at the instructions in the profile's `SOUL.md`. |
+| Adjusting today's workout shows "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren." (502 `escalation`) | The coach's reply would make the session heavier or longer, or add or rename exercises. The bridge drops it. | Nothing is broken; try again. If it keeps happening, look at the instructions in the profile's `SOUL.md`. |
 | Journal of the bridge: `fork failed`, `Too many open files` or an out-of-memory kill | The unit's `TasksMax`, `LimitNOFILE` or `MemoryMax` is too low for your Hermes runs. | Raise the value in `kore-coach-bridge.service`, `sudo systemctl daemon-reload`, restart. |
 | Paired, but the ingest API answers 401 | Ingest cannot read `devices.json`: the group does not match. | `kore-doctor` has a "state directory" check; make `KORE_STATE_GID` the directory's group and run `docker compose up -d --force-recreate`. |
 | `kore-doctor pair` refuses an address | Accepted are private IPv4 addresses and `https://<name>.ts.net`, not `127.0.0.1`, other host names, `http` on a name or on a Tailscale (100.x) address, or public addresses. | Set `KORE_BRIDGE_BIND_HOST` and `KORE_BIND_ADDRESS` to the home-network address your iPhone uses, or pass `--bridge-url` and `--ingest-url` (for Tailscale: the `https://<name>.ts.net` names). |
@@ -939,7 +940,7 @@ If you write your own bridge for another agent, this is the small protocol the a
 - `POST /coach/adjust-today`: JSON answer with the adjusted workout of the day. Only reducing is
   allowed: if the coach's reply has more sets, more weight, more repetitions or a longer duration, a
   new or renamed exercise, or another `session_id`, nothing of it is returned and the answer is
-  `502 {"error": "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren."}`.
+  `502 {"error": "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren.", "code": "escalation"}`.
   Omitting exercises or sets, lighter weights, fewer repetitions and a changed note are fine.
 - `POST /coach/forget` with `{conversation_id, sessions: [<signed reference>, …]}` or
   `{scope: "health" | "all"}`: stops running turns, deletes their buffers and then the Hermes
@@ -950,7 +951,8 @@ If you write your own bridge for another agent, this is the small protocol the a
 - Expiry: Kore sessions without activity for `KORE_BRIDGE_SESSION_RETENTION_DAYS` days (default and
   maximum 30) are deleted at startup and daily, never while a turn runs, and with the same source
   check.
-- Without a valid `Authorization: Bearer` (static bridge token or device token): 401. An unfinished
+- Without a valid `Authorization: Bearer` (static bridge token or device token), or with two
+  `Authorization` headers: 401, before any of the body is read. An unfinished
   installation is an error, never open access: if `KORE_BRIDGE_TOKEN`, `KORE_PLAN_ORIGIN_SECRET` or
   `KORE_PLAN_ORIGIN_PRINCIPAL` is empty or still `change-me…`, the bridge does not start and names the
   key (never the value). It also does not start with a `KORE_BRIDGE_TOKEN` shorter than 32 characters

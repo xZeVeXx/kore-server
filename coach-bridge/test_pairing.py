@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import socket
 import stat
 import tempfile
 import threading
@@ -578,6 +579,82 @@ class BridgePairRouteTests(BridgeHTTPCase):
         self.assertIn("paired", text)
         self.assertNotIn(code, text)
         self.assertNotIn(result["token"], text)
+
+
+class DuplicateAuthorizationTests(BridgeHTTPCase):
+    """Genau ein Authorization-Header zaehlt (wie beim Ingest): zwei sind mehrdeutig, kein 'der erste gewinnt'."""
+
+    def send(self, method, path, authorizations, body=b""):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=5)
+        try:
+            connection.putrequest(method, path)
+            for value in authorizations:
+                connection.putheader("Authorization", value)
+            if body:
+                connection.putheader("Content-Type", "application/json")
+                connection.putheader("Content-Length", str(len(body)))
+            connection.endheaders(body or None)
+            response = connection.getresponse()
+            data = response.read()
+            return response.status, (json.loads(data) if data else None)
+        finally:
+            connection.close()
+
+    def header_pairs(self):
+        _, result = self.pair()
+        static = f"Bearer {STATIC_TOKEN}"
+        device = f"Bearer {result['token']}"
+        return {
+            "static+static": [static, static],
+            "static+bad": [static, "Bearer nope"],
+            "bad+static": ["Bearer nope", static],
+            "device+device": [device, device],
+            "device+static": [device, static],
+        }
+
+    def test_two_authorization_headers_are_401_on_every_authenticated_route(self):
+        body = json.dumps({"message": "Hallo", "conversation_id": "123e4567-e89b-42d3-a456-426614174000",
+                           "health_context_allowed": False}).encode()
+        routes = (
+            ("GET", "/health", b""),
+            ("GET", "/capabilities", b""),
+            ("POST", "/coach", body),
+            ("POST", "/coach/adjust-today", body),
+            ("POST", "/coach/forget", body),
+            ("POST", "/coach/turns/123e4567-e89b-42d3-a456-426614174000/cancel", b""),
+        )
+        for name, headers in self.header_pairs().items():
+            for method, path, payload in routes:
+                with self.subTest(headers=name, route=f"{method} {path}"):
+                    self.assertEqual(self.send(method, path, headers, payload),
+                                     (401, {"error": "unauthorized", "code": "unauthorized"}))
+
+    def test_one_authorization_header_still_works(self):
+        for token in (STATIC_TOKEN, self.pair()[1]["token"]):
+            self.assertEqual(self.send("GET", "/capabilities", [f"Bearer {token}"])[0], 200)
+
+    def test_duplicate_headers_are_refused_before_the_body_is_read(self):
+        # Content-Length verspricht 1 MB, es kommt keines: Wuerde die Bridge lesen, hinge sie bis zur Lesefrist.
+        static = f"Bearer {STATIC_TOKEN}"
+        with socket.create_connection(self.server.server_address, timeout=3) as client:
+            client.sendall(
+                f"POST /coach HTTP/1.1\r\nAuthorization: {static}\r\nAuthorization: {static}\r\n"
+                "Content-Length: 1000000\r\n\r\n".encode()
+            )
+            answer = client.recv(4096)
+        self.assertTrue(answer.startswith(b"HTTP/1.0 401"), answer[:40])
+
+    def test_unpair_with_two_authorization_headers_is_401_and_keeps_the_device(self):
+        _, result = self.pair()
+        device = f"Bearer {result['token']}"
+        for headers in ([device, device], [device, "Bearer nope"], ["Bearer nope", device],
+                        [device, f"Bearer {STATIC_TOKEN}"]):
+            with self.subTest(headers=len(headers)):
+                self.assertEqual(self.send("POST", "/unpair", headers),
+                                 (401, {"error": "unauthorized", "code": "unauthorized"}))
+                self.assertEqual(len(self.store.list_devices()), 1)
+        self.assertEqual(self.send("POST", "/unpair", [device]), (204, None))
+        self.assertEqual(self.store.list_devices(), [])
 
 
 class CapabilityTests(StoreCase):

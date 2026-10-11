@@ -2632,7 +2632,7 @@ def adjust_today(data) -> tuple:
         return 502, {"error": "Antwort entspricht nicht dem Session-Schema"}
     # „Nur reduzieren" steht nicht nur im Prompt: die Bridge prueft es selbst (0.13 S11a).
     if adjustment_escalates(session_json, sess):
-        return 502, {"error": ADJUST_ESCALATION_ERROR}
+        return 502, {"error": ADJUST_ESCALATION_ERROR, "code": "escalation"}
     changes = obj.get("changes")
     return 200, {
         "session": sess,
@@ -2730,8 +2730,14 @@ class Handler(BaseHTTPRequestHandler):
         status, sentence = TURN_REQUEST_ERRORS[code]
         self._send(status, {"error": sentence, "code": code, **extra})
 
+    def _authorization_header(self):
+        """Der Wert, wenn genau ein Authorization-Header kommt, sonst None (-> 401). Wie beim
+        Ingest: Ein Duplikat ist mehrdeutig, nicht 'der erste gewinnt'."""
+        values = self.headers.get_all("Authorization") or []
+        return values[0] if len(values) == 1 else None
+
     def _authorized(self) -> bool:
-        auth_status = authorization_status(self.headers.get("Authorization"))
+        auth_status = authorization_status(self._authorization_header())
         if auth_status == 200:
             return True
         if auth_status == 503:
@@ -2888,7 +2894,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _unpair(self):
         """POST /unpair with a device token as bearer: forget this device."""
-        status, device_id = authenticate(self.headers.get("Authorization"))
+        status, device_id = authenticate(self._authorization_header())
         if status == 503:
             self._send(503, {"error": "bridge token not configured"})
             return

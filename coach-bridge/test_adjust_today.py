@@ -164,13 +164,14 @@ class AdjustTodayEndpointTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(payload["session"], session)
 
-    def test_every_escalation_attempt_is_a_502_with_a_fixed_sentence(self):
+    def test_every_escalation_attempt_is_a_502_with_a_fixed_sentence_and_a_code(self):
         for name, change in ESCALATIONS.items():
             with self.subTest(name):
                 code, payload = self.adjust({"session": adjusted(change), "rationale": "mehr geht",
                                              "changes": []})
                 self.assertEqual(code, 502)
-                self.assertEqual(payload, {"error": bridge.ADJUST_ESCALATION_ERROR})
+                self.assertEqual(payload, {"error": bridge.ADJUST_ESCALATION_ERROR,
+                                           "code": "escalation"})
                 self.assertNotIn("session", payload)
 
 

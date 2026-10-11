@@ -92,12 +92,14 @@ The token appears in plain text only in this response.
 ## `POST /unpair` (bridge, bearer = device token)
 
 `Authorization: Bearer <device token>` → `204`, the device is removed and its token stops working
-at once on the bridge and the ingest API. The static token or an unknown token → `401`.
+at once on the bridge and the ingest API. The static token or an unknown token → `401`; so is a
+request with more than one `Authorization` header (the device stays paired).
 
 ## Authentication on all other routes
 
 Bridge and ingest accept the static token (`KORE_BRIDGE_TOKEN` / `KORE_INGEST_TOKEN`, the expert
-setup) **or** a device token. A device token is checked by SHA-256 against every entry of
+setup) **or** a device token. Exactly one `Authorization` header counts on both: a request with two
+is `401`, whatever they contain, and its body is not read. A device token is checked by SHA-256 against every entry of
 `devices.json` with `hmac.compare_digest`, without early exit. Only the bridge updates
 `last_seen` (at most once per minute per device). The MCP server accepts only its own static
 token; devices never talk to it.

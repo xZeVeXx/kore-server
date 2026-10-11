@@ -89,9 +89,12 @@ Coach bridge:
 - **"Only reduce" is enforced.** The adjusted workout of the day is compared with the one the app sent;
   more sets, weight, repetitions or duration, new or renamed exercises or another session id make the
   bridge answer `502` with a fixed sentence and return nothing of the reply. It used to be only an
-  instruction in the prompt.
+  instruction in the prompt. The body carries `"code": "escalation"` next to the sentence, so the app
+  can tell this rejection from other 502s without matching text.
 - **One quota for every Hermes run** (see Changed) instead of a limit that covered only background
   turns.
+- **Exactly one `Authorization` header** counts on the bridge, as on the ingest API: a request with two
+  gets `401` (also on `POST /unpair`) before any of the body is read.
 - **Connection cap and read deadline.** At most 64 connections at once, 20 s from the start of a
   connection for headers and body; a slow sender can no longer hold a thread open. The unit gets
   `TasksMax=512`, `MemoryMax=2G` and `LimitNOFILE=4096`.

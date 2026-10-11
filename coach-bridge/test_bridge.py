@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import os
@@ -956,10 +957,9 @@ class BridgePrivacyTests(unittest.TestCase):
         }).encode("utf-8")
         handler = object.__new__(bridge.Handler)
         handler.path = "/coach"
-        handler.headers = {
-            "Authorization": "Bearer secret",
-            "Content-Length": str(len(body)),
-        }
+        handler.headers = http.client.HTTPMessage()  # wie im Betrieb; ein dict hat kein get_all
+        handler.headers["Authorization"] = "Bearer secret"
+        handler.headers["Content-Length"] = str(len(body))
         handler.rfile = io.BytesIO(body)
         sent = []
         handler._send = lambda code, payload: sent.append((code, payload))

@@ -6,6 +6,7 @@ Echte Hermes-Ausgaben liegen in fixtures/hermes-v0.21.4/; Dateien mit dem Praefi
 import base64
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import os
@@ -598,10 +599,9 @@ class StreamJsonRunnerTests(unittest.TestCase):
         body = json.dumps(payload).encode("utf-8")
         handler = object.__new__(bridge.Handler)
         handler.path = path
-        handler.headers = {
-            "Authorization": f"Bearer {TEST_TOKEN}",
-            "Content-Length": str(len(body)),
-        }
+        handler.headers = http.client.HTTPMessage()  # wie im Betrieb; ein dict hat kein get_all
+        handler.headers["Authorization"] = f"Bearer {TEST_TOKEN}"
+        handler.headers["Content-Length"] = str(len(body))
         handler.rfile = io.BytesIO(body)
         sent = []
         handler._send = lambda code, obj: sent.append((code, obj))

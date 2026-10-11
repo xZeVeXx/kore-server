@@ -591,7 +591,8 @@ Wer sie verletzt, betreibt etwas anderes als das hier beschriebene System.
 9. **Die Anmeldung kommt vor dem Body.** Die Ingest-API prüft das Bearer-Token in einer Schicht vor dem
    Web-Framework, bevor sie ein einziges Byte der Anfrage liest: Ohne gültiges Token kommt sofort 401,
    auch bei einem 16-MiB-Upload. Unangemeldet darf man höchstens 4 KiB schicken. Es zählt genau ein
-   `Authorization`-Header; eine Anfrage mit zwei wird abgewiesen. `/docs`, `/redoc` und
+   `Authorization`-Header; eine Anfrage mit zwei wird abgewiesen, auch an der Coach-Bridge.
+   `/docs`, `/redoc` und
    `/openapi.json` gibt es nicht.
 10. **Keine Websuche dort, wo der Health-Kontext ist.** Ein Health-Chat (und die Tages-Anpassung, die
     ebenfalls Health-Kontext trägt) bekommt die Werkzeuge `skills,memory,kore`, nie `web`; ein in so
@@ -795,7 +796,7 @@ Kore nennt unter Experimentelle Funktionen den nächsten Schritt. Die Bridge pr�
 | Der Ingest-Container startet in einer Schleife neu; das Log sagt „… must be a concrete IPv4 loopback, RFC 1918 or VPN (100.64.0.0/10) address“ | `KORE_BIND_ADDRESS` ist `0.0.0.0`, ein Hostname oder eine öffentliche Adresse. | `docker compose logs ingest`; die LAN-Adresse dieses Rechners in `KORE_BIND_ADDRESS` eintragen, dann `docker compose up -d`. Dieselbe Meldung von `python ingest_api.py` oder `python mcp_server.py` ohne Docker nennt `KORE_INGEST_HOST`, `KORE_BIND_ADDRESS` oder `KORE_MCP_HOST`. |
 | Die Bridge startet nicht und nennt `skills.inline_shell` | Die `config.yaml` des Profils hat Shell-Befehle in Skills an oder nicht eindeutig aus. | Unter `skills:` genau `inline_shell: false` setzen (oder den Schlüssel entfernen), siehe Schritt 5 der Einrichtung, und neu starten. |
 | Kore zeigt „Die Bridge ist gerade ausgelastet.“ (429 `busy`) | Zwei Hermes-Läufe laufen schon (ein Chat, ein Hintergrund-Turn oder eine Tages-Anpassung); die Bridge nimmt keinen dritten an. Ein gestoppter Turn behält seinen Platz, bis Hermes wirklich beendet ist. | Einen Moment warten und es erneut versuchen; ein Lauf endet spätestens nach 150 s. |
-| Die Tages-Anpassung zeigt „Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren.“ (502) | Die Antwort des Coachs würde die Session schwerer oder länger machen oder Übungen hinzufügen oder umbenennen. Die Bridge verwirft sie. | Nichts ist kaputt; erneut versuchen. Passiert es immer wieder, sieh dir die Anweisungen in der `SOUL.md` des Profils an. |
+| Die Tages-Anpassung zeigt „Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren.“ (502 `escalation`) | Die Antwort des Coachs würde die Session schwerer oder länger machen oder Übungen hinzufügen oder umbenennen. Die Bridge verwirft sie. | Nichts ist kaputt; erneut versuchen. Passiert es immer wieder, sieh dir die Anweisungen in der `SOUL.md` des Profils an. |
 | Journal der Bridge: `fork failed`, `Too many open files` oder ein OOM-Kill | `TasksMax`, `LimitNOFILE` oder `MemoryMax` der Unit sind für deine Hermes-Läufe zu niedrig. | Den Wert in `kore-coach-bridge.service` erhöhen, `sudo systemctl daemon-reload`, neu starten. |
 | Gekoppelt, aber die Ingest-API antwortet 401 | Der Ingest kann `devices.json` nicht lesen: Die Gruppe passt nicht. | `kore-doctor` hat einen Check „Zustandsordner“; `KORE_STATE_GID` auf die Gruppe des Ordners setzen und `docker compose up -d --force-recreate` ausführen. |
 | `kore-doctor pair` lehnt eine Adresse ab | Akzeptiert werden private IPv4-Adressen und `https://<name>.ts.net`, nicht `127.0.0.1`, andere Hostnamen, `http` auf einem Namen oder auf einer Tailscale-Adresse (100.x) oder öffentliche Adressen. | `KORE_BRIDGE_BIND_HOST` und `KORE_BIND_ADDRESS` auf die Heimnetz-Adresse setzen, die dein iPhone benutzt, oder `--bridge-url` und `--ingest-url` übergeben (bei Tailscale: die `https://<name>.ts.net`-Namen). |
@@ -969,7 +970,7 @@ App spricht:
   Reduzieren: Hat die Antwort des Coachs mehr Sätze, mehr Gewicht, mehr Wiederholungen oder eine
   längere Dauer, eine neue oder umbenannte Übung oder eine andere `session_id`, kommt nichts davon
   zurück, sondern
-  `502 {"error": "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren."}`.
+  `502 {"error": "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren.", "code": "escalation"}`.
   Übungen oder Sätze weglassen, leichtere Gewichte, weniger Wiederholungen und eine geänderte Notiz
   sind in Ordnung.
 - `POST /coach/forget` mit `{conversation_id, sessions: [<signierte Referenz>, …]}` oder
@@ -981,7 +982,8 @@ App spricht:
 - Verfall: Kore-Sessions ohne Aktivität seit `KORE_BRIDGE_SESSION_RETENTION_DAYS` Tagen (Standard und
   Obergrenze 30) löscht die Bridge beim Start und danach täglich, nie während ein Turn läuft, und mit
   derselben Quellenprüfung.
-- Ohne gültiges `Authorization: Bearer` (statisches Bridge-Token oder Gerätetoken): 401. Eine
+- Ohne gültiges `Authorization: Bearer` (statisches Bridge-Token oder Gerätetoken) oder mit zwei
+  `Authorization`-Headern: 401, bevor vom Body etwas gelesen wird. Eine
   unfertige Installation ist ein Fehler, nie ein offener Zugang: Ist `KORE_BRIDGE_TOKEN`,
   `KORE_PLAN_ORIGIN_SECRET` oder `KORE_PLAN_ORIGIN_PRINCIPAL` leer oder steht noch auf `change-me…`,
   startet die Bridge nicht und nennt den Schlüssel (nie den Wert). Sie startet auch nicht mit einem
