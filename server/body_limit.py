@@ -1,8 +1,9 @@
-"""Body-size ceiling for the ingest API, in front of routing, parsing and the token check.
+"""Body-size ceiling for the ingest API, in front of routing and parsing.
 
-FastAPI reads and buffers a request body before it resolves dependencies, so the bearer check
-on `/ingest` only runs after the whole body sits in memory. This layer rejects anything above
-the ceiling first: by `Content-Length` when declared, by counting the stream otherwise.
+FastAPI reads and buffers a request body before it resolves dependencies. This layer rejects
+anything above the ceiling first: by `Content-Length` when declared, by counting the stream
+otherwise. The bearer check sits in front of it (`auth_gate.py`), so only an authenticated
+sender gets as far as this ceiling; `auth_gate` reuses the class with a few KiB for everyone else.
 
 The ceiling is the app's own limit for a serialized snapshot
 (`RemoteSnapshotProjection.maximumSerializedBytes` = 16 MiB), so no legitimate upload is cut.

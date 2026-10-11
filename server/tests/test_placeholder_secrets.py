@@ -17,7 +17,7 @@ from pathlib import Path
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVER_ROOT))
 
-from placeholder_guard import reject_placeholder  # noqa: E402
+from placeholder_guard import MIN_TOKEN_LENGTH, reject_placeholder  # noqa: E402
 
 
 EXAMPLE_PLACEHOLDERS = {
@@ -40,6 +40,26 @@ class RejectPlaceholderTests(unittest.TestCase):
 
     def test_a_real_value_passes(self) -> None:
         self.assertIsNone(reject_placeholder("KORE_MCP_TOKEN", secrets.token_hex(24)))
+
+    def test_tokens_need_at_least_32_characters_and_the_message_never_shows_the_value(self) -> None:
+        self.assertEqual(MIN_TOKEN_LENGTH, 32)
+        too_short = "a1" * 15 + "b"  # 31 characters
+        with self.assertRaises(RuntimeError) as raised:
+            reject_placeholder("KORE_INGEST_TOKEN", too_short, min_length=MIN_TOKEN_LENGTH)
+        message = str(raised.exception)
+        self.assertIn("KORE_INGEST_TOKEN", message)
+        self.assertIn("32", message)
+        self.assertIn("openssl rand -hex 24", message)
+        self.assertNotIn(too_short, message)
+
+    def test_exactly_32_characters_pass_and_padding_does_not_count(self) -> None:
+        self.assertIsNone(reject_placeholder("KORE_MCP_TOKEN", "a" * 32, min_length=MIN_TOKEN_LENGTH))
+        with self.assertRaises(RuntimeError):
+            reject_placeholder("KORE_MCP_TOKEN", " " + "a" * 31 + " ", min_length=MIN_TOKEN_LENGTH)
+
+    def test_without_a_minimum_short_values_still_pass(self) -> None:
+        # The origin secret has its own, byte-based check in origin_ticket.
+        self.assertIsNone(reject_placeholder("KORE_PLAN_ORIGIN_SECRET", "short"))
 
 
 class ServiceStartupTests(unittest.TestCase):
@@ -95,6 +115,20 @@ class ServiceStartupTests(unittest.TestCase):
         for value in ("", EXAMPLE_PLACEHOLDERS["KORE_INGEST_TOKEN"]):
             with self.subTest(value=value):
                 self.assert_refuses("ingest_api", "KORE_INGEST_TOKEN", value)
+
+    def test_ingest_and_mcp_refuse_a_token_under_32_characters(self) -> None:
+        for module, key in (("ingest_api", "KORE_INGEST_TOKEN"), ("mcp_server", "KORE_MCP_TOKEN")):
+            for length in (1, 24, 31):
+                with self.subTest(module=module, length=length):
+                    self.assert_refuses(module, key, "~" * length)
+
+    def test_ingest_and_mcp_accept_a_token_of_exactly_32_characters(self) -> None:
+        for module, key in (("ingest_api", "KORE_INGEST_TOKEN"), ("mcp_server", "KORE_MCP_TOKEN")):
+            with self.subTest(module=module):
+                env = self.valid_env()
+                env[key] = "q" * 32
+                completed = self.start(module, env)
+                self.assertEqual(completed.returncode, 0, completed.stderr[-500:])
 
     def test_mcp_refuses_empty_or_example_token_and_origin_secret(self) -> None:
         for key in ("KORE_MCP_TOKEN", "KORE_PLAN_ORIGIN_SECRET"):

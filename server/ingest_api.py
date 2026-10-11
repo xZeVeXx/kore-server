@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.exceptions import RequestValidationError
@@ -12,16 +13,20 @@ from pydantic import ValidationError
 
 import auth_devices
 import store
+from auth_gate import BearerGateMiddleware
+from bind_guard import listen_host
 from body_limit import BodyLimitMiddleware
 from models import PlanAck, Snapshot
 from origin_guard import OriginGuardMiddleware, allowed_origins_from_env
 from origin_ticket import policy_from_env
-from placeholder_guard import reject_placeholder
+from placeholder_guard import MIN_TOKEN_LENGTH, reject_placeholder
+
+PORT = 8081
 
 
 def _required_secret(name: str) -> str:
     value = os.environ.get(name)
-    reject_placeholder(name, value)
+    reject_placeholder(name, value, min_length=MIN_TOKEN_LENGTH)
     return value
 
 
@@ -32,9 +37,35 @@ ORIGIN_POLICY = policy_from_env()
 
 ALLOWED_ORIGINS = allowed_origins_from_env()
 
-app = FastAPI(title="Kore Ingest API", version="1.0")
-# Inside the origin guard: caps the body before FastAPI buffers it for parsing and the token check.
+
+def authorization_ok(authorization: str) -> bool:
+    """The static ingest token or a paired device's token; both checks always run."""
+    # Bytes, not str: compare_digest raises on non-ASCII str, and headers arrive as latin-1.
+    supplied = authorization.encode("utf-8", "surrogatepass")
+    expected = f"Bearer {INGEST_TOKEN}".encode("utf-8")
+    static_ok = hmac.compare_digest(supplied, expected)
+    device_ok = DEVICE_TOKENS is not None and DEVICE_TOKENS.device_for_authorization(authorization) is not None
+    return static_ok or device_ok
+
+
+# Every route that requires the bearer token. Trailing slash included: FastAPI would redirect it.
+_PROTECTED_PATH = re.compile(r"/(?:ingest|plan/pending|plan/[^/]+/ack)/?")
+
+
+def is_protected_path(path: str) -> bool:
+    return _PROTECTED_PATH.fullmatch(path) is not None
+
+
+# No /docs, /redoc or /openapi.json: they would hand every unauthenticated caller the full schema.
+app = FastAPI(
+    title="Kore Ingest API", version="1.0",
+    docs_url=None, redoc_url=None, openapi_url=None,
+)
+# Innermost: caps an authenticated body before FastAPI buffers it for parsing.
 app.add_middleware(BodyLimitMiddleware)
+# Between the body limit and the origin guard: a request without a valid token is answered 401
+# before FastAPI reads or parses a single byte of its (up to 16 MiB) body.
+app.add_middleware(BearerGateMiddleware, authorize=authorization_ok, protected=is_protected_path)
 # Outermost layer on purpose: a rejected origin must not reach routing, validation or the
 # token check, so a probing page learns nothing from response shape or timing. /health is
 # covered too — it is the cheapest existence oracle on the box.
@@ -57,13 +88,8 @@ def startup() -> None:
 
 
 def require_ingest_token(authorization: str = Header(default="")) -> None:
-    """The static ingest token or a paired device's token; both checks always run."""
-    # Bytes, not str: compare_digest raises on non-ASCII str, and headers arrive as latin-1.
-    supplied = authorization.encode("utf-8", "surrogatepass")
-    expected = f"Bearer {INGEST_TOKEN}".encode("utf-8")
-    static_ok = hmac.compare_digest(supplied, expected)
-    device_ok = DEVICE_TOKENS is not None and DEVICE_TOKENS.device_for_authorization(authorization) is not None
-    if not (static_ok or device_ok):
+    """Second lock behind the ASGI gate: the same check, should a route ever bypass the gate."""
+    if not authorization_ok(authorization):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized",
@@ -124,3 +150,10 @@ def ack_plan(plan_id: str, ack: PlanAck) -> dict[str, object]:
         # Do not disclose whether another private instance owns this identifier.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     return {"ok": True, "status": "accepted" if ack.accepted else "rejected"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # KORE_INGEST_HOST (Docker) before KORE_BIND_ADDRESS (systemd); loopback when neither is set.
+    uvicorn.run(app, host=listen_host("KORE_INGEST_HOST", fallback="KORE_BIND_ADDRESS"), port=PORT)

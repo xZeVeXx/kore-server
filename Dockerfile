@@ -14,4 +14,6 @@ ENV KORE_DB_PATH=/data/kore.db
 RUN mkdir -p /data && useradd --uid 10001 --no-create-home kore && chown kore /data
 USER kore
 
-CMD ["uvicorn", "ingest_api:app", "--host", "0.0.0.0", "--port", "8081"]
+# ingest_api.py validates where it listens before it starts uvicorn. Without Compose it listens on
+# 127.0.0.1 inside the container; Compose passes the listen and published addresses it needs.
+CMD ["python", "ingest_api.py"]

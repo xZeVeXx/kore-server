@@ -10,9 +10,11 @@ StartLimitIntervalSec=0
 WorkingDirectory=/opt/kore-server
 # Standard nur lokal. Fuer das iPhone im LAN setzt die .env KORE_BIND_ADDRESS auf
 # die LAN-IP dieses Rechners (Werte aus EnvironmentFile ueberschreiben diese Zeile).
+# ingest_api.py prueft die Adresse vor dem Start (Loopback, RFC 1918, 100.64.0.0/10) und
+# verweigert Wildcard und oeffentliche Adressen.
 Environment=KORE_BIND_ADDRESS=127.0.0.1
 EnvironmentFile=/opt/kore-server/.env
-ExecStart=/opt/kore-server/.venv/bin/uvicorn ingest_api:app --host ${KORE_BIND_ADDRESS} --port 8081
+ExecStart=/opt/kore-server/.venv/bin/python /opt/kore-server/ingest_api.py
 Restart=on-failure
 RestartSec=5
 # Keine Rechteausweitung per sudo/setuid. Weitere Haertung siehe deploy/README.md.
@@ -20,6 +22,31 @@ NoNewPrivileges=yes
 User=kore
 # Geraete-Kopplung: kore muss in der Gruppe des Bridge-Nutzers sein (usermod -aG <Gruppe> kore),
 # damit der Ingest state/devices.json (0640) lesen kann. Siehe contract/pairing-v1.md.
+
+# Sandbox wie kore-coach-bridge.service. Die Mount-Namespaces dahinter brauchen in einem
+# unprivilegierten System-Container aktivierte Verschachtelung (nesting), sonst startet der
+# Dienst mit 226/NAMESPACE nicht.
+UMask=0077
+PrivateTmp=yes
+ProtectSystem=strict
+# Nur lesend sichtbar statt "yes": der Zustandsordner der Kopplung (KORE_STATE_DIR) liegt
+# meist unter dem Home des Bridge-Nutzers.
+ProtectHome=read-only
+# Schreibbar bleibt nur der Ordner der SQLite-Datei (KORE_DB_PATH, auch -wal/-shm). Liegt sie
+# woanders, trage den Ordner hier ein.
+ReadWritePaths=/opt/kore-server
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+# Ein 16-MiB-Snapshot braucht beim Parsen rund 400-500 MiB.
+MemoryMax=768M
+TasksMax=128
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target

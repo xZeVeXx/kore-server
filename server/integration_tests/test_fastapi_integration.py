@@ -757,15 +757,22 @@ class FastAPIIntegrationTests(unittest.TestCase):
             self.client.get("/plan/pending", headers=self.authorization()).status_code, 200
         )
 
-    def test_oversized_body_is_rejected_before_parsing_or_token_check(self) -> None:
+    def test_oversized_body_is_rejected_before_parsing(self) -> None:
         from body_limit import MAX_BODY_BYTES
 
+        oversized = b"{" + b" " * MAX_BODY_BYTES + b"}"
+        # With a valid token the ceiling answers. Without one, the bearer gate answers 401
+        # first (0.13 S11b): an unauthenticated sender never gets as far as the size check.
         response = self.client.post(
             "/ingest",
-            content=b"{" + b" " * MAX_BODY_BYTES + b"}",
-            headers={"Content-Type": "application/json"},
+            content=oversized,
+            headers={"Content-Type": "application/json", **self.authorization()},
         )
         self.assertEqual(response.status_code, 413)
+        response = self.client.post(
+            "/ingest", content=oversized, headers={"Content-Type": "application/json"}
+        )
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

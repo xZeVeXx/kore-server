@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 from typing import Any
@@ -31,15 +33,16 @@ _FASTMCP_LOG_LEVEL, _FASTMCP_LOG_LEVEL_NUMBER = _required_fastmcp_log_level()
 
 import fastmcp  # noqa: E402
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.utilities.logging import configure_logging
 from starlette.middleware import Middleware
 
 import store
+from bind_guard import listen_host
 from models import TrainingPlanProposal
 from origin_guard import OriginGuardMiddleware, allowed_origins_from_env
 from origin_ticket import policy_from_env, secret_from_env, verify_origin_ticket
-from placeholder_guard import reject_placeholder
+from placeholder_guard import MIN_TOKEN_LENGTH, reject_placeholder
 
 
 def _clamp_logger_namespace(namespace: str, minimum_level: int) -> None:
@@ -107,25 +110,58 @@ def _required_env(name: str) -> str:
     return value
 
 
-def _required_secret(name: str) -> str:
+def _required_secret(name: str, *, min_length: int = 0) -> str:
     value = os.environ.get(name)
-    reject_placeholder(name, value)
+    reject_placeholder(name, value, min_length=min_length)
     return value
 
 
-MCP_TOKEN = _required_secret("KORE_MCP_TOKEN")
+class ConstantTimeTokenVerifier(TokenVerifier):
+    """One configured bearer token, compared in constant time.
+
+    FastMCP's `StaticTokenVerifier` looks the presented token up in a dict and says itself:
+    "Never use this in production". Here both sides are hashed to equal length and compared with
+    `hmac.compare_digest`, so neither the content nor the length of the token shows in the timing.
+    """
+
+    def __init__(
+        self,
+        token: str,
+        client_id: str,
+        scopes: list[str],
+        required_scopes: list[str] | None = None,
+    ) -> None:
+        super().__init__(required_scopes=required_scopes)
+        self._expected_digest = self._digest(token)
+        self._client_id = client_id
+        self._scopes = list(scopes)
+
+    @staticmethod
+    def _digest(token: str) -> bytes:
+        # surrogatepass: a header value is never a reason to raise instead of refusing.
+        return hashlib.sha256(token.encode("utf-8", "surrogatepass")).digest()
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not hmac.compare_digest(self._digest(token), self._expected_digest):
+            return None
+        return AccessToken(
+            token=token,
+            client_id=self._client_id,
+            scopes=list(self._scopes),
+            expires_at=None,
+        )
+
+
+MCP_TOKEN = _required_secret("KORE_MCP_TOKEN", min_length=MIN_TOKEN_LENGTH)
 MCP_CLIENT_ID = _required_env("KORE_MCP_CLIENT_ID")
 _required_secret("KORE_PLAN_ORIGIN_SECRET")
 ORIGIN_SECRET = secret_from_env()
 ORIGIN_POLICY = policy_from_env()
 
-token_verifier = StaticTokenVerifier(
-    tokens={
-        MCP_TOKEN: {
-            "client_id": MCP_CLIENT_ID,
-            "scopes": ["read:health", "write:plan"],
-        }
-    },
+token_verifier = ConstantTimeTokenVerifier(
+    MCP_TOKEN,
+    client_id=MCP_CLIENT_ID,
+    scopes=["read:health", "write:plan"],
     required_scopes=["read:health"],
 )
 mcp = FastMCP("Kore", auth=token_verifier)
@@ -242,7 +278,7 @@ def propose_training_plan(
 if __name__ == "__main__":
     mcp.run(
         transport="http",
-        host=os.environ.get("KORE_MCP_HOST", "127.0.0.1"),
+        host=listen_host("KORE_MCP_HOST"),
         port=int(os.environ.get("KORE_MCP_PORT", "8000")),
         middleware=origin_guard_middleware(),
     )

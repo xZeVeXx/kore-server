@@ -40,8 +40,36 @@ class DeployUnitTests(unittest.TestCase):
 
     def test_ingest_binds_to_the_configured_address_with_loopback_default(self) -> None:
         service = _read_unit(UNITS[0])["Service"]
-        self.assertIn("--host ${KORE_BIND_ADDRESS}", service["ExecStart"])
+        # ingest_api.py validates KORE_BIND_ADDRESS (loopback, RFC 1918, 100.64.0.0/10) before it
+        # opens a socket; the unit no longer hands the value to a bare `uvicorn --host`.
+        self.assertEqual(service["ExecStart"],
+                         "/opt/kore-server/.venv/bin/python /opt/kore-server/ingest_api.py")
+        self.assertNotIn("--host", service["ExecStart"])
         self.assertEqual(service.get("Environment"), "KORE_BIND_ADDRESS=127.0.0.1")
+
+    def test_mcp_starts_through_its_own_bind_validation(self) -> None:
+        service = _read_unit(UNITS[1])["Service"]
+        self.assertEqual(service["ExecStart"], "/opt/kore-server/.venv/bin/python /opt/kore-server/mcp_server.py")
+
+    def test_server_units_are_sandboxed_like_the_bridge_unit(self) -> None:
+        common = {
+            "NoNewPrivileges": "yes", "PrivateTmp": "yes", "ProtectSystem": "strict",
+            "ReadWritePaths": "/opt/kore-server", "ProtectKernelTunables": "yes",
+            "ProtectKernelModules": "yes", "ProtectControlGroups": "yes",
+            "RestrictAddressFamilies": "AF_INET AF_INET6 AF_UNIX", "RestrictNamespaces": "yes",
+            "RestrictSUIDSGID": "yes", "LockPersonality": "yes", "CapabilityBoundingSet": "",
+            "UMask": "0077", "TasksMax": "128", "LimitNOFILE": "4096",
+        }
+        specific = {
+            # Ingest reads devices.json from the bridge user's state dir, usually below /home.
+            UNITS[0]: {"ProtectHome": "read-only", "MemoryMax": "768M"},
+            UNITS[1]: {"ProtectHome": "yes", "MemoryMax": "384M"},
+        }
+        for path, extra in specific.items():
+            service = _read_unit(path)["Service"]
+            for key, value in {**common, **extra}.items():
+                with self.subTest(unit=path.name, key=key):
+                    self.assertEqual(service.get(key), value)
 
     def test_no_unit_allows_privilege_escalation(self) -> None:
         for path in UNITS:
