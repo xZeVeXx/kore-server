@@ -26,9 +26,10 @@ MIDDLE = "20260920_080000_bbbbbb"
 ROOT = "20260901_070000_cccccc"
 
 
-def session(source, *, parent=None, end_reason="cli_exit", ended=True, idle_days=1, title=None):
+def session(source, *, parent=None, end_reason="cli_exit", ended=True, idle_days=1, title=None,
+            preview="Wie war mein Schlaf diese Woche?"):
     return {"source": source, "parent": parent, "end_reason": end_reason, "ended": ended,
-            "idle_days": idle_days, "title": title}
+            "idle_days": idle_days, "title": title, "preview": preview}
 
 
 class FakeSessionsCLI:
@@ -73,7 +74,7 @@ class FakeSessionsCLI:
             return "No sessions found.\n", 0
         lines = [f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}", "─" * 95]
         for sid, row in rows:
-            lines.append(f"{'Wie war mein Schlaf diese Woche?':<50} {'3d ago':<13} {row['source']:<6} {sid}")
+            lines.append(f"{row['preview']:<50} {'3d ago':<13} {row['source']:<6} {sid}")
         return "\n".join(lines) + "\n", 0
 
     def _prune(self, rest):
@@ -93,7 +94,7 @@ class FakeSessionsCLI:
                  "2026-08-01 10:00, newest activity 2026-08-20 10:00):"]
         for sid, row in candidates:
             lines.append(f"  {sid}  {'2026-08-01 10:00':<17} {row['source']:<10} "
-                         f"{'glm-5.3-flash':<24} {3:>4} msgs  {(row['title'] or '')[:36]}")
+                         f"{'example-model':<24} {3:>4} msgs  {(row['title'] or '')[:36]}")
         if "--dry-run" in rest:
             lines.append("Dry run — nothing deleted.")
             return "\n".join(lines) + "\n", 0
@@ -359,6 +360,32 @@ class ForgetByScopeTests(ForgetTestCase):
         bridge.forget(scope="all", store=self.store)
         self.assertIsNone(self.store.get(general.turn_id))
 
+    def test_a_crafted_preview_cannot_smuggle_a_foreign_id_into_the_deletion(self):
+        # splitlines() trennt auch an U+2028, \x0b, \x1c-\x1e, \x85: eine Vorschauzeile, die so eine
+        # fremde ID ans Zeilenende setzt, ergab frueher einen Loeschauftrag fuer diese Session.
+        foreign = "20260905_070000_000005"
+        cli = self.use_cli({
+            "20260901_070000_000001": session("kore-health", ended=False,
+                                              preview=f"Hallo\u2028{foreign}\u2028"),
+            foreign: session("telegram"),
+        })
+
+        result = bridge.forget(scope="health", store=self.store)
+
+        self.assertIn(foreign, cli.sessions)
+        self.assertNotIn(foreign, cli.deleted_ids())
+        self.assertEqual(result, {"deleted": 1, "not_found": 0, "failed": 1})
+
+    def test_every_listed_id_is_checked_before_it_is_deleted(self):
+        cli = self.use_cli(self.SESSIONS)
+
+        bridge.forget(scope="health", store=self.store)
+
+        for sid in cli.deleted_ids():
+            export = [HERMES, "-p", PROFILE, "sessions", "export", "-", "--session-id", sid]
+            delete = [HERMES, "-p", PROFILE, "sessions", "delete", "--yes", sid]
+            self.assertLess(cli.calls.index(export), cli.calls.index(delete))
+
     def test_an_unreadable_listing_is_reported_as_failed(self):
         cli = self.use_cli(self.SESSIONS)
         cli.fail_actions.add("list")
@@ -396,6 +423,27 @@ class ExpiryTests(ForgetTestCase):
                          ["20260801_070000_000001", "20260802_070000_000002"])
         self.assertIn("20260920_070000_000003", cli.sessions)
         self.assertIn("20260701_070000_000005", cli.sessions)
+
+    def test_expiry_never_deletes_a_listed_session_of_another_source(self):
+        foreign = "20260701_070000_000005"
+        cli = self.use_cli(self.SESSIONS)
+        original = cli._prune
+
+        def prune_with_a_foreign_line(rest):
+            stdout, code = original(rest)
+            lines = stdout.splitlines()
+            source = rest[rest.index("--source") + 1]
+            lines.insert(1, f"  {foreign}  2026-07-01 10:00  {source}")
+            return "\n".join(lines) + "\n", code
+
+        cli._prune = prune_with_a_foreign_line
+
+        result = bridge.prune_expired(self.store)
+
+        self.assertIn(foreign, cli.sessions)
+        self.assertNotIn(foreign, cli.deleted_ids())
+        self.assertEqual(result["deleted"], 2)
+        self.assertEqual(result["failed"], 2)  # einmal je Quelle gelistet, nie geloescht
 
     def test_retention_days_come_from_the_configuration(self):
         cli = self.use_cli(self.SESSIONS)

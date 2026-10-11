@@ -35,6 +35,12 @@ ReadWritePaths=<HOME>/.hermes <HOME>/kore-server/state -<HOME>/.cache
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Obergrenzen fuer die ganze Unit (Bridge + Hermes-Laeufe): die Bridge nimmt hoechstens 64
+# Verbindungen an und startet hoechstens 2 Hermes-Laeufe gleichzeitig. Meldet das Journal
+# "fork failed", "Too many open files" oder einen OOM-Kill, die Werte erhoehen.
+TasksMax=512
+MemoryMax=2G
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target

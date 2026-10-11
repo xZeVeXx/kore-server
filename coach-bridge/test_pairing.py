@@ -57,9 +57,8 @@ class CodeTests(StoreCase):
         second = self.new_code()
         with self.assertRaises(pairing.PairingFailed):
             self.store.redeem(first, "iPhone", "10.0.0.10", now=T0)
-        # The first attempt consumed the only open code, even though it was the wrong one.
-        with self.assertRaises(pairing.PairingFailed):
-            self.store.redeem(second, "iPhone", "192.0.2.11", now=T0)
+        # The replaced code is just a wrong one: it counts against the open code, it does not burn it.
+        self.assertIn("token", self.store.redeem(second, "iPhone", "192.0.2.11", now=T0))
 
     def test_success_returns_contract_payload(self):
         _, result = self.pair()
@@ -71,17 +70,40 @@ class CodeTests(StoreCase):
 
     def test_code_is_consumed_after_a_successful_attempt(self):
         code, _ = self.pair()
+        self.assertIs(json.loads((self.state_dir / "pairing.json").read_text())["used"], True)
         with self.assertRaises(pairing.PairingFailed):
             self.store.redeem(code, "iPhone", "192.0.2.11", now=T0 + 1)
         self.assertEqual(len(self.store.list_devices()), 1)
 
-    def test_code_is_consumed_after_a_failed_attempt(self):
+    def wrong_attempts(self, count, now=T0):
+        for n in range(count):
+            with self.assertRaises(pairing.PairingFailed):
+                # Another address each time: this is about the code, not the per-address limit.
+                self.store.redeem("A" * 20, "iPhone", f"192.0.2.{100 + n}", now=now)
+
+    def test_four_failed_attempts_leave_the_code_usable(self):
         code = self.new_code()
+        self.wrong_attempts(4)
+        self.assertEqual(json.loads((self.state_dir / "pairing.json").read_text())["attempts"], 4)
+        self.assertIn("token", self.store.redeem(code, "iPhone", "10.0.0.10", now=T0 + 1))
+
+    def test_the_fifth_failed_attempt_burns_the_code(self):
+        code = self.new_code()
+        self.wrong_attempts(pairing.MAX_FAILED_ATTEMPTS_PER_CODE)
+        self.assertEqual(pairing.MAX_FAILED_ATTEMPTS_PER_CODE, 5)
         with self.assertRaises(pairing.PairingFailed):
-            self.store.redeem("A" * 20, "iPhone", "10.0.0.10", now=T0)
-        with self.assertRaises(pairing.PairingFailed):
-            self.store.redeem(code, "iPhone", "192.0.2.11", now=T0 + 1)
+            self.store.redeem(code, "iPhone", "10.0.0.10", now=T0 + 1)
         self.assertEqual(self.store.list_devices(), [])
+
+    def test_requests_without_a_well_formed_code_do_not_count_against_it(self):
+        code = self.new_code()
+        malformed = (None, 5, "", "   ", "A" * 19, "A" * 21, "1" * 20, "A" * 19 + "!",
+                     "AAAAA AAAAA AAAAA AAAAA", "Ä" * 20, ["A" * 20], {"code": code})
+        for n, bad in enumerate(malformed):
+            with self.subTest(bad=bad), self.assertRaises(pairing.PairingFailed):
+                self.store.redeem(bad, "iPhone", f"192.0.2.{100 + n}", now=T0)
+        self.assertEqual(json.loads((self.state_dir / "pairing.json").read_text())["attempts"], 0)
+        self.assertIn("token", self.store.redeem(code, "iPhone", "10.0.0.10", now=T0 + 1))
 
     def test_code_expires_after_600_seconds(self):
         code = self.new_code(now=T0)
@@ -99,12 +121,11 @@ class CodeTests(StoreCase):
         with self.assertRaises(pairing.PairingFailed):
             self.store.redeem("A" * 20, "iPhone", "10.0.0.10", now=T0)
 
-    def test_non_string_code_fails_and_consumes(self):
+    def test_non_string_code_fails_without_consuming(self):
         code = self.new_code()
         with self.assertRaises(pairing.PairingFailed):
             self.store.redeem(None, "iPhone", "10.0.0.10", now=T0)
-        with self.assertRaises(pairing.PairingFailed):
-            self.store.redeem(code, "iPhone", "192.0.2.11", now=T0)
+        self.assertIn("token", self.store.redeem(code, "iPhone", "192.0.2.11", now=T0))
 
 
 class RateLimitTests(StoreCase):
@@ -126,6 +147,40 @@ class RateLimitTests(StoreCase):
                 self.store.redeem("A" * 20, "x", "192.0.2.7", now=T0 + i)
         code = self.new_code(now=T0 + 61)
         self.assertIn("token", self.store.redeem(code, "x", "192.0.2.7", now=T0 + 65))
+
+    def test_concurrent_attempts_from_one_address_cannot_exceed_the_limit(self):
+        # Pruefen und Zaehlen sind eins: vorher sahen gleichzeitige Anfragen alle "0 Fehlschlaege".
+        self.state_dir.mkdir(mode=0o700)
+        original = self.store._redeem
+
+        def slow_redeem(*args, **kwargs):
+            threading.Event().wait(0.05)
+            return original(*args, **kwargs)
+
+        self.store._redeem = slow_redeem
+        barrier = threading.Barrier(20)
+        outcomes = []
+        lock = threading.Lock()
+
+        def attempt():
+            barrier.wait()
+            try:
+                self.store.redeem("A" * 20, "x", "192.0.2.7", now=T0)
+                result = "ok"
+            except pairing.RateLimited:
+                result = "limited"
+            except pairing.PairingFailed:
+                result = "failed"
+            with lock:
+                outcomes.append(result)
+
+        threads = [threading.Thread(target=attempt) for _ in range(20)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(outcomes.count("failed"), pairing.MAX_FAILURES_PER_WINDOW)
+        self.assertEqual(outcomes.count("limited"), 20 - pairing.MAX_FAILURES_PER_WINDOW)
 
     def test_success_does_not_count_as_failure(self):
         for i in range(6):
@@ -432,6 +487,12 @@ class BridgePairRouteTests(BridgeHTTPCase):
                 status, body = self.request("POST", "/pair", raw=raw)
                 self.assertEqual((status, body), (401, {"error": "pairing_failed"}))
                 self.store._failures.clear()
+
+    def test_a_request_without_a_code_does_not_burn_the_open_one(self):
+        code = self.new_code()
+        for raw in (b"{}", b'{"code": "kaputt"}', b"not json"):
+            self.assertEqual(self.request("POST", "/pair", raw=raw)[0], 401)
+        self.assertEqual(self.http_pair(code)[0], 200)
 
     def test_rate_limited_after_five_failures(self):
         self.state_dir.mkdir(mode=0o700)

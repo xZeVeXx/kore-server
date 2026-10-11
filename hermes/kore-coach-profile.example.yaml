@@ -34,3 +34,10 @@ auxiliary:
   # Titel geben; der App-Chat braucht keinen.
   title_generation:
     enabled: false
+
+skills:
+  # Muss aus bleiben (Hermes-Standard). Mit true fuehrt Hermes `!`cmd``-Zeilen aus
+  # SKILL.md per bash aus, sobald ein Skill angezeigt wird — auch im App-Chat, der
+  # das skills-Toolset hat. Die Bridge startet dann nicht; kore-doctor meldet es.
+  # Nur genau `false` (oder den Schluessel weglassen), kein "false" in Anfuehrungszeichen.
+  inline_shell: false

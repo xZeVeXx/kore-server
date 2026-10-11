@@ -373,7 +373,7 @@ class BridgePrivacyTests(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertNotIn("--safe-mode", args)
         self.assertEqual(arg_value(args, "-p"), "test-profile")
-        self.assertEqual(arg_value(args, "-t"), "web,skills,memory,kore")
+        self.assertEqual(arg_value(args, "-t"), "skills,memory,kore")
         self.assertEqual(args[args.index("--resume") + 1], "legacy-session")
         self.assertIn("readiness", sent_prompt(run))
         self.assertTrue(result.used_kore)
@@ -1068,18 +1068,18 @@ class BridgePrivacyTests(unittest.TestCase):
     def test_runtime_configuration_requires_explicit_instance_profile_and_token(self):
         with patch.object(bridge, "TOKEN", ""):
             self.assertIn("KORE_BRIDGE_TOKEN", bridge.runtime_configuration_error())
-        with patch.object(bridge, "TOKEN", "configured"), patch.object(
+        with patch.object(bridge, "TOKEN", TEST_TOKEN), patch.object(
             bridge, "INSTANCE_ID", ""
         ):
             self.assertIn("KORE_INSTANCE_ID", bridge.runtime_configuration_error())
-        with patch.object(bridge, "TOKEN", "configured"), patch.object(
+        with patch.object(bridge, "TOKEN", TEST_TOKEN), patch.object(
             bridge, "PROFILE", ""
         ):
             self.assertIn("KORE_HERMES_PROFILE", bridge.runtime_configuration_error())
         # Der Start haengt nicht mehr an KORE_HERMES_ALLOW_ARGV_PROMPTS: eine vollstaendige
         # Installation laeuft auf dem sicheren Standardweg los, ohne dass jemand eine
         # /proc-Preisgabe quittieren muss.
-        with patch.object(bridge, "TOKEN", "configured"), patch.object(
+        with patch.object(bridge, "TOKEN", TEST_TOKEN), patch.object(
             bridge, "ALLOW_ARGV_PROMPTS", False
         ), patch.object(bridge, "PLAN_ORIGIN_SECRET", "s" * 32), patch.object(
             bridge, "PLAN_ORIGIN_PRINCIPAL", "athlete"
@@ -1098,7 +1098,7 @@ class BridgePrivacyTests(unittest.TestCase):
 
     def test_runtime_configuration_rejects_example_token_and_origin_secret(self):
         complete = {
-            "TOKEN": "configured",
+            "TOKEN": TEST_TOKEN,
             "PLAN_ORIGIN_SECRET": "s" * 32,
             "PLAN_ORIGIN_PRINCIPAL": "athlete",
         }
@@ -1186,11 +1186,11 @@ class BridgePrivacyTests(unittest.TestCase):
                     bridge.validated_bind_host(address)
 
     def test_runtime_configuration_requires_a_hermes_home(self):
-        with patch.object(bridge, "TOKEN", "configured"), patch.object(bridge, "HOME", ""):
+        with patch.object(bridge, "TOKEN", TEST_TOKEN), patch.object(bridge, "HOME", ""):
             self.assertIn("KORE_HERMES_HOME", bridge.runtime_configuration_error())
 
     def test_runtime_configuration_rejects_an_unsafe_bind_host(self):
-        with patch.object(bridge, "TOKEN", "configured"), patch.object(
+        with patch.object(bridge, "TOKEN", TEST_TOKEN), patch.object(
             bridge, "BIND_HOST", "0.0.0.0"
         ):
             self.assertIn("KORE_BRIDGE_BIND_HOST", bridge.runtime_configuration_error())

@@ -228,6 +228,51 @@ class TurnStoreTests(unittest.TestCase):
         with self.assertRaises(bridge.TurnCancelled):
             self.store.attach_process(turn, SimpleNamespace(pid=1))
 
+    # ---- 0.13 S11a: ein Platzkontingent fuer jeden Hermes-Lauf ------------------------------
+
+    def test_a_cancelled_turn_keeps_its_slot_until_its_worker_finishes(self):
+        first, _ = self.store.create(CONVERSATION, "m1", "general")
+        self.store.create(OTHER_CONVERSATION, "m1", "general")
+        with patch("bridge._terminate_process_group", return_value=True):
+            self.store.cancel(first.turn_id)
+
+        # Der Stopp beendet die Prozessgruppe; der Lauf zaehlt, bis sein Worker zurueckkehrt.
+        with self.assertRaises(bridge.TurnsBusy):
+            self.store.create(THIRD_CONVERSATION, "m1", "general")
+        self.finish(first)
+        _, is_new = self.store.create(THIRD_CONVERSATION, "m1", "general")
+        self.assertTrue(is_new)
+
+    def test_a_turn_releases_its_slot_exactly_once(self):
+        turn, _ = self.store.create(CONVERSATION, "m1", "general")
+        again, is_new = self.store.create(CONVERSATION, "m1", "general")  # Wiederholung: kein Platz
+        self.assertFalse(is_new)
+        self.finish(turn)
+        self.finish(again)
+
+        self.assertTrue(self.store.reserve_run())
+        self.assertTrue(self.store.reserve_run())
+        self.assertFalse(self.store.reserve_run())
+
+    def test_synchronous_runs_share_the_cap_with_detached_turns(self):
+        self.assertTrue(self.store.reserve_run())
+        self.store.create(CONVERSATION, "m1", "general")
+
+        with self.assertRaises(bridge.TurnsBusy):
+            self.store.create(OTHER_CONVERSATION, "m1", "general")
+        self.assertFalse(self.store.reserve_run())
+
+        self.store.release_run()
+        _, is_new = self.store.create(OTHER_CONVERSATION, "m1", "general")
+        self.assertTrue(is_new)
+
+    def test_a_full_buffer_gives_the_slot_back(self):
+        with patch.object(bridge, "MAX_BUFFERED_TURNS", 1):
+            self.store.create(CONVERSATION, "m1", "general")
+            with self.assertRaises(bridge.TurnsBusy):
+                self.store.create(OTHER_CONVERSATION, "m1", "general")
+        self.assertTrue(self.store.reserve_run())
+
 
 class TurnEndpointTests(unittest.TestCase):
     def setUp(self):
@@ -359,6 +404,49 @@ class TurnEndpointTests(unittest.TestCase):
 
         self.assertEqual(code, 429)
         self.assertEqual(payload["code"], "busy")
+
+    def test_synchronous_chat_and_adjustment_are_429_while_two_hermes_runs_are_active(self):
+        fake = self.use_hermes(FakeHermes())
+        self.assertEqual(self.start(CONVERSATION)[0], 202)
+        self.assertEqual(self.start(OTHER_CONVERSATION)[0], 202)
+        wait_until(lambda: len(fake.calls) == 2)
+
+        chat = self.json_request("POST", "/coach", {
+            "message": "Hallo", "conversation_id": THIRD_CONVERSATION, "health_context_allowed": False,
+        })
+        adjust = self.json_request("POST", "/coach/adjust-today", {
+            "session": {"name": "Push", "exercises": [
+                {"name": "Bank", "sets": [{"reps": 8, "weight_kg": 80}]},
+            ]},
+            "health_context_allowed": True,
+            "consent_scope_version": bridge.CONSENT_SCOPE_VERSION,
+            "context": {"readiness": 70},
+        })
+
+        for code, payload in (chat, adjust):
+            self.assertEqual(code, 429)
+            self.assertEqual(payload, {"error": bridge.TURN_REQUEST_ERRORS["busy"][1], "code": "busy"})
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_a_running_synchronous_chat_counts_against_the_cap(self):
+        fake = self.use_hermes(FakeHermes(before=records(text("OK"), result_record("OK", SESSION_ID))))
+        answers = []
+        sync = threading.Thread(target=lambda: answers.append(self.json_request("POST", "/coach", {
+            "message": "Hallo", "conversation_id": THIRD_CONVERSATION, "health_context_allowed": False,
+        })))
+        sync.start()
+        wait_until(lambda: len(fake.calls) == 1)
+
+        self.assertEqual(self.start(CONVERSATION)[0], 202)
+        wait_until(lambda: len(fake.calls) == 2)
+        code, payload = self.start(OTHER_CONVERSATION)
+        self.assertEqual((code, payload["code"]), (429, "busy"))
+
+        fake.release.set()
+        sync.join(5)
+        self.assertEqual(answers[0][0], 200)
+        wait_until(lambda: self.store.active_count() == 0)
+        self.assertEqual(self.start(OTHER_CONVERSATION)[0], 202)
 
     def test_invalid_client_message_id_is_rejected_before_any_run(self):
         fake = self.use_hermes(FakeHermes(block=False))

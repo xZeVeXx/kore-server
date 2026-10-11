@@ -37,7 +37,7 @@ SHA-256 hashes of 256-bit random tokens, which cannot be used as tokens; the one
 
 | File | Content |
 |---|---|
-| `pairing.json` | `{"code_sha256": "<hex>", "expires_at": <unix>, "attempts": <int>}` — at most one open code; optional `"device_name"`: label chosen by the operator (`kore-doctor pair --name`), used instead of the name the app sends |
+| `pairing.json` | `{"code_sha256": "<hex>", "expires_at": <unix>, "attempts": <int>}` — at most one open code; `attempts` counts failed attempts with a well-formed code; optional `"device_name"`: label chosen by the operator (`kore-doctor pair --name`), used instead of the name the app sends; `"used": true` once the code was redeemed |
 | `devices.json` | `{"devices": [{"id": "<8 hex>", "name": "<str ≤ 40>", "token_sha256": "<hex>", "created_at": <unix>, "last_seen": <unix\|null>}]}` |
 | `server_id` | 8 hex characters, created once at random (the app shows "Server a1b2c3d4") |
 
@@ -45,10 +45,15 @@ SHA-256 hashes of 256-bit random tokens, which cannot be used as tokens; the one
 
 - 20 characters, RFC 4648 Base32 alphabet `A–Z 2–7`, no padding (100 bit), drawn with `secrets`.
 - Valid for 600 s. Creating a new code replaces any open one.
-- Consumed by the **first** redeem attempt, whether it succeeds or fails.
+- Used up by its **first successful** redeem (single use).
+- A request whose code is not well-formed — after trimming and upper-casing not exactly 20 characters
+  of the alphabet above, or not a string at all — is a failed attempt that never touches the open
+  code. Each failed attempt with a well-formed code counts against the open code; after **5** such
+  failures the code is dead and the operator creates a new one.
 - Compared case-insensitively after trimming whitespace (the stored hash is of the upper-case form).
-- At most 5 failed attempts per minute per client IP address; further attempts get `429` and do not
-  touch the open code.
+- At most 5 failed attempts (well-formed or not) per minute per client IP address; further attempts
+  get `429` and do not touch the open code. The check and the count are one atomic step, so
+  concurrent requests from one address cannot exceed the limit.
 
 ## Link
 
@@ -77,7 +82,7 @@ missing becomes `Device`.
 | Status | Body |
 |---|---|
 | 200 | `{"token": "<43 chars base64url, 256 bit>", "device_id": "<8 hex>", "server_id": "<8 hex>", "scopes": ["coach", "ingest"]}` |
-| 401 | `{"error": "pairing_failed"}` — wrong, expired, used or missing code, malformed body, or pairing unavailable on this server |
+| 401 | `{"error": "pairing_failed"}` — wrong, expired, used, exhausted (5 failed attempts) or missing code, malformed body, or pairing unavailable on this server |
 | 429 | `{"error": "rate_limited"}` |
 | 403 | request carries an `Origin` header (browsers are never allowed; the app sends none) |
 | 413 | body larger than 4096 bytes |

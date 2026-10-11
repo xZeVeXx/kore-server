@@ -8,7 +8,10 @@ Prueft:
 - MCP auf 127.0.0.1 weist ohne Token ab (401) und ist ueber die LAN-Adresse nicht erreichbar.
 - Bridge laeuft und weist ohne Token ab (401); `/health` mit Token meldet jede Faehigkeit aus
   contract/app-required-capabilities.json, `prompt_transport == stdin` und unter
-  `app_chat_toolsets` weder Terminal-, Datei-, Code-, Cron-, Computer- noch Browser-Werkzeuge.
+  `app_chat_toolsets` weder Terminal-, Datei-, Code-, Cron-, Computer- noch Browser-Werkzeuge,
+  im Health-Scope auch kein `web`.
+- KORE_BRIDGE_TOKEN (bridge.env) sowie KORE_INGEST_TOKEN und KORE_MCP_TOKEN (.env) haben
+  mindestens 32 Zeichen.
 - Origin-Geheimnis (per Hash), KORE_INSTANCE_ID und KORE_PLAN_ORIGIN_PRINCIPAL sind in Server und
   Bridge gleich.
 - Das Profil aus KORE_HERMES_PROFILE existiert, `hermes -p <Profil> mcp test kore` gelingt;
@@ -18,6 +21,8 @@ Prueft:
   (z. B. `claude` fuer claude-subscription-directsdk-*) — ohne Modellaufruf, nur `--version` und
   der PATH-Abgleich.
 - Die SOUL.md des Profils enthaelt hermes/kore-app-chat-soul.md in der aktuellen Fassung.
+- `skills.inline_shell` ist in der config.yaml des Profils aus (fehlt oder steht auf false); sonst
+  startet die Bridge nicht.
 
 - Der Zustandsordner der Geraete-Kopplung (KORE_STATE_DIR) existiert mit den Rechten aus
   contract/pairing-v1.md (Ordner 0750, devices.json 0640, Rest 0600); ist KORE_STATE_GID gesetzt,
@@ -67,6 +72,9 @@ INGEST_PORT = 8081
 DEFAULT_MCP_PORT = 8000
 BRIDGE_API_VERSION = 2
 FORBIDDEN_TOOLSETS = ("terminal", "file", "code_execution", "cronjob", "computer_use", "browser")
+# Wie coach-bridge/bridge.py (HEALTH_SCOPE_EXCLUDED_TOOLSETS, MIN_TOKEN_CHARS).
+HEALTH_SCOPE_EXCLUDED_TOOLSETS = ("web",)
+MIN_TOKEN_CHARS = 32
 STATE_DIR_MODE = 0o750
 # Wie coach-bridge/pairing.py (FILE_MODES, PRIVATE_FILE_MODE); test_kore_doctor.py vergleicht beides.
 STATE_FILE_MODES = {"devices.json": 0o640, "pairing.json": 0o600, "server_id": 0o600, ".lock": 0o600}
@@ -87,6 +95,10 @@ _SECRET_KEY_RE = re.compile(r"(TOKEN|SECRET|KEY|PASSWORD)", re.IGNORECASE)
 _PLACEHOLDER_KEYS = {
     "bridge": ("KORE_BRIDGE_TOKEN", "KORE_PLAN_ORIGIN_SECRET"),
     "server": ("KORE_INGEST_TOKEN", "KORE_MCP_TOKEN", "KORE_PLAN_ORIGIN_SECRET"),
+}
+_TOKEN_KEYS = {
+    "bridge": ("KORE_BRIDGE_TOKEN",),
+    "server": ("KORE_INGEST_TOKEN", "KORE_MCP_TOKEN"),
 }
 _TOOLS_DISCOVERED_RE = re.compile(r"Tools discovered: ([0-9]{1,4})")
 SOUL_SECTION = REPO / "hermes" / "kore-app-chat-soul.md"
@@ -224,6 +236,20 @@ def check_placeholders(report: Report, env: dict, kind: str, label: str) -> None
                         "Echten Wert erzeugen: openssl rand -hex 32")
 
 
+def check_token_lengths(report: Report, env: dict, kind: str, label: str) -> None:
+    """Bearer-Token mit mindestens 32 Zeichen; leere und Beispielwerte meldet check_placeholders."""
+    for key in _TOKEN_KEYS[kind]:
+        value = env.get(key, "").strip()
+        if not value or value.lower().startswith("change-me"):
+            continue
+        if len(value) < MIN_TOKEN_CHARS:
+            report.fail(f"{label}: {key} ist kuerzer als {MIN_TOKEN_CHARS} Zeichen.",
+                        "Neu erzeugen: openssl rand -hex 32; danach App bzw. Hermes-Profil anpassen "
+                        "und die Dienste neu starten.")
+        else:
+            report.ok(f"{label}: {key} hat mindestens {MIN_TOKEN_CHARS} Zeichen.")
+
+
 # ---- Bridge ----------------------------------------------------------------------------------
 
 def check_bridge(report: Report, bridge_env: dict, contract: list) -> None:
@@ -291,11 +317,16 @@ def check_bridge(report: Report, bridge_env: dict, contract: list) -> None:
             name for names in toolsets.values() for name in names
             if name in FORBIDDEN_TOOLSETS or name.startswith("hermes-")
         })
+        health_web = sorted(set(toolsets.get("health", ())) & set(HEALTH_SCOPE_EXCLUDED_TOOLSETS))
         if forbidden:
             report.fail("app_chat_toolsets enthaelt gesperrte Werkzeuge: " + ", ".join(forbidden))
+        elif health_web:
+            report.fail("app_chat_toolsets: Health-Scope enthaelt web (Gesundheitskontext koennte ueber "
+                        "Web-Werkzeuge abfliessen).", "kore-server aktualisieren und die Bridge neu starten.")
         else:
             summary = "; ".join(f"{scope}: {','.join(names)}" for scope, names in sorted(toolsets.items()))
-            report.ok(f"app_chat_toolsets ohne Terminal/Datei/Code/Cron/Computer/Browser ({summary}).")
+            report.ok(f"app_chat_toolsets ohne Terminal/Datei/Code/Cron/Computer/Browser, Health ohne web "
+                      f"({summary}).")
 
     for key in ("session_retention_days", "turn_buffer_ttl_hours", "active_turns"):
         value = health.get(key)
@@ -362,6 +393,80 @@ def check_provider_programs(report: Report, profile_dir: Path, child_env: dict, 
     elif program not in reported:
         report.fail(f"Modell-Anbieter {provider} braucht `{program}`, das auf dem Kind-PATH der "
                     "Bridge fehlt.", _path_hint(program))
+
+
+# Wie coach-bridge/bridge.py (inline_shell_config_error); test_kore_doctor.py vergleicht beides.
+_INLINE_SHELL_KEY = "inline_shell"
+_INLINE_SHELL_OFF = frozenset(("false", "False", "FALSE"))
+_YAML_LINE_BREAK_RE = re.compile("\r\n|[\n\r\x85\u2028\u2029]")
+
+
+def _yaml_content(line: str) -> str:
+    if line.lstrip(" \t").startswith("#"):
+        return ""
+    match = re.search(r"[ \t]#", line)
+    return (line[:match.start()] if match else line).rstrip()
+
+
+def inline_shell_config_error(text: str):
+    """None, wenn skills.inline_shell sicher aus ist; streng zeilenbasiert wie die Bridge."""
+    problem = "skills.inline_shell ist an oder nicht eindeutig aus"
+    in_skills = False
+    child_indent = None
+    for raw in _YAML_LINE_BREAK_RE.split(text):
+        content = _yaml_content(raw)
+        if not content.strip():
+            continue
+        body = content.lstrip(" ")
+        indent = len(content) - len(body)
+        key, separator, value = body.partition(":")
+        key, value = key.strip(), value.strip()
+        mentions = _INLINE_SHELL_KEY in body and key != f"{_INLINE_SHELL_KEY}_timeout"
+        if indent == 0:
+            in_skills = bool(separator) and key in ("skills", '"skills"', "'skills'")
+            child_indent = None
+            if in_skills and value not in ("", "{}"):
+                return problem
+            if mentions and not in_skills:
+                return problem
+            continue
+        if not in_skills:
+            if mentions:
+                return problem
+            continue
+        if child_indent is None:
+            child_indent = indent
+        if indent > child_indent:
+            if mentions:
+                return problem
+            continue
+        if indent < child_indent or not separator or key.startswith("<<"):
+            return problem
+        if key == _INLINE_SHELL_KEY:
+            if value not in _INLINE_SHELL_OFF:
+                return problem
+        elif mentions:
+            return problem
+    return None
+
+
+def check_inline_shell(report: Report, profile_dir: Path, profile: str) -> None:
+    config = profile_dir / "config.yaml"
+    try:
+        text = config.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        text = ""
+    except (OSError, UnicodeDecodeError):
+        report.fail(f"skills.inline_shell nicht pruefbar: {config} ist nicht lesbar.",
+                    "Als Nutzer der Bridge ausfuehren.")
+        return
+    if inline_shell_config_error(text) is None:
+        report.ok(f"skills.inline_shell ist im Profil {profile} aus.")
+    else:
+        report.fail(f"skills.inline_shell ist im Profil {profile} an oder nicht eindeutig aus; Hermes "
+                    "fuehrt damit Shell-Befehle aus Skills aus, und die Bridge startet nicht.",
+                    f"In {config} unter `skills:` genau `inline_shell: false` setzen oder den "
+                    "Schluessel entfernen.")
 
 
 def _normalized(text: str) -> str:
@@ -436,6 +541,7 @@ def check_hermes(report: Report, bridge_env: dict) -> None:
         return
     check_provider_programs(report, profile_dir, child_env, reported)
     check_soul(report, profile_dir, profile)
+    check_inline_shell(report, profile_dir, profile)
 
     try:
         test = subprocess.run([hermes, "-p", profile, "mcp", "test", "kore"], capture_output=True,
@@ -836,6 +942,7 @@ def main(argv=None) -> int:
                            "Pfad mit --bridge-env angeben; als Nutzer der Bridge ausfuehren.")
     if bridge_env is not None:
         check_placeholders(report, bridge_env, "bridge", "bridge.env")
+        check_token_lengths(report, bridge_env, "bridge", "bridge.env")
         if contract is not None:
             check_bridge(report, bridge_env, contract)
         check_hermes(report, bridge_env)
@@ -856,6 +963,7 @@ def main(argv=None) -> int:
             check_ingest(report, ingest_url)
         if server_env is not None:
             check_placeholders(report, server_env, "server", "Server-.env")
+            check_token_lengths(report, server_env, "server", "Server-.env")
             try:
                 mcp_port = int(server_env.get("KORE_MCP_PORT") or DEFAULT_MCP_PORT)
             except ValueError:

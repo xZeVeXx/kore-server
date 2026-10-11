@@ -115,7 +115,7 @@ class DoctorTestCase(unittest.TestCase):
             "api_version": 2,
             "prompt_transport": "stdin",
             "app_chat_toolsets": {"general": ["web", "skills", "memory"],
-                                  "health": ["web", "skills", "memory", "kore"]},
+                                  "health": ["skills", "memory", "kore"]},
             "open_without_token": False,
         }
         self.ingest_state = {"health_status": 200, "origin_status": 403}
@@ -263,6 +263,8 @@ class DoctorEndToEndTests(DoctorTestCase):
             ("hermes-Sammelname", lambda: self.bridge_state["app_chat_toolsets"]["health"].append("hermes-cli"),
              "hermes-cli"),
             ("Werkzeugliste fehlt", lambda: self.bridge_state.pop("app_chat_toolsets"), "app_chat_toolsets"),
+            ("web im Health-Scope", lambda: self.bridge_state["app_chat_toolsets"]["health"].insert(0, "web"),
+             "Health-Scope enthaelt web"),
             ("Bridge offen", lambda: self.bridge_state.update(open_without_token=True), "401"),
             ("Ingest krank", lambda: self.ingest_state.update(health_status=500), "Ingest"),
             ("Origin durchgelassen", lambda: self.ingest_state.update(origin_status=200), "Origin"),
@@ -377,6 +379,73 @@ class DoctorHermesChildEnvTests(DoctorTestCase):
 
         self.assertEqual(code, 0, output)
         self.assertIn("Modell-Anbieter des Profils: openrouter", output)
+
+
+class DoctorS11aTests(DoctorTestCase):
+    """0.13 S11a: Token-Laenge und skills.inline_shell im Profil."""
+
+    def test_tokens_shorter_than_32_characters_are_deviations(self):
+        for key in ("KORE_BRIDGE_TOKEN", "KORE_INGEST_TOKEN", "KORE_MCP_TOKEN"):
+            with self.subTest(key):
+                self.setUp()
+                short = "k" * 31
+                if key == "KORE_BRIDGE_TOKEN":
+                    self.bridge_token = short
+                    self.bridge_env_values[key] = short
+                elif key == "KORE_INGEST_TOKEN":
+                    self.ingest_token = short
+                    self.server_env_values[key] = short
+                else:
+                    self.mcp_token = short
+                    self.server_env_values[key] = short
+                    self.hermes_config["leak"] = short
+                    self.write_hermes_config()
+                self.write_envs()
+
+                code, output = self.run_doctor()
+
+                self.assertNotEqual(code, 0, output)
+                self.assertIn(f"{key} ist kuerzer als 32 Zeichen", output)
+
+    def test_a_long_enough_token_is_reported_as_ok(self):
+        code, output = self.run_doctor()
+        self.assertEqual(code, 0, output)
+        self.assertIn("KORE_BRIDGE_TOKEN hat mindestens 32 Zeichen", output)
+
+    def test_inline_shell_in_the_profile_is_a_deviation(self):
+        config = self.profile_dir / "config.yaml"
+        config.write_text(config.read_text() + "skills:\n  inline_shell: true\n")
+        code, output = self.run_doctor(bridge_only=True)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("[FEHLER] skills.inline_shell", output)
+
+    def test_inline_shell_off_or_missing_is_ok(self):
+        for extra in ("", "skills:\n  inline_shell: false\n"):
+            with self.subTest(extra=extra):
+                config = self.profile_dir / "config.yaml"
+                config.write_text("model:\n  provider: claude-subscription-directsdk-experimental\n" + extra)
+                code, output = self.run_doctor(bridge_only=True)
+                self.assertEqual(code, 0, output)
+                self.assertIn("[OK]     skills.inline_shell", output)
+
+    def test_doctor_and_bridge_judge_inline_shell_alike(self):
+        process = subprocess.run(
+            [sys.executable, "-c",
+             "import json, bridge\n"
+             "from test_hardening import INLINE_SHELL_SAFE, INLINE_SHELL_UNSAFE\n"
+             "texts = list(INLINE_SHELL_SAFE.values()) + list(INLINE_SHELL_UNSAFE.values())\n"
+             "print(json.dumps([[t, bridge.inline_shell_config_error(t) is None] for t in texts]))"],
+            capture_output=True, text=True, timeout=30, cwd=BRIDGE_DIR,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(BRIDGE_DIR),
+                 "HOME": self.tmp.name},
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        verdicts = json.loads(process.stdout)
+        self.assertGreater(len(verdicts), 20)
+        doctor = load_doctor()
+        for text, bridge_safe in verdicts:
+            with self.subTest(text=text):
+                self.assertEqual(doctor.inline_shell_config_error(text) is None, bridge_safe)
 
 
 class DoctorSoulTests(DoctorTestCase):

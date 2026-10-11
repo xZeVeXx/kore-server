@@ -1,14 +1,15 @@
 """Device pairing for the Kore coach bridge (contract/pairing-v1.md). Standard library only.
 
-A one-time code (20 Base32 characters, valid 600 s, consumed by the first redeem attempt) is
-exchanged for a device token (256 bit). The token leaves the server exactly once, in the
+A one-time code (20 Base32 characters, valid 600 s, used up by its first successful redeem or by
+five failed attempts with a well-formed code) is exchanged for a device token (256 bit). The token leaves the server exactly once, in the
 `POST /pair` response; on disk there is only its SHA-256.
 
 State lives in `KORE_STATE_DIR` (default: `state/` in the repository root, next to
 `docker-compose.yml`, which mounts the same directory read-only into the ingest container):
 
-    pairing.json  {"code_sha256": "<hex>", "expires_at": <unix>, "attempts": <int>[, "device_name": "<str>"]}
-                  (one open code; device_name is the operator's label from `kore-doctor pair --name`)
+    pairing.json  {"code_sha256": "<hex>", "expires_at": <unix>, "attempts": <int>[, "device_name": "<str>"][, "used": true]}
+                  (one open code; attempts = failed attempts with a well-formed code; device_name is
+                  the operator's label from `kore-doctor pair --name`; used = redeemed successfully)
     devices.json  {"devices": [{"id", "name", "token_sha256", "created_at", "last_seen"}]}
     server_id     8 hex characters, created once
 
@@ -55,6 +56,10 @@ PRIVATE_FILE_MODE = 0o600
 CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"  # RFC 4648 Base32, no padding
 CODE_LENGTH = 20  # 100 bit
 CODE_TTL_S = 600
+# Failed attempts with a well-formed code before the open code is dead. A request without a
+# well-formed code (CODE_LENGTH characters of CODE_ALPHABET after trimming/upper-casing) never
+# reaches the code, so a stray or malformed request cannot burn it.
+MAX_FAILED_ATTEMPTS_PER_CODE = 5
 MAX_FAILURES_PER_WINDOW = 5
 RATE_WINDOW_S = 60
 DEVICE_NAME_MAX = 40
@@ -63,6 +68,7 @@ LAST_SEEN_INTERVAL_S = 60
 SCOPES = ("coach", "ingest")
 
 _ID_RE = re.compile(r"[0-9a-f]{8}\Z")
+_CODE_RE = re.compile(f"[{CODE_ALPHABET}]{{{CODE_LENGTH}}}\\Z")
 
 log = logging.getLogger("kore.pairing")
 
@@ -220,6 +226,9 @@ class PairingStore:
 
     def redeem(self, code, device_name, client_ip, now=None) -> dict:
         now = time.time() if now is None else now
+        # Check and count in one step: the attempt is booked as a failure before it runs and
+        # handed back only on success, so concurrent requests from one address cannot all slip
+        # past a limit that none of them has filled yet.
         with self._memory_lock:
             for address in list(self._failures):
                 recent = [t for t in self._failures[address] if now - t < RATE_WINDOW_S]
@@ -227,23 +236,32 @@ class PairingStore:
                     self._failures[address] = recent
                 else:
                     del self._failures[address]
-            if len(self._failures.get(client_ip, ())) >= MAX_FAILURES_PER_WINDOW:
+            booked = self._failures.setdefault(client_ip, [])
+            if len(booked) >= MAX_FAILURES_PER_WINDOW:
                 log.warning("pairing: rate limited %s", client_ip)
                 raise RateLimited()
+            booked.append(now)
         try:
             result = self._redeem(code, sanitize_device_name(device_name), now)
         except PairingFailed:
-            with self._memory_lock:
-                self._failures.setdefault(client_ip, []).append(now)
             log.warning("pairing: failed attempt from %s", client_ip)
             raise
+        with self._memory_lock:
+            booked = self._failures.get(client_ip)
+            if booked is not None and now in booked:
+                booked.remove(now)
+                if not booked:
+                    del self._failures[client_ip]
         log.info("pairing: paired device %s from %s", result["device_id"], client_ip)
         return result
 
     def _redeem(self, code, name: str, now) -> dict:
+        normalized = _normalized_code(code)
+        if _CODE_RE.fullmatch(normalized) is None:
+            raise PairingFailed()  # not a code at all: the open code is not touched
         if self.unavailable_reason() is not None:
             raise PairingFailed()
-        supplied = hash_secret(_normalized_code(code)).encode("ascii")
+        supplied = hash_secret(normalized).encode("ascii")
         with self._locked():
             pending = self._read_json(PAIRING_FILE, None)
             if not isinstance(pending, dict):
@@ -254,11 +272,15 @@ class PairingStore:
             if not (isinstance(attempts, int) and isinstance(expires_at, (int, float))
                     and isinstance(expected, str)):
                 raise PairingFailed()
-            # Consume first: the code is gone after this attempt, whatever its outcome.
-            self._write_json(PAIRING_FILE, {**pending, "attempts": attempts + 1})
-            matches = hmac.compare_digest(supplied, expected.encode("utf-8", "surrogatepass"))
-            if attempts != 0 or now >= expires_at or not matches:
+            if (pending.get("used") is not None or attempts >= MAX_FAILED_ATTEMPTS_PER_CODE
+                    or now >= expires_at):
                 raise PairingFailed()
+            matches = hmac.compare_digest(supplied, expected.encode("utf-8", "surrogatepass"))
+            if not matches:
+                self._write_json(PAIRING_FILE, {**pending, "attempts": attempts + 1})
+                raise PairingFailed()
+            # Single use: the code is spent before the device exists.
+            self._write_json(PAIRING_FILE, {**pending, "used": True})
             label = pending.get("device_name")
             if isinstance(label, str) and label:
                 name = sanitize_device_name(label)

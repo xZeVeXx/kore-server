@@ -172,7 +172,9 @@ class StreamJsonRunnerTests(unittest.TestCase):
 
     def test_toolsets_are_a_positive_allowlist_without_shell_file_or_session_search(self):
         self.assertEqual(bridge.APP_CHAT_TOOLSETS["general"], ("web", "skills", "memory"))
-        self.assertEqual(bridge.APP_CHAT_TOOLSETS["health"], ("web", "skills", "memory", "kore"))
+        # 0.13 (Entscheidung 11.10.): kein web im Health-Scope — sonst koennte ein Health-Turn den
+        # Gesundheitskontext ueber web_extract/web_search an eine fremde Adresse tragen.
+        self.assertEqual(bridge.APP_CHAT_TOOLSETS["health"], ("skills", "memory", "kore"))
         self.assertEqual(
             bridge.FORBIDDEN_TOOLSETS,
             ("terminal", "file", "code_execution", "cronjob", "computer_use", "browser"),
@@ -187,10 +189,9 @@ class StreamJsonRunnerTests(unittest.TestCase):
     def test_kore_toolset_only_in_health_scope_with_origin_ticket(self):
         self.assertEqual(bridge.toolsets_for("general", False), ("web", "skills", "memory"))
         self.assertEqual(bridge.toolsets_for("general", True), ("web", "skills", "memory"))
-        self.assertEqual(bridge.toolsets_for("health", False), bridge.toolsets_for("general", False))
-        self.assertEqual(
-            bridge.toolsets_for("health", True), ("web", "skills", "memory", "kore")
-        )
+        # Ohne Ticket (z. B. Tages-Anpassung) bleibt der Health-Scope ohne kore UND ohne web.
+        self.assertEqual(bridge.toolsets_for("health", False), ("skills", "memory"))
+        self.assertEqual(bridge.toolsets_for("health", True), ("skills", "memory", "kore"))
         with self.assertRaises(ValueError):
             bridge.toolsets_for("other", True)
 
@@ -214,14 +215,14 @@ class StreamJsonRunnerTests(unittest.TestCase):
         resumed = bridge.hermes_args(
             profile="kore-coach",
             scope="health",
-            toolsets=("web", "skills", "memory", "kore"),
+            toolsets=("skills", "memory", "kore"),
             run_budget_s=135,
             max_turns="4",
             resume_id=FIXTURE_SESSION,
         )
         self.assertEqual(resumed[-2:], ["--resume", FIXTURE_SESSION])
         self.assertEqual(arg_value(resumed, "--source"), "kore-health")
-        self.assertEqual(arg_value(resumed, "-t"), "web,skills,memory,kore")
+        self.assertEqual(arg_value(resumed, "-t"), "skills,memory,kore")
         for forbidden in ("--safe-mode", "--ignore-rules", "-q", "--query"):
             self.assertNotIn(forbidden, resumed)
 
@@ -243,6 +244,7 @@ class StreamJsonRunnerTests(unittest.TestCase):
             ("hermes bundle", {"toolsets": ("hermes-cli",)}),
             ("session_search", {"toolsets": ("session_search",)}),
             ("no toolsets", {"toolsets": ()}),
+            ("web im Health-Scope", {"scope": "health", "toolsets": ("web", "skills", "memory")}),
             ("resume flag", {"resume_id": "--yolo"}),
             ("max turns", {"max_turns": "13"}),
             ("budget", {"run_budget_s": 0}),
@@ -440,7 +442,7 @@ class StreamJsonRunnerTests(unittest.TestCase):
     @patch("bridge._run_process_bounded")
     def test_health_scope_uses_kore_only_with_a_ticket_and_never_safe_mode(self, run):
         run.side_effect = hermes_process(reply_stream())
-        for ticket, expected in ((None, "web,skills,memory"), ("tkt.sig", "web,skills,memory,kore")):
+        for ticket, expected in ((None, "skills,memory"), ("tkt.sig", "skills,memory,kore")):
             with self.subTest(ticket=ticket):
                 bridge.run_turn(
                     "Wie steht es?", scope="health", conversation_id=CONVERSATION,
@@ -589,7 +591,7 @@ class StreamJsonRunnerTests(unittest.TestCase):
         self.assertNotIn("safe_mode_without_health_v1", capabilities)
         self.assertEqual(health["app_chat_toolsets"], {
             "general": ["web", "skills", "memory"],
-            "health": ["web", "skills", "memory", "kore"],
+            "health": ["skills", "memory", "kore"],
         })
 
     def post(self, path, payload):
@@ -657,6 +659,7 @@ class StreamJsonRunnerTests(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertEqual(arg_value(args, "--source"), "kore-health")
         self.assertEqual(arg_value(args, "-t"), ",".join(bridge.toolsets_for("health", False)))
+        self.assertNotIn("web", arg_value(args, "-t").split(","))
         self.assertEqual(arg_value(args, "--max-turns"), "4")
         self.assertEqual(arg_value(args, "-p"), "kore-coach")
         self.assertNotIn("--safe-mode", args)

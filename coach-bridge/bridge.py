@@ -26,6 +26,7 @@ Coach-Upgrade 2026-06-10:
 import base64
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import logging
@@ -33,13 +34,16 @@ import math
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -235,10 +239,15 @@ BRIDGE_CAPABILITIES = (
 # nimmt Hermes die Plattform-Toolsets des Profils, mit -t nur diese. `session_search` fehlt
 # bewusst (kein Wissen ueber Chats und Kanaele hinweg). Erweitern heisst: Konstante aendern und
 # die Hermes-Probe erneut.
+# 0.13 (Entscheidung 11.10.2026): kein `web` im Health-Scope. Ein Health-Turn traegt den
+# Gesundheitskontext im Prompt; mit web_extract/web_search koennte eingeschleuster Text ihn an eine
+# fremde Adresse schicken. Der allgemeine Chat ohne Health-Kontext behaelt die Websuche.
 APP_CHAT_TOOLSETS = {
     "general": ("web", "skills", "memory"),
-    "health": ("web", "skills", "memory", "kore"),
+    "health": ("skills", "memory", "kore"),
 }
+# Werkzeuge, die im Health-Scope nie in -t stehen duerfen (auch ohne Ticket).
+HEALTH_SCOPE_EXCLUDED_TOOLSETS = ("web",)
 FORBIDDEN_TOOLSETS = ("terminal", "file", "code_execution", "cronjob", "computer_use", "browser")
 _APP_CHAT_TOOLSET_NAMES = frozenset(name for names in APP_CHAT_TOOLSETS.values() for name in names)
 # Hermes soll vor dem harten Kill der Bridge selbst abschliessen koennen.
@@ -525,18 +534,122 @@ def reject_placeholder(name: str, value) -> None:
         )
 
 
+# Das Bridge-Token ist zugleich der HMAC-Schluessel der Session-Referenzen (_session_signature).
+MIN_TOKEN_CHARS = 32
+
+
+def profile_config_path() -> str:
+    """config.yaml des Profils, wie kore-doctor sie findet: <HOME>/.hermes/config.yaml fuer das
+    Profil `default`, sonst <HOME>/.hermes/profiles/<Profil>/config.yaml."""
+    base = os.path.join(HOME, ".hermes")
+    if PROFILE != "default":
+        base = os.path.join(base, "profiles", PROFILE)
+    return os.path.join(base, "config.yaml")
+
+
+_INLINE_SHELL_KEY = "inline_shell"
+# Nur das schlichte YAML-false. "no"/"off" sind nur in YAML 1.1 falsch, ein gequotetes "false" ist
+# in Python ein wahrer String — beides gilt als an.
+_INLINE_SHELL_OFF = frozenset(("false", "False", "FALSE"))
+# Zeilenumbrueche im Sinne von YAML (nicht str.splitlines, das auch an \x0b, \x1c-\x1e trennt).
+_YAML_LINE_BREAK_RE = re.compile("\r\n|[\n\r\x85\u2028\u2029]")
+
+
+def _yaml_content(line: str) -> str:
+    """Zeile ohne Kommentar: '#' am Zeilenanfang oder nach Leerraum beginnt einen Kommentar."""
+    if line.lstrip(" \t").startswith("#"):
+        return ""
+    match = re.search(r"[ \t]#", line)
+    return (line[:match.start()] if match else line).rstrip()
+
+
+def inline_shell_config_error(text: str):
+    """None, wenn `skills.inline_shell` in diesem config.yaml-Text sicher aus ist, sonst ein Satz.
+
+    Mit `skills.inline_shell: true` fuehrt Hermes `!`cmd`` aus SKILL.md per bash aus, sobald ein
+    Skill angezeigt wird (agent/skill_preprocessing.py) — und skill_manage/skill_view liegen im
+    skills-Toolset jedes App-Chats. Streng zeilenbasiert, ohne YAML-Bibliothek: Erlaubt ist der
+    Schluessel nur als direkte Zeile `inline_shell: false` (False, FALSE) im Block `skills:` auf
+    oberster Ebene; fehlt er, gilt der Hermes-Standard (aus). Alles Unklare gilt als an (fail
+    closed): ein anderer Wert, ein skills-Wert in derselben Zeile (Flow-Mapping, Anker, Alias),
+    ein Merge-Key `<<` im Block, jede andere Erwaehnung von inline_shell (gequotet, tiefer
+    verschachtelt, unter einem anderen Schluessel).
+    """
+    problem = ("skills.inline_shell is on or not unambiguously off in the Hermes profile; Hermes "
+               "would run shell commands from skills. Set `inline_shell: false` under `skills:` "
+               "or remove the key")
+    in_skills = False
+    child_indent = None
+    for raw in _YAML_LINE_BREAK_RE.split(text):
+        content = _yaml_content(raw)
+        if not content.strip():
+            continue
+        body = content.lstrip(" ")
+        indent = len(content) - len(body)
+        key, separator, value = body.partition(":")
+        key, value = key.strip(), value.strip()
+        mentions = _INLINE_SHELL_KEY in body and key != f"{_INLINE_SHELL_KEY}_timeout"
+        if indent == 0:
+            in_skills = bool(separator) and key in ("skills", '"skills"', "'skills'")
+            child_indent = None
+            if in_skills and value not in ("", "{}"):
+                return problem
+            if mentions and not in_skills:
+                return problem
+            continue
+        if not in_skills:
+            if mentions:
+                return problem
+            continue
+        if child_indent is None:
+            child_indent = indent
+        if indent > child_indent:
+            if mentions:
+                return problem
+            continue
+        if indent < child_indent or not separator or key.startswith("<<"):
+            return problem
+        if key == _INLINE_SHELL_KEY:
+            if value not in _INLINE_SHELL_OFF:
+                return problem
+        elif mentions:
+            return problem
+    return None
+
+
+def profile_inline_shell_error():
+    """Startsperre fuer skills.inline_shell im Profil der Bridge; None, wenn sicher aus."""
+    path = profile_config_path()
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        return None  # keine config.yaml: Hermes-Standard, inline_shell aus
+    except (OSError, UnicodeDecodeError):
+        return f"skills.inline_shell cannot be checked: {path} is not readable"
+    error = inline_shell_config_error(text)
+    return f"{error} ({path})" if error else None
+
+
 def runtime_configuration_error():
     """Return a non-secret startup error for an unsafe/incomplete deployment."""
     try:
         reject_placeholder("KORE_BRIDGE_TOKEN", TOKEN)
     except ValueError as error:
         return str(error)
+    if len(TOKEN) < MIN_TOKEN_CHARS:
+        return (
+            f"KORE_BRIDGE_TOKEN must contain at least {MIN_TOKEN_CHARS} characters (it also keys "
+            "the session signatures); generate one with: openssl rand -hex 32"
+        )
     if not HOME:
         return "KORE_HERMES_HOME must be configured (or HOME set for the service user)"
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(INSTANCE_ID) is None:
         return "KORE_INSTANCE_ID must be configured as a safe explicit instance identifier"
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(PROFILE) is None:
         return "KORE_HERMES_PROFILE must be configured explicitly for this instance"
+    if error := profile_inline_shell_error():
+        return error
     try:
         validated_bind_host(BIND_HOST)
     except ValueError as error:
@@ -566,6 +679,23 @@ def hermes_child_env(parent_env=None) -> dict:
         if isinstance(value, str) and value:
             child[key] = value
     return child
+
+
+@contextmanager
+def hermes_working_dir():
+    """Frischer, leerer, privater Arbeitsordner (0700) fuer genau einen Hermes-Lauf; danach weg.
+
+    Nie HOME: Hermes laedt AGENTS.md/CLAUDE.md/.cursorrules/.hermes.md aus dem Arbeitsordner (bei
+    einem Git-Repo die Kette bis zur Wurzel) in den Systemprompt. Der Ordner liegt im Temp-Ordner
+    des Dienstes (unter systemd mit PrivateTmp ein eigenes /tmp), ausserhalb jedes Repos, und ist
+    fuer jeden Lauf neu, damit kein Lauf dem naechsten eine Kontextdatei hinterlaesst. HOME im
+    Kind-Env bleibt unveraendert (Hermes findet sein Profil darueber).
+    """
+    path = tempfile.mkdtemp(prefix="kore-hermes-")
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def validated_content_length(raw_value) -> int:
@@ -847,11 +977,13 @@ def origin_ticket_for(scope: str, conversation_id):
 
 
 def toolsets_for(scope: str, has_origin_ticket: bool) -> tuple:
-    """-t-Liste pro Turn: kore-MCP nur im Health-Scope mit Ticket, sonst die allgemeine Liste."""
+    """-t-Liste pro Turn: kore-MCP nur im Health-Scope mit Ticket; der Health-Scope ohne Ticket
+    (z. B. die Tages-Anpassung) bekommt dieselbe Liste ohne kore — und damit auch ohne web."""
     if scope not in _SESSION_SCOPES:
         raise ValueError("scope is invalid")
-    if scope == "health" and has_origin_ticket:
-        return APP_CHAT_TOOLSETS["health"]
+    if scope == "health":
+        names = APP_CHAT_TOOLSETS["health"]
+        return names if has_origin_ticket else tuple(name for name in names if name != "kore")
     return APP_CHAT_TOOLSETS["general"]
 
 
@@ -881,6 +1013,8 @@ def hermes_args(*, profile: str, scope: str, toolsets: tuple, run_budget_s: int,
         or any(name in FORBIDDEN_TOOLSETS or name.startswith("hermes-") for name in toolsets)
     ):
         raise ValueError("toolsets are outside the app-chat allowlist")
+    if scope == "health" and any(name in HEALTH_SCOPE_EXCLUDED_TOOLSETS for name in toolsets):
+        raise ValueError("the health scope never runs with web tools")
     if type(run_budget_s) is not int or run_budget_s < 1:
         raise ValueError("run_budget_s must be a positive integer")
     if resume_id is not None and not valid_session_token(resume_id):
@@ -979,8 +1113,22 @@ def plan_origin_directive(origin_ticket=None) -> str:
     )
 
 
+# Erste Zeile JEDES Prompts (0.13 S11a). Hermes prueft im Einmal-Modus den Anfang der Anfrage auf
+# einen Dateipfad (hermes_cli/cli_terminal_input.py: _detect_file_drop ueber _collect_query_images:
+# optional ein Anfuehrungszeichen, dann /, ~, ./, ../, file:// oder ein Laufwerk wie C:/) und haengt
+# eine gefundene Bilddatei an das Vision-Modell — vorbei an der -t-Allowlist. Beginnt die Anfrage
+# immer mit dieser festen Zeile, steht Nutzertext nie am Anfang.
+PROMPT_HEADER = "[KORE-APP-NACHRICHT]"
+
+
 def build_prompt(message: str, context, health_context_allowed: bool,
                  origin_ticket=None) -> str:
+    return f"{PROMPT_HEADER}\n" + _prompt_body(
+        message, context, health_context_allowed, origin_ticket=origin_ticket
+    )
+
+
+def _prompt_body(message: str, context, health_context_allowed: bool, origin_ticket=None) -> str:
     origin_instruction = plan_origin_directive(origin_ticket)
     if not health_context_allowed:
         return (
@@ -1438,16 +1586,17 @@ def _run_hermes_once(args, prompt_bytes, on_delta, on_process):
                 on_delta(delta)
 
     try:
-        process = _run_process_bounded(
-            args,
-            cwd=HOME,
-            env=hermes_child_env(),
-            timeout=TIMEOUT,
-            output_limit=MAX_OUTPUT_BYTES,
-            input_bytes=prompt_bytes,
-            on_stdout_line=on_line,
-            on_process=on_process,
-        )
+        with hermes_working_dir() as cwd:
+            process = _run_process_bounded(
+                args,
+                cwd=cwd,
+                env=hermes_child_env(),
+                timeout=TIMEOUT,
+                output_limit=MAX_OUTPUT_BYTES,
+                input_bytes=prompt_bytes,
+                on_stdout_line=on_line,
+                on_process=on_process,
+            )
     except subprocess.TimeoutExpired:
         return None, None, "timeout", streamed
     except HermesOutputLimitExceeded:
@@ -1666,16 +1815,34 @@ class Turn:
     pgid: "int | None" = None
     redactor: TicketRedactor = field(default_factory=lambda: TicketRedactor(None), repr=False)
     process: object = field(default=None, repr=False)
+    # Haelt einen Platz im Kontingent der Hermes-Laeufe, bis der Worker zurueckkehrt (finish).
+    holds_slot: bool = field(default=False, repr=False)
 
 
 class TurnStore:
-    """Turn-Puffer im RAM. Alle Zustandswechsel laufen unter einer Bedingung, auf die SSE wartet."""
+    """Turn-Puffer im RAM. Alle Zustandswechsel laufen unter einer Bedingung, auf die SSE wartet.
+
+    Dazu das eine Kontingent fuer JEDEN Hermes-Lauf der Bridge (0.13 S11a): hoechstens
+    MAX_RUNNING_TURNS gleichzeitig, ob Turn im Hintergrund, synchroner Chat ohne client_message_id
+    oder Tages-Anpassung (die Titelsuche laeuft innerhalb dieser Laeufe). Ein Turn haelt seinen
+    Platz, bis sein Worker zurueckkehrt — auch nach Stopp oder Frist, solange Hermes noch endet.
+    """
 
     def __init__(self, clock=time.monotonic):
         self._clock = clock
         self._cond = threading.Condition()
         self._turns = {}
         self._index = {}  # (conversation_id, client_message_id) -> turn_id
+        self._slots = threading.BoundedSemaphore(MAX_RUNNING_TURNS)
+
+    # -- Kontingent fuer synchrone Laeufe --
+
+    def reserve_run(self) -> bool:
+        """Ein Platz fuer einen synchronen Hermes-Lauf; False, wenn alle belegt sind."""
+        return self._slots.acquire(blocking=False)
+
+    def release_run(self) -> None:
+        self._slots.release()
 
     # -- Anlegen und Nachschlagen --
 
@@ -1689,11 +1856,12 @@ class TurnStore:
             running = self._running_for(conversation_id)
             if running is not None:
                 raise TurnInProgress(running)
-            if self._active_count() >= MAX_RUNNING_TURNS:
+            if not self._slots.acquire(blocking=False):
                 raise TurnsBusy()
             while len(self._turns) >= MAX_BUFFERED_TURNS:
                 finished = [t for t in self._turns.values() if t.status in TURN_FINISHED_STATES]
                 if not finished:
+                    self._slots.release()
                     raise TurnsBusy()
                 self._remove(min(finished, key=lambda t: t.ended_at))
             turn = Turn(
@@ -1703,6 +1871,7 @@ class TurnStore:
                 scope=scope,
                 started_at=self._clock(),
                 redactor=TicketRedactor(origin_ticket),
+                holds_slot=True,
             )
             self._turns[turn.turn_id] = turn
             self._index[(conversation_id, client_message_id)] = turn.turn_id
@@ -1774,8 +1943,12 @@ class TurnStore:
 
     def finish(self, turn, outcome, failure_class=None) -> None:
         """Ende aus dem Worker. Ein Turn, der schon gestoppt oder abgelaufen ist, bleibt so.
-        `failure_class` gilt nur ohne Ergebnis (Ausnahme im Worker) und nur fuers Journal."""
+        `failure_class` gilt nur ohne Ergebnis (Ausnahme im Worker) und nur fuers Journal.
+        Gibt in jedem Fall den Platz des Turns frei: der Worker ist fertig, Hermes laeuft nicht mehr."""
         with self._cond:
+            if turn.holds_slot:
+                turn.holds_slot = False
+                self._slots.release()
             if turn.status != "running":
                 return
             self._emit_delta(turn, turn.redactor.flush())
@@ -1983,7 +2156,7 @@ def _sweep_turns_forever(store: TurnStore) -> None:
 
 # ---- Loeschen und Verfall der Kore-Sessions (0.10) ----------------------------
 # Nur ueber die Hermes-CLI, nur Sessions der Quellen kore-general/kore-health; das Gedaechtnis
-# des Profils (memories/, Honcho) fasst die Bridge nie an.
+# des Profils (memories/, ein externer Gedaechtnis-Provider) fasst die Bridge nie an.
 # Hermes v0.21.4: `sessions prune` verweigert, solange ein anderer Prozess (Hermes
 # Desktop, `hermes serve`) die state.db des Profils haelt. Ausgewaehlt wird deshalb nur lesend
 # (`prune --dry-run`, `list`), geloescht jede ID einzeln mit `sessions delete --yes <id>` — das
@@ -2011,13 +2184,14 @@ def _kore_source(scope: str) -> str:
 def run_hermes_sessions(args, output_limit: int = MAX_OUTPUT_BYTES, timeout=None):
     """`hermes -p <Profil> sessions …` begrenzt; None, wenn der Lauf nicht sauber endete."""
     try:
-        return _run_process_bounded(
-            [HERMES, "-p", PROFILE, "sessions", *args],
-            cwd=HOME,
-            env=hermes_child_env(),
-            timeout=SESSION_CLI_TIMEOUT_S if timeout is None else timeout,
-            output_limit=output_limit,
-        )
+        with hermes_working_dir() as cwd:
+            return _run_process_bounded(
+                [HERMES, "-p", PROFILE, "sessions", *args],
+                cwd=cwd,
+                env=hermes_child_env(),
+                timeout=SESSION_CLI_TIMEOUT_S if timeout is None else timeout,
+                output_limit=output_limit,
+            )
     except (OSError, subprocess.TimeoutExpired, HermesOutputLimitExceeded, HermesInvocationError):
         return None
 
@@ -2144,6 +2318,21 @@ def delete_hermes_session(hermes_session_id: str) -> str:
     return "failed"
 
 
+def delete_listed_session(hermes_session_id: str, scope: str) -> str:
+    """Loescht eine aus Hermes-Textausgaben (`list`, `prune --dry-run`) gelesene ID nur, wenn ihr
+    eigener Export die Kore-Quelle dieses Scopes nennt: "deleted" | "not_found" | "failed".
+
+    Die Listen sind fuer Menschen gemacht; eine Vorschau oder ein Titel mit Zeilentrennern (U+2028,
+    \x0b, \x1c-\x1e, \x85 trennen fuer str.splitlines) kann eine fremde ID an ein Zeilenende
+    setzen. Deshalb entscheidet nie die Liste, sondern der Export der Session selbst."""
+    record = _session_record(hermes_session_id)
+    if record == "not_found":
+        return "not_found"
+    if not isinstance(record, dict) or record.get("source") != _kore_source(scope):
+        return "failed"
+    return delete_hermes_session(hermes_session_id)
+
+
 def _forget_counts() -> dict:
     return {"deleted": 0, "not_found": 0, "failed": 0}
 
@@ -2175,7 +2364,7 @@ def forget(*, conversation_id=None, sessions=None, scope=None, store=None) -> di
                     if time.monotonic() > deadline:
                         counts["failed"] += len(ids) - position
                         break
-                    counts[delete_hermes_session(sid)] += 1
+                    counts[delete_listed_session(sid, kore_scope)] += 1
         return counts
 
     store.drop(conversation_id=conversation_id)
@@ -2220,7 +2409,7 @@ def prune_expired(store=None):
             for sid in ids:
                 if store.active_count():
                     return None
-                counts[delete_hermes_session(sid)] += 1
+                counts[delete_listed_session(sid, scope)] += 1
     return counts
 
 
@@ -2358,6 +2547,54 @@ def validate_session(sess) -> bool:
     return True
 
 
+ADJUST_ESCALATION_ERROR = "Die Anpassung des Coachs steigert die Session; erlaubt ist nur Reduzieren."
+# Felder, die der Vergleich gesondert behandelt; jedes andere Feld einer Uebung oder eines Satzes
+# muss in der Anfrage stehen und darf nicht hoeher sein (Zahl) bzw. muss gleich sein.
+_ADJUST_EXERCISE_FIELDS = frozenset(("name", "exercise_id", "note", "sets"))
+
+
+def _is_number(value) -> bool:
+    return type(value) in (int, float)
+
+
+def _not_above(value, baseline) -> bool:
+    if _is_number(value) or _is_number(baseline):
+        return _is_number(value) and _is_number(baseline) and value <= baseline
+    return value == baseline
+
+
+def adjustment_escalates(original: dict, adjusted: dict) -> bool:
+    """True, sobald die Antwort des Coachs mehr verlangt als die Session aus der Anfrage.
+
+    Beide Sessions haben validate_session schon bestanden (eindeutige Namen und IDs). Pro Uebung,
+    gefunden ueber den Namen wie in der App (getrimmt, klein): dieselbe exercise_id, falls die
+    Antwort eine nennt; hoechstens so viele Saetze; Satz i nie ueber Satz i des Originals —
+    weight_kg, reps, reps_max und jedes weitere Zahlenfeld (Dauer, Strecke) hoechstens gleich,
+    kein Feld, das das Original nicht hat (also auch kein neuer reps_max-Bereich). Uebungen
+    streichen ist erlaubt; neue, umbenannte oder umgehaengte Uebungen nicht. Eine session_id in der
+    Antwort muss die der Anfrage sein. Name und Notiz der Session bzw. Uebung sind freier Text.
+    """
+    if "session_id" in adjusted and adjusted["session_id"] != original.get("session_id"):
+        return True
+    baselines = {_exercise_identity(exercise["name"]): exercise for exercise in original["exercises"]}
+    for exercise in adjusted["exercises"]:
+        baseline = baselines.get(_exercise_identity(exercise["name"]))
+        if baseline is None:
+            return True
+        if "exercise_id" in exercise and exercise["exercise_id"] != baseline.get("exercise_id"):
+            return True
+        for key in set(exercise) - _ADJUST_EXERCISE_FIELDS:
+            if key not in baseline or not _not_above(exercise[key], baseline[key]):
+                return True
+        if len(exercise["sets"]) > len(baseline["sets"]):
+            return True
+        for adjusted_set, baseline_set in zip(exercise["sets"], baseline["sets"]):
+            for key, value in adjusted_set.items():
+                if key not in baseline_set or not _not_above(value, baseline_set[key]):
+                    return True
+    return False
+
+
 def adjust_today(data) -> tuple:
     if error := consent_contract_error(data, require_health=True):
         return error
@@ -2369,8 +2606,14 @@ def adjust_today(data) -> tuple:
     )
     # Health-Scope wie im Chat: --source kore-health, Werkzeugliste nach toolsets_for. Ohne
     # Chat-ID gibt es kein Herkunftsticket, also auch kein kore-Toolset.
-    outcome = run_turn(prompt, scope="health", conversation_id=None, session_ref=None,
-                       context=data.get("context"), origin_ticket=None, max_turns="4")
+    if not TURNS.reserve_run():
+        status, sentence = TURN_REQUEST_ERRORS["busy"]
+        return status, {"error": sentence, "code": "busy"}
+    try:
+        outcome = run_turn(prompt, scope="health", conversation_id=None, session_ref=None,
+                           context=data.get("context"), origin_ticket=None, max_turns="4")
+    finally:
+        TURNS.release_run()
     if outcome.error_code is not None:
         journal_turn_failure(turn_id=None, scope="health", error_code=outcome.error_code,
                              failure_class=outcome.failure_class, exit_code=outcome.exit_code)
@@ -2387,6 +2630,9 @@ def adjust_today(data) -> tuple:
     sess = obj.get("session")
     if not validate_session(sess):
         return 502, {"error": "Antwort entspricht nicht dem Session-Schema"}
+    # „Nur reduzieren" steht nicht nur im Prompt: die Bridge prueft es selbst (0.13 S11a).
+    if adjustment_escalates(session_json, sess):
+        return 502, {"error": ADJUST_ESCALATION_ERROR}
     changes = obj.get("changes")
     return 200, {
         "session": sess,
@@ -2395,11 +2641,82 @@ def adjust_today(data) -> tuple:
     }
 
 
+# ---- HTTP-Server: Verbindungsgrenze und Lesefrist (0.13 S11a) ------------------------------------
+# Ohne Grenze startete ThreadingHTTPServer fuer jede Verbindung einen Thread, und der 30-s-Timeout
+# galt je recv: wer alle 29 s ein Byte schickt, hielt einen Thread beliebig lange (Slowloris im LAN).
+MAX_CONNECTIONS = 64
+REQUEST_READ_DEADLINE_S = 20
+
+
+class _DeadlineSocketReader(io.RawIOBase):
+    """Liest vom Socket, aber nie ueber eine Gesamtfrist ab Verbindungsbeginn hinaus.
+
+    Vor jedem recv wird der Socket-Timeout auf min(Timeout je Vorgang, Restzeit) gesetzt und danach
+    zurueckgestellt; Schreiben (Antwort, SSE) behaelt den vollen Timeout je Vorgang. Die Bridge
+    spricht HTTP/1.0: gelesen werden nur Kopfzeilen und Body am Anfang der Verbindung, danach nichts.
+    """
+
+    def __init__(self, sock, deadline: float, per_read_timeout):
+        super().__init__()
+        self._sock = sock
+        self._deadline = deadline
+        self._per_read_timeout = per_read_timeout
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("request read deadline exceeded")
+        limit = remaining if self._per_read_timeout is None else min(self._per_read_timeout, remaining)
+        self._sock.settimeout(limit)
+        try:
+            return self._sock.recv_into(buffer)
+        finally:
+            self._sock.settimeout(self._per_read_timeout)
+
+
+class BridgeHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer mit hoechstens MAX_CONNECTIONS gleichzeitigen Verbindungen. Jede weitere
+    wird sofort geschlossen, ohne Thread und ohne Antwort."""
+
+    def __init__(self, *args, **kwargs):
+        self._connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            # Kein Thread gestartet: Platz zurueck; den Socket schliesst socketserver selbst.
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+
 class Handler(BaseHTTPRequestHandler):
     # Socket-Timeout je Lese-/Schreibvorgang: Eine Verbindung, die nichts (mehr) schickt, belegt
     # keinen Thread auf Dauer. Laenger als der SSE-Keepalive (15 s); das Warten auf Hermes beruehrt
-    # den Socket nicht und ist davon nicht betroffen.
+    # den Socket nicht und ist davon nicht betroffen. Kopfzeilen und Body zusammen muessen
+    # zusaetzlich innerhalb von REQUEST_READ_DEADLINE_S ab Verbindungsbeginn eintreffen.
     timeout = 30
+
+    def setup(self):
+        super().setup()
+        deadline = time.monotonic() + REQUEST_READ_DEADLINE_S
+        self.rfile.close()  # der Leser aus makefile(); der Socket selbst bleibt offen
+        self.rfile = io.BufferedReader(
+            _DeadlineSocketReader(self.connection, deadline, self.timeout)
+        )
 
     def _send(self, code: int, obj: dict):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -2647,14 +2964,20 @@ class Handler(BaseHTTPRequestHandler):
                 return
             scope = session_scope(data.get("health_context_allowed") is True)
             conversation_id = data["conversation_id"]
-            outcome = run_turn(
-                data["message"].strip(),
-                scope=scope,
-                conversation_id=conversation_id,
-                session_ref=data.get("session"),
-                context=data.get("context"),
-                origin_ticket=origin_ticket_for(scope, conversation_id),
-            )
+            if not TURNS.reserve_run():
+                self._send_turn_error("busy")
+                return
+            try:
+                outcome = run_turn(
+                    data["message"].strip(),
+                    scope=scope,
+                    conversation_id=conversation_id,
+                    session_ref=data.get("session"),
+                    context=data.get("context"),
+                    origin_ticket=origin_ticket_for(scope, conversation_id),
+                )
+            finally:
+                TURNS.release_run()
             if outcome.error_code is not None:
                 journal_turn_failure(turn_id=None, scope=scope, error_code=outcome.error_code,
                                      failure_class=outcome.failure_class,
@@ -2694,4 +3017,4 @@ if __name__ == "__main__":
         target=_retention_forever, args=(TURNS,), name="kore-session-retention", daemon=True
     ).start()
     port = int(os.environ.get("KORE_BRIDGE_PORT", "8090"))
-    ThreadingHTTPServer((validated_bind_host(BIND_HOST), port), Handler).serve_forever()
+    BridgeHTTPServer((validated_bind_host(BIND_HOST), port), Handler).serve_forever()
