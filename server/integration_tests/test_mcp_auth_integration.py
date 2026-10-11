@@ -207,7 +207,7 @@ class McpServeTests(_McpEnvironment):
         latest.assert_not_called()
         config = captured["config"]
         self.assertEqual((config.host, config.port), ("127.0.0.1", 8000))
-        self.assertEqual(config.limit_concurrency, 64)
+        self.assertEqual(config.limit_concurrency, 1024)
         self.assertEqual(config.timeout_keep_alive, 5)
 
 

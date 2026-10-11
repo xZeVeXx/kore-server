@@ -200,7 +200,7 @@ class IngestHardeningTests(unittest.TestCase):
         self.assertIs(run.call_args.args[0], self.ingest_api.app)
         kwargs = run.call_args.kwargs
         self.assertEqual((kwargs["host"], kwargs["port"]), ("127.0.0.1", 8081))
-        self.assertEqual(kwargs["limit_concurrency"], 64)
+        self.assertEqual(kwargs["limit_concurrency"], 1024)
         self.assertEqual(kwargs["timeout_keep_alive"], 5)
 
     # -- 2. no interactive docs ---------------------------------------------------------------

@@ -682,7 +682,7 @@ Fixed limits: a request is at most 256 KiB, a prompt 120 KiB, Hermes output 512 
 at most 64 connections at once (further ones are closed without an answer), 20 s from the start of a
 connection to read headers and body (on top of the 30 s socket timeout, so a slow sender cannot hold
 a thread open); the ingest API accepts at most 16 MiB, and only with a valid token. Ingest and MCP
-answer every further request with 503 once 64 connections are open or 64 requests are running, and
+answer every further request with 503 once 1024 connections are open or 1024 requests are running, and
 close an idle keep-alive connection after 5 s (uvicorn has no deadline for headers or body, see
 [Residual risks](#residual-risks)). Tokens are compared in constant time in all three services; the
 MCP server compares SHA-256 digests of equal length, so not even the token's length shows in the
@@ -756,9 +756,9 @@ Kore sends health context only in chats with health sharing turned on, and the b
   64 connections busy for up to 20 s each. That blocks the bridge for the time being but binds no
   unlimited threads or memory.
 - **Ingest and MCP have no deadline for headers or body.** uvicorn 0.48, which serves both, offers
-  none. Both answer every further request with 503 once 64 connections are open or 64 requests are
+  none. Both answer every further request with 503 once 1024 connections are open or 1024 requests are
   running, and close an idle keep-alive connection after 5 s. But a sender in your network that
-  trickles its headers keeps such a connection open as long as it likes, and 64 of them block the
+  trickles its headers keeps such a connection open as long as it likes, and 1024 of them block the
   ingest API (the MCP server listens on loopback only) until they close. Memory per connection stays
   small; the systemd units also cap open files at 4096.
 - **Authenticated uploads still cost memory.** With a valid token, a 16 MiB snapshot needs roughly

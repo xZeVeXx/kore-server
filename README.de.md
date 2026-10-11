@@ -704,8 +704,8 @@ Feste Grenzen: Anfrage höchstens 256 KiB, Prompt 120 KiB, Hermes-Ausgabe 512 Ki
 höchstens 64 Verbindungen gleichzeitig (weitere werden ohne Antwort geschlossen), 20 s ab
 Verbindungsbeginn für Kopfzeilen und Body (zusätzlich zum 30-s-Socket-Timeout, damit ein langsamer
 Absender keinen Thread festhalten kann); die Ingest-API nimmt höchstens 16 MiB an, und nur mit
-gültigem Token. Ingest und MCP beantworten jede weitere Anfrage mit 503, sobald 64 Verbindungen offen
-sind oder 64 Anfragen laufen, und schließen eine ruhende Keep-Alive-Verbindung nach 5 s (uvicorn hat
+gültigem Token. Ingest und MCP beantworten jede weitere Anfrage mit 503, sobald 1024 Verbindungen offen
+sind oder 1024 Anfragen laufen, und schließen eine ruhende Keep-Alive-Verbindung nach 5 s (uvicorn hat
 keine Frist für Kopfzeilen oder Body, siehe [Restrisiken](#was-bleibt-restrisiken)). Tokens werden in
 allen drei Diensten zeitkonstant verglichen; der MCP-Server vergleicht SHA-256-Digests gleicher Länge,
 sodass nicht einmal die Länge des Tokens im Zeitverhalten steckt.
@@ -779,10 +779,10 @@ dort frei. Was dein Bot danach damit tut, steuert Kore nicht:
   Verbindungen der Bridge je bis zu 20 s belegen. Das sperrt die Bridge vorübergehend, bindet aber
   keine unbegrenzten Threads oder Speicher.
 - **Ingest und MCP haben keine Frist für Kopfzeilen oder Body.** uvicorn 0.48, das beide bedient,
-  bietet keine an. Beide beantworten jede weitere Anfrage mit 503, sobald 64 Verbindungen offen sind
-  oder 64 Anfragen laufen, und schließen eine ruhende Keep-Alive-Verbindung nach 5 s. Wer in deinem
+  bietet keine an. Beide beantworten jede weitere Anfrage mit 503, sobald 1024 Verbindungen offen sind
+  oder 1024 Anfragen laufen, und schließen eine ruhende Keep-Alive-Verbindung nach 5 s. Wer in deinem
   Netz seine Kopfzeilen aber tröpfchenweise schickt, hält eine solche Verbindung beliebig lange offen,
-  und 64 davon sperren die Ingest-API (der MCP-Server lauscht nur auf Loopback), bis sie schließen.
+  und 1024 davon sperren die Ingest-API (der MCP-Server lauscht nur auf Loopback), bis sie schließen.
   Der Speicher je Verbindung bleibt klein; die systemd-Units begrenzen außerdem die offenen Dateien
   auf 4096.
 - **Angemeldete Uploads kosten weiter Speicher.** Mit gültigem Token braucht ein 16-MiB-Snapshot beim

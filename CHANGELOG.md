@@ -150,8 +150,8 @@ Server:
   Exactly one `Authorization` header counts.
 - **The MCP server refuses two `Authorization` headers** with `401` before reading the body, like the
   ingest API and the bridge (FastMCP's own check would take the first).
-- **Connection limits for ingest and MCP.** uvicorn gets `limit_concurrency=64` (every further request
-  is answered `503`) and `timeout_keep_alive=5`. uvicorn 0.48 has no deadline for headers or body; the
+- **Connection limits for ingest and MCP.** uvicorn gets `limit_concurrency=1024` (every further request
+  is answered `503`; high enough that a handful of stalled connections cannot lock it) and `timeout_keep_alive=5`. uvicorn 0.48 has no deadline for headers or body; the
   README lists this under Residual risks.
 - **No outbound call from the MCP server.** FastMCP asked PyPI for a newer release when it printed its
   start banner; `FASTMCP_CHECK_FOR_UPDATES=off` is now forced in `mcp_server.py` and set in
