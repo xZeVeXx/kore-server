@@ -6,6 +6,10 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
 
 ### Fixed
 
+- **Ingest image from a checkout made under `umask 077`.** `COPY` kept the owner-only file modes, so the
+  ingest (user `kore`) failed on import with `PermissionError` and restarted in a loop. The image now makes
+  the copied code readable (`chmod -R a+rX /app`) before switching to the service user.
+
 - **Snapshots with Apple's recovery HRV were rejected (422).** Since app 0.10, Kore can carry the day
   on Apple's own recovery HRV (iOS 27). The app then sends `hrv_kind`/`hrv_method_effective`
   `appleRMSSD` and `hrv_source` `appleRecoveryRMSSD` with the neutral `hrv_ms` value. The ingest did

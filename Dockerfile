@@ -8,6 +8,8 @@ COPY server/requirements.lock ./requirements.lock
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY server/ ./
+# A checkout made under `umask 077` copies owner-only files; the service user must still read the code.
+RUN chmod -R a+rX /app
 
 # The database lives in a volume, never in the image.
 ENV KORE_DB_PATH=/data/kore.db

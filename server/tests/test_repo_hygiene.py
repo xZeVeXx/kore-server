@@ -315,6 +315,16 @@ class SupplyChainTests(unittest.TestCase):
         self.assertIn("pip install --no-cache-dir --require-hashes -r requirements.lock", dockerfile)
         self.assertIn("COPY server/requirements.lock", dockerfile)
 
+    def test_the_service_user_can_read_code_from_an_owner_only_checkout(self) -> None:
+        # A checkout made under `umask 077` has 0600 files; COPY keeps the mode, and the ingest (uid 10001)
+        # then fails on import with PermissionError. The image makes the copied code readable first.
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        copy = dockerfile.index("COPY server/ ./")
+        readable = dockerfile.index("RUN chmod -R a+rX /app")
+        user = dockerfile.index("USER kore")
+        self.assertLess(copy, readable)
+        self.assertLess(readable, user)
+
     def test_lockfiles_carry_hashes_and_cover_their_inputs(self) -> None:
         for source, lock in (("requirements.txt", "requirements.lock"),
                              ("requirements-dev.txt", "requirements-dev.lock")):
