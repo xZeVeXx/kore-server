@@ -244,6 +244,35 @@ class ContainerHardeningTests(unittest.TestCase):
         self.assertEqual(_compose()["ingest"]["command"], ["python", "ingest_api.py"])
 
 
+def _readme_headings_and_links(name: str) -> tuple[set[str], list[str]]:
+    """GitHub-style heading anchors of a README and its in-page links (code fences left out)."""
+    slugs, links, in_fence = set(), [], False
+    for line in (REPO_ROOT / name).read_text(encoding="utf-8").splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence:
+            heading = re.match(r"#{1,6}\s+(.*\S)", line)
+            if heading:
+                slugs.add(re.sub(r"[^\w\- ]", "", heading.group(1).lower()).replace(" ", "-"))
+            links += re.findall(r"\]\(#([^)\s]+)\)", line)
+    return slugs, links
+
+
+class ReadmeAnchorTests(unittest.TestCase):
+    def test_every_in_page_link_has_a_heading(self) -> None:
+        for name in ("README.md", "README.de.md"):
+            slugs, links = _readme_headings_and_links(name)
+            self.assertTrue(links)
+            for link in links:
+                with self.subTest(readme=name, link=link):
+                    self.assertIn(link, slugs)
+
+    def test_the_upgrade_anchors_the_app_links_to_exist(self) -> None:
+        # Kore opens README.md#upgrading and README.de.md#aktualisieren (0.14 A2); do not rename them.
+        self.assertIn("upgrading", _readme_headings_and_links("README.md")[0])
+        self.assertIn("aktualisieren", _readme_headings_and_links("README.de.md")[0])
+
+
 class WorkflowTests(unittest.TestCase):
     def test_ci_has_read_only_token_and_no_privileged_trigger(self) -> None:
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

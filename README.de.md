@@ -18,7 +18,8 @@ dieses Repo nicht: Kore funktioniert ohne Server vollständig.
 Sicherheitslücken bitte privat melden, siehe [SECURITY.md](SECURITY.md).
 
 **Inhalt:** [Was es ist](#was-es-ist) · [Voraussetzungen](#voraussetzungen) · [Einrichtung](#einrichtung) ·
-[Kopplung](#kopplung-mit-dem-iphone) · [Unterwegs per VPN](#unterwegs-per-vpn) ·
+[Hermes im Docker-Container](#hermes-im-docker-container-z-b-unraid) · [Kopplung](#kopplung-mit-dem-iphone) ·
+[Unterwegs per VPN](#unterwegs-per-vpn) ·
 [Sicherheit](#sicherheit) · [Daten und Datenschutz](#daten-und-datenschutz) ·
 [Wenn etwas nicht geht](#wenn-etwas-nicht-geht) · [kore-doctor](#installation-prüfen-kore-doctor) ·
 [Aktualisieren](#aktualisieren) · [Referenz](#referenz) · [Lizenz](#lizenz)
@@ -50,10 +51,14 @@ Drei kleine Dienste laufen auf einer Maschine, neben deinem Hermes-Agenten:
 | Dienst | Port | Aufgabe | Erreichbar von |
 | --- | --- | --- | --- |
 | **Coach-Bridge** (`coach-bridge/`, reines Python, nur Standardbibliothek) | 8090 | Chat: Kore spricht mit der Bridge, die Bridge startet `hermes` für ein einziges, dafür vorgesehenes Profil und gibt die Antwort zurück. Erledigt auch die [Kopplung](#kopplung-mit-dem-iphone). Läuft als systemd-Dienst auf dem Host. | deiner Heimnetz-Adresse oder `127.0.0.1` hinter `tailscale serve` (`KORE_BRIDGE_BIND_HOST`) |
-| **Ingest-API** (`server/`, FastAPI, in Docker) | 8081 | Nimmt die Tageswerte vom iPhone entgegen und gibt offene Plan-Vorschläge zurück. | deiner Heimnetz-Adresse oder `127.0.0.1` hinter `tailscale serve` (`KORE_BIND_ADDRESS`) |
-| **MCP-Server** (`server/`, FastMCP, in Docker) | 8000 | Lässt dein Hermes-Profil die Kore-Daten **lesen** (7 Werkzeuge) und einen Trainingsplan **vorschlagen** (1 Werkzeug). | **nur diesem Rechner** (`127.0.0.1`) |
+| **Ingest-API** (`server/`, FastAPI, in Docker) | 8081 | Nimmt die Tageswerte vom iPhone entgegen, nennt die Snapshot-Felder, die sie annimmt (`GET /capabilities`), und gibt offene Plan-Vorschläge zurück. | deiner Heimnetz-Adresse oder `127.0.0.1` hinter `tailscale serve` (`KORE_BIND_ADDRESS`) |
+| **MCP-Server** (`server/`, FastMCP, in Docker) | 8000 | Lässt dein Hermes-Profil die Kore-Daten **lesen** (9 Werkzeuge) und einen Trainingsplan **vorschlagen** (1 Werkzeug). | **nur diesem Rechner** (`127.0.0.1`) |
 
 Kore spricht mit der Bridge und der Ingest-API. Mit dem MCP-Server spricht nur Hermes.
+
+Die Ports sind die Standardwerte in den Containern. Auf dem Host veröffentlicht Docker Compose Ingest und
+MCP auf `KORE_INGEST_PORT` und `KORE_MCP_PORT` aus deiner `.env` (Standard 8081 und 8000); setze sie, wenn
+ein Port belegt ist oder auf demselben Rechner ein zweiter Stapel läuft.
 
 Zwei Helfer liegen im Repo: `scripts/kore-doctor` prüft die Installation und verwaltet die
 Kopplung, `hermes/kore-app-chat-soul.md` ist der Abschnitt, den du in die `SOUL.md` deines Coaches
@@ -67,7 +72,7 @@ aufnimmst.
 
 | | |
 | --- | --- |
-| **Kore** | Version 0.13 oder neuer für die Kopplung. Ältere Versionen (ab 0.10) funktionieren mit dem Einrichtungsweg per statischem Token (siehe [Kopplung](#kopplung-mit-dem-iphone)). |
+| **Kore** | Version 0.13 oder neuer für die Kopplung. Ältere Versionen (ab 0.10) funktionieren mit dem Einrichtungsweg per statischem Token (siehe [Kopplung](#kopplung-mit-dem-iphone)). Schritte, Gewicht und Ernährung für den Coach brauchen Kore 0.14 und diese Server-Version; ein älterer Server funktioniert mit einem neueren Kore weiter, das diese Werte dann weglässt. |
 | **Ein Linux-Rechner, der läuft** | Homeserver, Mini-PC, NAS, Raspberry Pi 5 … im selben Netz wie dein iPhone. Docker mit Compose v2 für Ingest und MCP (empfohlen ab Docker 28, siehe [Netz](#netz)), Python 3 für die Bridge. |
 | **Hermes Agent 0.21.4 oder neuer** | Installiert auf **demselben Rechner**: Die Bridge startet `hermes` als Kindprozess, und der MCP-Server ist nur lokal erreichbar. Getestet mit v0.21.4 und v0.21.5. Ohne Hermes funktionieren Lesen und Plan-Vorschläge über MCP weiter, nur zum Chatten fehlt der Partner. |
 | **Dein eigener Schlüssel eines Modell-Anbieters** | Hermes braucht ein Modell. Bring deinen eigenen Anbieter-Schlüssel (oder ein lokales Modell) mit und gib ihn selbst in deinem Terminal ein, nie in einem Chat. |
@@ -102,11 +107,14 @@ Der Prompt ist eine Checkliste, die Hermes Phase für Phase abarbeitet. Er:
    Ingest und MCP mit Docker Compose;
 4. fragt, ob ein **neues** Hermes-Profil für deinen Trainings-Bot angelegt wird (Standard, nie ein
    Klon deines Hauptprofils) oder ein **bestehendes** verwendet werden soll; beim bestehenden nennt er
-   vorher die Folgen (siehe Schritt 5 von Weg B) und braucht dein ausdrückliches Ja. Danach bittet er
+   vorher die Folgen (jeder Weg dieses Profils kann dann deine Gesundheitsdaten lesen, siehe Schritt 5
+   von Weg B) und braucht dein ausdrückliches Ja. Danach bittet er
    dich, das Modell selbst in deinem Terminal einzurichten, trägt den Kore-Abschnitt in die `SOUL.md`
    des Profils ein, registriert den MCP-Server und schaltet Auto-Titel ab;
-5. richtet die Bridge als systemd-Dienst ein und lässt `kore-doctor` und drei Ende-zu-Ende-Proben
-   laufen;
+5. richtet die Bridge als systemd-Dienst ein, oder, wo es kein systemd gibt (das Hermes-Docker-Image,
+   Unraid), als Prozess im Hermes-Container
+   ([Hermes im Docker-Container](#hermes-im-docker-container-z-b-unraid)), und lässt `kore-doctor` und
+   drei Ende-zu-Ende-Proben laufen;
 6. installiert `qrencode` (nach deinem OK) und endet mit einem Kopplungs-Link und einem QR-Code im
    Terminal für dein iPhone.
 
@@ -169,6 +177,13 @@ MCP-Server nicht das Ingest-Token). Ein Schlüssel, den du selbst in die `.env` 
 einen Container erst, wenn du ihn in der `environment:`-Liste des Dienstes in der
 `docker-compose.yml` ergänzt.
 
+*Verlegte Ports (optional).* Ist Port 8081 oder 8000 auf dem Host belegt oder läuft auf demselben
+Rechner ein zweiter Stapel, ergänze `KORE_INGEST_PORT` und/oder `KORE_MCP_PORT` in der `.env`. Compose
+veröffentlicht Ingest und MCP-Server dann auf diesen Host-Ports (die Container bleiben bei 8081 und
+8000, der MCP bleibt auf `127.0.0.1`). `kore-doctor` und `kore-doctor pair` lesen beide Werte; nimm die
+verlegten Ports in den `curl`-Zeilen unten, in der Server-Adresse in Kore und in der MCP-`url` des
+Profils (Schritt 5).
+
 **4. Ingest und MCP starten.**
 
 ```bash
@@ -181,10 +196,13 @@ Die **401** ist die richtige Antwort: Der MCP-Port weist jeden ab, der kein Toke
 Docker siehe [`deploy/`](deploy/) (eigener Systemnutzer, venv, systemd-Units; dort lauscht die
 Ingest-API auf `KORE_BIND_ADDRESS` und der MCP-Server auf `KORE_MCP_HOST`, Standard `127.0.0.1`).
 
-**5. Das Hermes-Profil für deinen Coach wählen.** Kore spricht mit genau einem Profil.
+**5. Das Hermes-Profil für deinen Coach wählen.** Kore spricht mit genau einem Profil: entweder einem
+neuen Coach-Profil (empfohlen) oder einem, das du schon benutzt.
 
-*Ein neues Profil (Standard, empfohlen).* Es startet leer: keine Erinnerungen, keine anderen
-Tool-Server, nur das, was du ihm gibst.
+*Ein neues Coach-Profil (Standard, empfohlen).* Es startet leer: keine Erinnerungen, keine anderen
+Tool-Server, nur das, was du ihm gibst. Solange du ihm keinen Messenger und keine geplante Aufgabe
+hinzufügst, läuft darin nur der Kore-App-Chat, unter den Grenzen der Bridge (eine feste Werkzeugliste
+je Chat).
 
 ```bash
 HERMES=~/.hermes/hermes-agent/venv/bin/hermes     # oder wo `hermes` liegt
@@ -205,16 +223,21 @@ Zusatzprogramm (etwa ein Anbieter-CLI in `~/.local/bin`), setze außerdem `KORE_
 Schritt 6, sonst scheitern Chats mit `hermes_failed`.
 
 *Ein bestehendes Profil (deine Entscheidung, mit Folgen).* Du kannst `KORE_HERMES_PROFILE` auf ein
-Profil setzen, das du schon benutzt, und die Ergänzungen unten darin vornehmen. Tu das nur, wenn du
-alles Folgende in Kauf nimmst:
+Profil setzen, das du schon benutzt, zum Beispiel eines mit einem Gedächtnis, das du behalten willst,
+und die Ergänzungen unten darin vornehmen. Tu das nur, wenn du alles Folgende in Kauf nimmst:
 
+- **Jeder Weg dieses Profils kann deine Gesundheitsdaten lesen.** Telegram und andere Messenger,
+  Gruppenchats, die Desktop-App und geplante Aufgaben laufen im selben Profil. Ist der `kore`-MCP-Server
+  darin eingetragen, kann jeder von ihnen die neun Lese-Werkzeuge aufrufen (Erholung, HRV, Schlaf,
+  Workouts, Pläne, Schritte, Gewicht und Körperfett und, wenn du sie teilst, Ernährung), ohne über den
+  App-Chat zu gehen. Die Grenzen der Coach-Bridge (feste Werkzeugliste, kein Terminal, keine Dateien,
+  kein Code, keine Websuche neben Gesundheitskontext) gelten **nur** im App-Chat, nicht auf diesen
+  anderen Wegen.
 - **Gesundheitsdaten im allgemeinen Gedächtnis.** Kore-Chats laufen in diesem Profil. Ist der
   Gesundheitskontext erlaubt, kann der Coach Gelerntes im Gedächtnis des Profils ablegen, und jede
   spätere Sitzung des Profils (auch deine anderen Chats und Kanäle) kann es sehen.
 - **Ein Kore-Abschnitt in dessen `SOUL.md`.** Der Kore-Abschnitt wird (nach einem Backup) in die
   Persönlichkeitsdatei des Profils geschrieben und bleibt Teil seiner Anweisungen für alles, was es tut.
-- **Der `kore`-MCP-Server in diesem Profil.** Auch dessen andere Sitzungen können deine Kore-Daten über
-  die sieben Lese-Tools lesen, nicht nur der App-Chat.
 - **Ein externer Gedächtnis-Anbieter (zum Beispiel Honcho) bekommt Kore-Chats**, Gesundheitskontext
   eingeschlossen, falls das Profil einen benutzt. Prüfen mit `$HERMES -p <profil> memory status`.
 - **Löschen in Kore erreicht nicht alles.** Die Bridge löscht die Kore-*Sitzungen*; Kopien im Gedächtnis
@@ -265,7 +288,9 @@ else:
 EOF
 ```
 
-*Prüfen:* `$HERMES -p kore-coach mcp test kore` muss „Connected“ und „Tools discovered: 8“ melden.
+*Prüfen:* `$HERMES -p kore-coach mcp test kore` muss „Connected“ und „Tools discovered: 10“ melden.
+Scheitert es mit `No module named 'mcp'`, fehlt deinem Hermes das MCP-Extra; `hermes pm install --extra
+mcp` holt es nach (Sache von Hermes, `kore-doctor` nennt dieselbe Abhilfe).
 
 *Shell-Befehle in Skills bleiben aus.* In der `config.yaml` des Profils muss `skills.inline_shell`
 fehlen (Hermes-Standard) oder genau `false` sein:
@@ -287,6 +312,38 @@ sie jeden Coach-Aufruf mit `503` ab (`code: profile_unsafe`), bis die Datei wied
 Journal nennt Einstellung und Datei. Hat die Bridge den Start verweigert, starte sie nach der
 Korrektur neu.
 
+*Optionaler Zusatzschritt: Dein Hauptassistent liest Kore mit.* Das Coach-Profil ist der Ort, an dem der
+Kore-Chat läuft. Soll auch der Assistent, mit dem du täglich sprichst (ein anderes Profil), Fragen aus
+deinen Kore-Werten beantworten, kannst du den `kore`-MCP-Server auch in diesem Profil eintragen: mit
+derselben `url`, einer eigenen Zeile `MCP_KORE_API_KEY=<dein KORE_MCP_TOKEN>` in der `.env` **dieses**
+Profils und nur den Lese-Werkzeugen:
+
+```yaml
+mcp_servers:
+  kore:
+    url: http://127.0.0.1:8000/mcp/
+    headers:
+      Authorization: Bearer ${MCP_KORE_API_KEY}
+    enabled: true
+    tools:
+      include: [get_recovery_today, get_hrv_trend, get_sleep_summary, get_recent_workouts,
+                get_activity_body_trend, get_nutrition_trend, get_active_plan, get_training_plans,
+                get_coach_briefing]
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
+```
+
+(`tools.include` ist der eigene Filter von Hermes; schau in dessen Dokumentation für deine Version.
+Ohne `propose_training_plan` kann dieses Profil gar keine Pläne vorschlagen.) Das ist ein Zusatzschritt,
+nie der Standard, und er hat dieselben Folgen wie ein bestehendes Profil oben: Jeder Weg, auf dem dieser
+Assistent benutzt wird (Messenger, Gruppen, Desktop, geplante Aufgaben), kann dann deine
+Gesundheitswerte lesen, **ohne** die Grenzen der Bridge, und sein Gedächtnis und ein externer
+Gedächtnis-Anbieter können sie behalten. Dein Modell-Anbieter sieht, was der Assistent abruft. Ein neues
+`KORE_MCP_TOKEN` heißt dann, auch die `.env` dieses Profils nachzuziehen. Lass es weg, wenn du es nicht
+brauchst; zum Rückgängigmachen löschst du den `kore`-Eintrag wieder.
+
 **6. Die Coach-Bridge einrichten.**
 
 ```bash
@@ -304,6 +361,7 @@ Bearbeite `bridge.env` (nur absolute Pfade; systemd expandiert weder `$HOME` noc
 | `KORE_BRIDGE_PORT` | `8090` |
 | `KORE_HERMES_BIN` | absoluter Pfad zu `hermes` |
 | `KORE_HERMES_HOME` | das Home-Verzeichnis dieses Nutzers |
+| `KORE_HERMES_DATA_DIR` (optional) | nur wenn Hermes seine Daten nicht unter `<Home>/.hermes` ablegt, wie das Hermes-Docker-Image (`/opt/data`). Ein absoluter Pfad ohne `..`, sonst startet die Bridge nicht. Die Bridge gibt ihn als `HERMES_HOME` an Hermes weiter (die einzige Zugabe zur Hermes-Umgebung) und sucht das Profil unter `<Ordner>/profiles/<Name>`; `kore-doctor` sucht dort ebenfalls. Bei der systemd-Unit den Ordner zusätzlich in `ReadWritePaths` eintragen. Siehe [Hermes im Docker-Container](#hermes-im-docker-container-z-b-unraid). |
 | `KORE_HERMES_PROFILE` | `kore-coach` |
 | `KORE_INSTANCE_ID`, `KORE_PLAN_ORIGIN_PRINCIPAL` | dieselben Werte wie in der `.env` des Servers; später nie ändern |
 | `KORE_PLAN_ORIGIN_SECRET` | derselbe Wert wie in der `.env` des Servers |
@@ -375,6 +433,116 @@ python3 ~/kore-server/scripts/kore-doctor
 
 Der Exit-Code muss 0 sein. Siehe [kore-doctor](#installation-prüfen-kore-doctor). Danach
 [koppelst du dein iPhone](#kopplung-mit-dem-iphone).
+
+## Hermes im Docker-Container (z. B. Unraid)
+
+Läuft dein Hermes-Agent im Hermes-Docker-Image (alle Daten unter `/opt/data`), zum Beispiel auf Unraid,
+folgt die Einrichtung [Weg B](#weg-b-von-hand-einrichten) mit einigen Unterschieden. Einen fertigen
+Container für die Coach-Bridge gibt es nicht: Du startest sie als Prozess im Hermes-Container. Unten
+steht `<hermes>` für den Namen deines Hermes-Containers und `<container-adresse>` für dessen feste
+Adresse.
+
+| | Hermes auf dem Host (Weg B) | Hermes im Container |
+| --- | --- | --- |
+| Ingest und MCP | Docker Compose auf dem Host | dasselbe, auf dem Docker-Host |
+| MCP-Adresse im Profil | `http://127.0.0.1:8000/mcp/` | `http://mcp:8000/mcp/`, im Compose-Netz |
+| Hermes-Daten | `<Home>/.hermes` | `/opt/data`, der Bridge über `KORE_HERMES_DATA_DIR` mitgeteilt |
+| Coach-Bridge | systemd-Dienst | ein Prozess im Hermes-Container, auf einer festen Container-Adresse |
+| Bridge neu starten | `sudo systemctl restart kore-coach-bridge` | den Prozess neu starten (Schritt 5) |
+
+**1. Der Code und zwei Ordner für den Hermes-Container.** Hol den Code auf dem Docker-Host wie in
+Schritt 1 von Weg B. Binde dann das Checkout schreibgeschützt in den Hermes-Container ein (zum Beispiel
+als `/opt/kore-server`) und einen Ordner, den der Container-Nutzer beschreiben darf (zum Beispiel als
+`/opt/kore-bridge`). Der zweite nimmt `bridge.env` und den Kopplungszustand `state/` auf. Das Checkout
+enthält die `.env` deines Servers; soll der Hermes-Container sie nicht sehen, binde eine Kopie des
+Checkouts ohne `.env` ein (Bridge und Doctor brauchen `coach-bridge/`, `scripts/`, `hermes/` und
+`contract/`). Leg den beschreibbaren Ordner auf dem Host an, mit dem Nutzer als Besitzer, unter dem
+Hermes im Container läuft (`docker exec <hermes> id`; das Image nutzt `hermes`), Rechte 0750, und lege
+dann den Kopplungszustand **vor** dem ersten `docker compose up` an, als dieser Nutzer:
+
+```bash
+docker exec --user hermes <hermes> python3 /opt/kore-server/scripts/kore-doctor init-state \
+  --state-dir /opt/kore-bridge/state
+```
+
+Das gibt die Zeile `KORE_STATE_GID=` für die Server-`.env` aus.
+
+**2. Ingest und MCP.** Führ die Schritte 3 und 4 von Weg B auf dem Docker-Host aus. In der Server-`.env`,
+neben `KORE_STATE_GID`: `KORE_STATE_DIR` auf den Pfad des Kopplungszustands **auf dem Host** (Compose
+bindet ihn schreibgeschützt in den Ingest ein), optional `KORE_INGEST_PORT` und `KORE_MCP_PORT`, wenn
+ein Host-Port belegt ist (siehe Schritt 3), und
+
+```
+KORE_MCP_URL=http://mcp:8000/mcp/
+```
+
+Compose ignoriert `KORE_MCP_URL`; nur `kore-doctor` liest sie. Der MCP liegt dann nicht auf dem Loopback
+des Rechners, auf dem der Doctor läuft, also überspringt der Doctor seine Prüfung auf `127.0.0.1` mit
+einer `[HINWEIS]`-Zeile, statt zu scheitern, und überlässt den Weg zum MCP `hermes mcp test kore`. Der
+MCP bleibt nur auf `127.0.0.1` des Hosts veröffentlicht.
+
+**3. Den Hermes-Container ins Compose-Netz holen.** Im Hermes-Container ist `127.0.0.1` der Container
+selbst, also erreicht er den MCP über dessen Compose-Dienstnamen:
+
+```bash
+docker network ls                                  # das Kore-Projektnetz, z. B. kore-server_default
+docker network connect kore-server_default <hermes>
+```
+
+Jeder Container in diesem Netz erreicht den MCP-Port (das Token bleibt Pflicht); halte das Netz also bei
+den beiden Kore-Containern und Hermes. Docker behält die Verbindung nicht, wenn der Hermes-Container neu
+erzeugt wird: Führ den Befehl erneut aus, oder trag das Netz in der eigenen Definition des
+Hermes-Containers ein.
+
+**4. Das Coach-Profil.** Führ Schritt 5 von Weg B im Hermes-Container aus (`docker exec -it --user
+hermes <hermes> hermes profile create kore-coach` und so weiter; das Profil liegt in
+`/opt/data/profiles/kore-coach`), mit zwei Unterschieden: Die MCP-`url` ist `http://mcp:8000/mcp/`, und
+`MCP_KORE_API_KEY` steht in `/opt/data/profiles/kore-coach/.env`. Es gilt dieselbe Wahl: ein neues
+Coach-Profil (empfohlen) oder ein bestehendes mit den dort genannten Folgen. Prüfen mit `docker exec
+--user hermes <hermes> hermes -p kore-coach mcp test kore`: „Connected“, „Tools discovered: 10“.
+
+**5. Die Bridge.**
+
+- *Adresse.* Die Bridge lauscht auf genau einer konkreten Adresse, nie auf `0.0.0.0`, und `127.0.0.1`
+  erreicht dein iPhone nicht. Gib dem Hermes-Container eine feste Adresse: entweder eine eigene Adresse
+  in deinem Heimnetz (auf Unraid ein eigenes Netz wie `br0` mit fester IP), die dein iPhone dann direkt
+  erreicht, oder eine feste Adresse in einem selbst angelegten Docker-Netz mit auf dem Host
+  veröffentlichtem Port (`-p 10.0.0.10:8090:8090`); dann gibst du `kore-doctor pair` zusätzlich
+  `--bridge-url http://10.0.0.10:8090` mit. Akzeptiert werden nur Loopback-, RFC-1918- und
+  `100.64.0.0/10`-Adressen. Ändert sich die Adresse nach einem Neustart, scheitert die Bridge mit „Cannot
+  assign requested address“.
+- *`bridge.env`* in `/opt/kore-bridge` (`chmod 600`), wie in Schritt 6 von Weg B, mit diesen Werten:
+  `KORE_BRIDGE_BIND_HOST=<container-adresse>`; `KORE_HERMES_BIN=` der Pfad von `hermes` im Container
+  (`docker exec --user hermes <hermes> sh -c 'command -v hermes'`); `KORE_HERMES_HOME=` das Home des
+  Hermes-Nutzers im Container (im Image: `/opt/data`); `KORE_HERMES_DATA_DIR=/opt/data`; und
+  `KORE_STATE_DIR=/opt/kore-bridge/state`, der Pfad des Kopplungszustands **im Container**. Schreib die
+  Werte ohne Anführungszeichen: Dockers `--env-file` (unten) gibt sie wörtlich weiter.
+- *Starten und neu starten.* Ohne systemd ist die Bridge ein Prozess, den du im Container als Hermes-Nutzer
+  (nicht als root) startest, mit der Kopie von `bridge.env` auf dem Host:
+
+  ```bash
+  docker exec --user hermes <hermes> pkill -f coach-bridge/bridge.py     # nur zum Neustart: beendet den alten
+  docker exec -d --user hermes --env-file /host/pfad/zu/kore-bridge/bridge.env <hermes> \
+    sh -c 'exec python3 /opt/kore-server/coach-bridge/bridge.py >> /opt/data/logs/kore-bridge.log 2>&1'
+  ```
+
+  Die erste Zeile scheitert, wenn das Image kein `pkill` hat; ein Neustart des Hermes-Containers beendet
+  ebenfalls jeden Prozess darin. Nach einem Neustart oder einer Neuerzeugung des Hermes-Containers ist
+  der Prozess weg: Führ den Startbefehl erneut aus, zum Beispiel aus einem Skript, das dein Host nach dem
+  Start des Containers ausführt. Die Bridge kann auch in einem eigenen Container laufen, der dieselbe
+  Hermes-Installation trägt und dasselbe `/opt/data` einbindet; ein Neustart ist dann `docker restart`
+  dieses Containers, und er darf kein zweites Hermes-Gateway starten.
+- *Prüfen.* `docker exec --user hermes <hermes> python3 /opt/kore-server/scripts/kore-doctor
+  --bridge-env /opt/kore-bridge/bridge.env --bridge-only` prüft Bridge und Hermes. Ingest und MCP prüfst
+  du vom Host aus mit den `curl`-Zeilen aus Schritt 4 von Weg B (mit deinen Ports). Kann der
+  Hermes-Container die Server-`.env` sehen, lass `--bridge-only` weg: Der Doctor vergleicht dann auch die
+  gemeinsamen Geheimnisse und prüft den Ingest.
+
+Danach [koppelst du dein iPhone](#kopplung-mit-dem-iphone) wie gewohnt. Zwei Dinge sind gegenüber Weg B
+sicherheitlich anders: Die Bridge, Hermes und alles andere in diesem Container laufen unter demselben
+Nutzer, also kann alles im Container mit Datei- oder Terminal-Werkzeugen `bridge.env` lesen (siehe
+[Netz](#netz), „Die Vertrauensgrenze ist der Linux-Nutzer“); und der MCP ist von jedem Container im
+Compose-Netz erreichbar.
 
 ## Kopplung mit dem iPhone
 
@@ -463,7 +631,7 @@ KORE_COACH_NAME=Coach Lena
 Der Name wird getrimmt und muss 1 bis 24 Zeichen lang sein: Buchstaben (jeder Sprache), Ziffern,
 Leerzeichen, Bindestrich, Apostroph und Punkt, sonst nichts. Ein ungültiger Wert wird **ignoriert**,
 mit einer Warnung im Journal beim Start; die Bridge startet trotzdem, und die App benutzt ihren
-Standardnamen. `GET /health` und `GET /capabilities` enthalten den Namen als
+Standardnamen. `GET /health` und `GET /capabilities` **der Bridge** enthalten den Namen als
 `"coach_name": "Coach Lena"` nur, wenn er gültig ist; ohne gültigen Namen fehlt das Feld. Ein eigenes
 Capability-Flag gibt es dafür nicht: Das Vorhandensein des Feldes ist das Signal. Der Name ändert nur,
 was die App anzeigt, nicht die Persönlichkeit des Coaches (die steht in der `SOUL.md` des Profils).
@@ -527,7 +695,8 @@ weiter, auf der der Dienst lauscht**; deshalb gibt es zwei stimmige Aufbauten:
    sudo tailscale serve --bg --https=8443 http://10.0.0.10:8090    # Bridge
    ```
 
-   Die Flags deiner Version zeigt `tailscale serve --help`. Nie `tailscale funnel` verwenden; das
+   Hast du den Ingest-Port verlegt (`KORE_INGEST_PORT`), nimm ihn im ersten Befehl. Die Flags deiner
+   Version zeigt `tailscale serve --help`. Nie `tailscale funnel` verwenden; das
    veröffentlicht ins offene Internet.
 6. **Mit den HTTPS-Namen koppeln.** Gib sie ausdrücklich an: `kore-doctor pair` würde sonst aus den
    Bind-Adressen `http`-Links bauen, die iOS für Tailscale nicht akzeptiert:
@@ -554,8 +723,12 @@ Wer sie verletzt, betreibt etwas anderes als das hier beschriebene System.
 
 1. **Nur der verdichtete Snapshot, nie Health-Rohwerte.** Die App schickt Tageswerte: Erholung,
    HRV als ein Wert je Tag (SDNN in ms, auch als Verlauf über die letzten Tage), Ruhepuls,
-   Schlafstunden, Workout-Zusammenfassungen. Keine Herzschlagintervalle, keine Messreihen innerhalb
-   eines Tages, keine HealthKit-Exporte. Die MCP-Werkzeuge liefern genau diese Werte weiter und
+   Schlafstunden, Workout-Zusammenfassungen und seit 0.14 Tagessummen der Schritte sowie der letzte
+   Wert des Tages für Gewicht und Körperfett. Ernährung (Tagessummen von Energie, Eiweiß,
+   Kohlenhydraten und Fett) wird nur geschickt, wenn du in Kore ihre eigene Freigabe einschaltest und
+   Kore in Health das Lesen erlaubst; Ausschalten lässt sie beim nächsten Sync auf dem Server leeren.
+   Alles geht nur an deinen eigenen Server und deinen eigenen Coach. Keine Herzschlagintervalle, keine
+   Messreihen innerhalb eines Tages, keine HealthKit-Exporte. Die MCP-Werkzeuge liefern genau diese Werte weiter und
    können nichts anderes herausgeben, weil nichts anderes da ist.
 2. **Schreiben nur als Plan-Vorschlag mit Bestätigung in der App.** Das einzige schreibende Werkzeug
    ist `propose_training_plan`. Es legt den Plan mit `status=pending` ab. Die App holt ihn, zeigt ihn
@@ -675,7 +848,7 @@ Wer sie verletzt, betreibt etwas anderes als das hier beschriebene System.
 | Geheimnis | Wo | Wer es sonst noch braucht |
 | --- | --- | --- |
 | `KORE_INGEST_TOKEN` | `.env` des Servers | Kore, nur auf dem Experten-Weg |
-| `KORE_MCP_TOKEN` | `.env` des Servers | `.env` des Profils als `MCP_KORE_API_KEY` |
+| `KORE_MCP_TOKEN` | `.env` des Servers | `.env` des Profils als `MCP_KORE_API_KEY` (und die jedes anderen Profils, dem du Lesezugriff gegeben hast) |
 | `KORE_BRIDGE_TOKEN` | `bridge.env` | Kore, nur auf dem Experten-Weg |
 | `KORE_PLAN_ORIGIN_SECRET` | `.env` des Servers **und** `bridge.env` (gleicher Wert) | niemand sonst |
 | Gerätetokens | serverseitig nur als Hash | `kore-doctor revoke <id>` hebt eines auf |
@@ -693,7 +866,7 @@ neues `KORE_BRIDGE_TOKEN` macht zusätzlich alle Chat-Referenzen ungültig: Jede
 | Sie darf | Sie darf nicht |
 | --- | --- |
 | `hermes` für genau das eine Profil aus `KORE_HERMES_PROFILE` starten, als ihr Dienstnutzer, mit dem Prompt über stdin | im App-Chat Terminal, Dateien, Code-Ausführung, Cronjobs, Computer- oder Browser-Steuerung freigeben; die Werkzeuge kommen aus einer festen Liste (`-t`), nicht aus einer Sperrliste |
-| im allgemeinen Chat `web,skills,memory` erlauben, im Health-Chat mit Herkunftsticket `skills,memory,kore`, wo Health-Kontext kein Ticket hat (Tages-Anpassung) `skills,memory`; im Health-Chat `web,skills,memory,kore` (ohne Ticket `web,skills,memory`) nur, wenn die Anfrage `health_web_allowed: true` sagt | `web` ohne diese ausdrückliche Anfrage in die Nähe von Health-Kontext lassen, der Tages-Anpassung in keinem Fall `web` geben oder Dienst-Geheimnisse an Hermes vererben: Das Kind bekommt nur `HOME`, `PATH` und sieben Schlüssel wie `LANG`/`TZ` |
+| im allgemeinen Chat `web,skills,memory` erlauben, im Health-Chat mit Herkunftsticket `skills,memory,kore`, wo Health-Kontext kein Ticket hat (Tages-Anpassung) `skills,memory`; im Health-Chat `web,skills,memory,kore` (ohne Ticket `web,skills,memory`) nur, wenn die Anfrage `health_web_allowed: true` sagt | `web` ohne diese ausdrückliche Anfrage in die Nähe von Health-Kontext lassen, der Tages-Anpassung in keinem Fall `web` geben oder Dienst-Geheimnisse an Hermes vererben: Das Kind bekommt nur `HOME`, `PATH`, sieben Schlüssel wie `LANG`/`TZ` und, wenn du `KORE_HERMES_DATA_DIR` setzt, `HERMES_HOME` |
 | jeden Prompt mit der festen ersten Zeile `[KORE-APP-NACHRICHT]` beginnen und jeden Hermes-Lauf in einem frischen, leeren temporären Ordner starten, der danach entfernt wird | eine Nachricht, die mit einem Dateipfad beginnt, diese Datei anhängen lassen oder Hermes `AGENTS.md`, `CLAUDE.md` und ähnliche Kontextdateien aus dem Home-Verzeichnis in den Prompt laden lassen |
 | das angepasste Training des Tages nur zurückgeben, wenn es leichter oder kürzer ist als das, was die App geschickt hat, und oben in der Session nur mit `session_id`, `name` und `exercises` | ein schwereres oder längeres zurückgeben (mehr Sätze, Gewicht, Wiederholungen, längere Dauer, neue oder umbenannte Übungen): Die Antwort wird verworfen, die App bekommt 502 mit einem festen Satz |
 | Sessions der Quellen `kore-general`/`kore-health` lesen, um Titel und Vorgänger zu finden, und sie auf Wunsch oder nach 30 Tagen löschen, angeheftete und archivierte eingeschlossen; die Quelle jeder Session wird vor dem Löschen geprüft, auch beim Vergessen eines ganzen Scopes und beim Verfall | Sessions anderer Quellen anfassen oder das Gedächtnis oder die Konfiguration des Profils ändern |
@@ -801,13 +974,17 @@ systemd-Unit). Was jeder Teil speichert:
 
 | Wo | Was |
 | --- | --- |
-| **Ingest + MCP**, Docker-Volume `kore-db` (SQLite) | der jüngste Snapshot aus der App: Profil-Basisdaten, Erholung, HRV-Tageswerte bis 30 Tage, Ruhepuls, Schlaf, Workouts mit Puls und kcal, Trainingspläne mit Namen und Notizen; offene Plan-Vorschläge |
+| **Ingest + MCP**, Docker-Volume `kore-db` (SQLite) | der jüngste Snapshot aus der App: Profil-Basisdaten, Erholung, HRV-Tageswerte bis 30 Tage, Ruhepuls, Schlaf, Workouts mit Puls und kcal, tägliche Schritte, Gewicht und Körperfett (bis 30 Tage), Ernährung als Tagessummen (bis 30 Tage; nur wenn du sie in Kore teilst), Trainingspläne mit Namen und Notizen; offene Plan-Vorschläge |
 | **Kopplungszustand**, `state/` neben der `docker-compose.yml` | die Server-ID, der Hash eines offenen Einmalcodes samt Zahl der Fehlversuche und je gekoppeltem Gerät eine ID, ein Name, der Hash seines Tokens und zwei Zeitstempel. Keine Tokens oder Codes im Klartext |
 | **Coach-Bridge** | keine Datenbank. Laufende Turns liegen im Arbeitsspeicher (bis 24 Stunden, 64 Antworten) und gehen beim Neustart verloren. Jeder Hermes-Lauf arbeitet in einem frischen, leeren temporären Ordner, der danach gelöscht wird. Das Journal bekommt nur eine Fehlerzeile ohne Inhalt |
 | **Hermes-Profil**, `~/.hermes/profiles/<profil>/` | die Chat-Sessions von Kore (Quellen `kore-general`/`kore-health`) und das Gedächtnis des Profils. Die Bridge löscht Kore-Sessions nach 30 Tagen ohne Aktivität und wenn du einen Chat in Kore löschst; das Gedächtnis fasst sie nie an |
 | **Dein Modell-Anbieter** | die Prompts, und bei eingeschaltetem „Health-Kontext mit Coach teilen“ der Health-Kontext in jeder Nachricht. So funktioniert ein Chat; wähl deinen Anbieter entsprechend |
 
-Ohne den Schalter „Health-Kontext teilen“ bekommt der Coach nur, was du tippst.
+Ohne den Schalter „Health-Kontext teilen“ bekommt der Coach nur, was du tippst. Schritte, Gewicht und
+Körperfett nutzen den Health-Zugriff, den Kore schon hat; Ernährung braucht einen eigenen Schalter in den
+Experimentellen Funktionen von Kore (Standard aus, sichtbar, sobald ein Coach verbunden ist) und eine
+eigene Health-Berechtigung, und Ausschalten leert sie beim nächsten Sync auf deinem Server. Der Ingest
+schreibt keine Snapshot-Werte ins Log und gibt sie in Fehlern nicht zurück.
 
 ## Wenn etwas nicht geht
 
@@ -822,6 +999,7 @@ Kore nennt unter Experimentelle Funktionen den nächsten Schritt. Die Bridge pr�
 | „Coach-Token abgelehnt. Prüfe KORE_BRIDGE_TOKEN in bridge.env und füge ihn ohne „Bearer“ ein.“ | Die Bridge hat geantwortet und dich abgewiesen. | Neu koppeln oder `KORE_BRIDGE_TOKEN` ohne das Wort „Bearer“ einfügen. |
 | „Die Bridge läuft, ist aber nicht fertig eingerichtet (503).“ | Sie antwortet, hat aber kein Token; absichtlich ein Fehler statt eines offenen Zugangs. | `KORE_BRIDGE_TOKEN` in `bridge.env` setzen und neu starten. |
 | „Deine Coach-Bridge ist zu alt (API 1, nötig 2). Aktualisiere kore-server.“ | Die Bridge spricht eine ältere Protokollversion. | kore-server auf den Stand holen, den Kore nennt, und die Bridge neu starten. |
+| **„Coach-Bridge testen“** in Kore sagt, der Server sei älter als die App | Der Ingest nennt ein Snapshot-Feld nicht, das die App kennt: `GET /capabilities` antwortet 404 (ein Ingest v0.13.0) oder ohne `activity_body_nutrition_v1` bzw. `apple_hrv_v1`. Nichts ist kaputt: Kore synchronisiert weiter und lässt weg, was der Server nicht annimmt (Schritte, Gewicht, Ernährung, die Apple-Kennungen der Erholungs-HRV). | Den Server auf den Stand holen, den Kore nennt, siehe [Aktualisieren](#aktualisieren). |
 | „Deiner Coach-Bridge fehlt: …“ | Die Bridge meldet eine Fähigkeit nicht, die Kore verlangt; der Name steht im Text. | kore-server aktualisieren. Fehlt `plan_origin_v1`, zusätzlich `KORE_PLAN_ORIGIN_SECRET` und `KORE_PLAN_ORIGIN_PRINCIPAL` in `bridge.env` prüfen; beide müssen gesetzt sein. Fehlt `device_pairing_v1`, ist der Zustandsordner unbrauchbar (siehe die beiden Kopplungs-Zeilen unten). |
 | Kopplung scheitert (401 `pairing_failed`) | Der Code ist falsch, abgelaufen (10 Minuten), schon benutzt, nach 1000 Fehlversuchen tot, oder die Kopplung ist auf dem Server nicht verfügbar. | `kore-doctor pair` erneut ausführen und einen frischen Link nehmen. Klappt es weiter nicht: `journalctl -u kore-coach-bridge` und nach `Device pairing unavailable` suchen. |
 | Kopplung scheitert immer wieder mit 401, obwohl der Link frisch ist | 1000 Fehlversuche mit einem wohlgeformten Code töten diesen Code; etwas in deinem Netz hat ihn immer wieder probiert. Eine Anfrage, die kein wohlgeformter Code ist, zählt nicht. | Mit `kore-doctor pair` einen neuen Code erzeugen (ein toter Code kommt nicht zurück) und nach dem Gerät suchen, das weiter sendet: Das Journal nennt die Adresse jedes Fehlversuchs. |
@@ -829,6 +1007,8 @@ Kore nennt unter Experimentelle Funktionen den nächsten Schritt. Die Bridge pr�
 | Journal: `Device pairing unavailable: …` | Der Zustandsordner fehlt, oder die Bridge kann nicht hineinschreiben. | `kore-doctor init-state`, dann die Besitzer prüfen. Mit der gehärteten Unit muss `<HOME>/kore-server/state` in `ReadWritePaths` stehen. |
 | `docker compose up` bricht mit „set KORE_STATE_GID …“ ab | In der `.env` fehlt `KORE_STATE_GID`. | `kore-doctor init-state` ausführen und die ausgegebene Zeile in die `.env` übernehmen. |
 | `docker compose up` bricht mit „set KORE_… in .env“ für einen anderen Schlüssel ab | Compose braucht diesen Schlüssel für einen Container und findet keinen. | Den Schlüssel in der `.env` ergänzen (mit der `.env.example` vergleichen). |
+| `docker compose up` bricht mit „port is already allocated“ ab (8081 oder 8000) | Ein anderes Programm oder ein zweiter Kore-Stapel nutzt diesen Host-Port schon. | `KORE_INGEST_PORT` und/oder `KORE_MCP_PORT` in der `.env` auf freie Ports setzen, `docker compose up -d`; den neuen Port in der Server-Adresse in Kore (Kopplungslinks folgen ihm) und in der MCP-`url` des Profils verwenden. |
+| `hermes mcp test kore` scheitert mit `No module named 'mcp'` | Dein Hermes wurde ohne sein MCP-Extra installiert; die Ursache liegt bei Hermes. | `hermes pm install --extra mcp` als der Nutzer (oder im Container), der Hermes betreibt; `kore-doctor` nennt dieselbe Abhilfe. |
 | Ein Dienst startet nicht, die Meldung lautet „is too short: at least 32 characters are required“ (Ingest, MCP) oder „KORE_BRIDGE_TOKEN must contain at least 32 characters“ (Bridge) | Seit 0.13 brauchen die drei Bearer-Tokens 32 Zeichen. | Mit `openssl rand -hex 24` ein neues erzeugen, eintragen, neu starten und die Gegenstelle nachziehen (`.env` des Hermes-Profils, oder Kore auf dem Experten-Weg). |
 | Der Ingest-Container startet in einer Schleife neu; das Log sagt „… must be a concrete IPv4 loopback, RFC 1918 or VPN (100.64.0.0/10) address“ | `KORE_BIND_ADDRESS` ist `0.0.0.0`, ein Hostname oder eine öffentliche Adresse. | `docker compose logs ingest`; die LAN-Adresse dieses Rechners in `KORE_BIND_ADDRESS` eintragen, dann `docker compose up -d`. Dieselbe Meldung von `python ingest_api.py` oder `python mcp_server.py` ohne Docker nennt `KORE_INGEST_HOST`, `KORE_BIND_ADDRESS` oder `KORE_MCP_HOST`. |
 | Die Bridge startet nicht und nennt `skills.inline_shell` | Die `config.yaml` des Profils hat Shell-Befehle in Skills an oder nicht eindeutig aus; ein gequoteter, escapter oder Flow-Schlüssel irgendwo in der Datei gilt als nicht eindeutig aus. | Unter `skills:` genau `inline_shell: false` setzen (oder den Schlüssel entfernen) und nur schlichte Schlüssel verwenden, siehe Schritt 5 der Einrichtung, und neu starten. |
@@ -854,10 +1034,16 @@ python3 scripts/kore-doctor --bridge-env /pfad/bridge.env --server-env /pfad/.en
 python3 scripts/kore-doctor --bridge-only   # nur Bridge und Hermes
 ```
 
+`--bridge-env`, `--server-env` und `--state-dir` gelten vor und nach einem Unterbefehl
+(`kore-doctor devices --state-dir …`) und auch ohne einen.
+
 Das Skript braucht nur die Standardbibliothek und gibt nie einen Geheimwert aus. Es prüft, dass
 
-- der Ingest-`/health` 200 liefert (und mit fremdem Origin 403);
-- der MCP-Server auf `127.0.0.1` ohne Token 401 liefert und über die Netzadresse nicht erreichbar ist;
+- der Ingest-`/health` 200 liefert (und mit fremdem Origin 403), auf `KORE_INGEST_PORT` aus der
+  Server-`.env` (Standard 8081);
+- der MCP-Server auf `127.0.0.1` (Port `KORE_MCP_PORT`, Standard 8000) ohne Token 401 liefert und über die
+  Netzadresse nicht erreichbar ist. Ist `KORE_MCP_URL` in der Server-`.env` gesetzt (ein MCP, der nur im
+  Compose-Netz liegt), überspringt der Doctor das mit einer `[HINWEIS]`-Zeile;
 - die Bridge ohne Token 401 liefert und ihr `/health` mit Token jede Fähigkeit aus
   [`contract/app-required-capabilities.json`](contract/app-required-capabilities.json),
   `prompt_transport: stdin` und `app_chat_toolsets` ohne Terminal-, Datei-, Code-, Cron-, Computer-
@@ -867,9 +1053,10 @@ Das Skript braucht nur die Standardbibliothek und gibt nie einen Geheimwert aus.
   Servers) mindestens 32 Zeichen haben;
 - `KORE_PLAN_ORIGIN_SECRET` (per Hash), `KORE_INSTANCE_ID` und `KORE_PLAN_ORIGIN_PRINCIPAL` in Server
   und Bridge gleich sind;
-- das Profil existiert, `hermes -p <profil> mcp test kore` gelingt, Hermes mit genau dem Env läuft,
-  das ihm die Bridge gibt, und die `SOUL.md` des Profils die aktuelle
-  [`kore-app-chat-soul.md`](hermes/kore-app-chat-soul.md) enthält;
+- das Profil existiert (unter `KORE_HERMES_DATA_DIR`, wenn du es setzt), `hermes -p <profil> mcp test
+  kore` gelingt (Zeitlimit 30 Sekunden; scheitert es, weil Hermes das Modul `mcp` fehlt, nennt der Doctor
+  `hermes pm install --extra mcp`), Hermes mit genau dem Env läuft, das ihm die Bridge gibt, und die
+  `SOUL.md` des Profils die aktuelle [`kore-app-chat-soul.md`](hermes/kore-app-chat-soul.md) enthält;
 - `skills.inline_shell` in der `config.yaml` des Profils aus ist (fehlt oder `false`, nur schlichte
   YAML-Schlüssel);
 - er nennt den Modell-Anbieter des Profils und seine eingeschalteten Plugins; ein Programm, das ein
@@ -887,14 +1074,35 @@ Kopplungs-Hinweis ist zweisprachig.
 
 ```bash
 cd ~/kore-server
-git fetch --tags origin && git checkout --detach <neuer Tag>
+git fetch --tags origin
+git checkout --detach <neuer Tag>     # der Tag, den Kore oder die Release-Seite nennt
+git rev-parse HEAD                    # muss dem Commit-Hash dieses Tags entsprechen; sonst hier abbrechen
 docker compose up -d --build
-sudo systemctl restart kore-coach-bridge
+sudo systemctl restart kore-coach-bridge      # Bridge unter systemd; im Docker-Container siehe unten
 python3 scripts/kore-doctor
+hermes -p <profil> mcp test kore              # „Connected“ und die Werkzeuge dieser Version
 ```
 
+1. **Den Tag auschecken und prüfen.** Release-Tags werden nie verschoben. Vergleiche `git rev-parse HEAD`
+   mit dem Commit-Hash, den der Einrichtungsprompt von Kore oder die Release-Seite für diesen Tag nennt.
+   Weicht er ab, mach nicht weiter.
+2. **Neu bauen:** Ingest und MCP mit `docker compose up -d --build`.
+3. **Die Bridge neu starten.** Unter systemd: `sudo systemctl restart kore-coach-bridge`. Läuft sie als
+   Prozess im Hermes-Container (siehe [Hermes im Docker-Container](#hermes-im-docker-container-z-b-unraid),
+   Schritt 5): beende sie und starte sie mit demselben Befehl neu.
+4. **Prüfen.** `kore-doctor` muss mit 0 enden, und `hermes -p <profil> mcp test kore` muss „Connected“
+   melden (ab Version 0.14: „Tools discovered: 10“).
+
+Gekoppelte Geräte bleiben gekoppelt: Der Kopplungszustand und alle Tokens bleiben unberührt. Neue
+Variablen in `.env` und `bridge.env` sind optional; ergänze eine nur, wenn du brauchst, was sie bewirkt
+(`KORE_INGEST_PORT`, `KORE_MCP_PORT`, `KORE_MCP_URL` in der `.env`, `KORE_HERMES_DATA_DIR` in der
+`bridge.env`). Ein älterer Server funktioniert mit einem neueren Kore weiter; Kore lässt weg, was der
+Server nicht annimmt, und sagt es unter **„Coach-Bridge testen“**, mit einem Link auf diesen Abschnitt
+und einem Text, den du in deinen Hermes einfügen kannst, damit er diese Schritte ausführt.
+
 Lass `kore-doctor` (und `hermes -p <profil> mcp test kore`) auch nach jedem `hermes update` laufen.
-Die Änderungen je Version stehen im [CHANGELOG.md](CHANGELOG.md).
+Die Änderungen je Version, mit einem Abschnitt „Upgrading from …“ je Version, stehen im
+[CHANGELOG.md](CHANGELOG.md).
 
 **Sicherheits-Härtung in 0.13.** Dienste, die früher starteten, können jetzt die Arbeit verweigern:
 Tokens unter 32 Zeichen, eingeschaltetes `skills.inline_shell`, eine Bind-Adresse außerhalb von
@@ -911,7 +1119,7 @@ jetzt nur noch auf `127.0.0.1` veröffentlicht.
 
 ## Referenz
 
-### Die Werkzeuge (7 lesen, 1 schlägt vor)
+### Die Werkzeuge (9 lesen, 1 schlägt vor)
 
 | Werkzeug | Liefert |
 | --- | --- |
@@ -919,15 +1127,22 @@ jetzt nur noch auf `127.0.0.1` veröffentlicht.
 | `get_hrv_trend(days=30)` | Je Tag ein HRV-Wert (SDNN in ms) für die letzten `days` Tage: Tageswerte, keine Messreihe innerhalb eines Tages |
 | `get_sleep_summary(days=7)` | Je Nacht Gesamt-, Tief- und REM-Stunden sowie Effizienz |
 | `get_recent_workouts(limit=10)` | Datum, Art, Dauer, Durchschnittspuls, Volumen |
+| `get_activity_body_trend(days=30)` | Je Tag (1 bis 30 Tage, neueste zuletzt): Schritte (`count`) und Körper (`weight_kg` in kg, `body_fat_pct` in %, die letzte Messung des Tages) |
+| `get_nutrition_trend(days=30)` | Je Tag (1 bis 30 Tage, neueste zuletzt): `kcal`, `protein_g`, `carbs_g`, `fat_g` als Tagessummen aus Apple Health; unvollständig, wenn nicht alles erfasst wird; leer, solange du Ernährung in Kore nicht teilst |
 | `get_active_plan` | Der aktuell in der App aktive Trainingsplan |
 | `get_training_plans` | Alle Pläne, plus Zeitstempel des Snapshots |
-| `get_coach_briefing` | Das verdichtete Tagesbild in einem Aufruf: Erholung, HRV, Schlaf, Workouts, Profil, Pläne |
+| `get_coach_briefing` | Das verdichtete Tagesbild in einem Aufruf: Erholung, HRV, Schlaf, Workouts, Profil, Pläne, dazu die letzten 7 Tage Schritte und Gewicht (`activity_body_7d`) und Ernährung (`nutrition_7d`) |
 | `propose_training_plan(plan, origin_ticket)` | Legt einen Plan als `pending` ab; die App bestätigt |
 
 Die HRV-Methode steckt im Schlüsselnamen: `hrv_rmssd_ms`, `hrv_sdnn_ms` oder `hrv_ms` bei unbekannter
 Methode. Ein Wert wird nie stillschweigend als SDNN etikettiert. Ausdrücklich **nicht** geliefert wird,
 was gar nicht erst auf dem Server liegt: Health-Rohwerte, Standort, Kontakte, Fotos, Zyklusdetails. Dein
 Coach kann nichts löschen, nichts abhaken und nichts stillschweigend aktivieren.
+
+Schritte, Gewicht, Körperfett und Ernährung sind neu in Snapshot v2 (Kore 0.14, Server 0.14). Sie sind für
+deinen Coach nur lesbar, gehen nur an deinen eigenen Server, und eine Liste, die die App nicht schickt,
+bleibt wie gespeichert. Ernährung kommt nur an, solange du sie in Kore teilst. Der Vertrag Feld für Feld
+steht in [`contract/snapshot-v2.md`](contract/snapshot-v2.md).
 
 ### Plan-JSON
 
@@ -965,7 +1180,12 @@ mit der Kapsel „VOM COACH“, genau in der Form, in der er lokal gespeichert w
 ### Ingest-API
 
 `POST /ingest` (Snapshot), `GET /plan/pending`, `POST /plan/{id}/ack` mit `{"accepted": true|false}`,
-`GET /health` (ohne Token). Alles andere braucht `Authorization: Bearer <token>`; das Token ist
+`GET /capabilities`, `GET /health` (ohne Token). `GET /capabilities` antwortet
+`{"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1"]}`: Kore liest es vor jedem
+Sync und schickt die neueren Snapshot-Felder (Schritte, Gewicht, Ernährung; die Apple-Kennungen der
+Erholungs-HRV) nur an einen Ingest, der sie nennt (ein Ingest v0.13.0 antwortet 404, und Kore synchronisiert
+ohne sie); siehe [`contract/snapshot-v2.md`](contract/snapshot-v2.md). (Die Coach-Bridge hat ein eigenes
+`GET /capabilities`, siehe unten.) Alles andere braucht `Authorization: Bearer <token>`; das Token ist
 `KORE_INGEST_TOKEN` oder das Token eines gekoppelten Geräts. Das Token wird geprüft, bevor der Body
 gelesen wird: Ein fehlendes oder falsches Token (oder zwei `Authorization`-Header) bekommt `401` mit
 `Connection: close`, und es wird kein Body geparst. Offen ist nur der exakte Pfad `/health` (er nimmt

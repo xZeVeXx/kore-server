@@ -12,7 +12,10 @@
 # Nicht als systemd `Environment=`: Die Bridge startet Hermes mit einer
 # minimalen Umgebung und reicht keine Dienst-Variablen weiter.
 #
-# Pruefen: hermes -p <profil> mcp test kore   ("Connected", "Tools discovered: 8")
+# Pruefen: hermes -p <profil> mcp test kore   ("Connected", "Tools discovered: 10")
+#
+# Laeuft Hermes im Docker-Container (z. B. Unraid), liegt der MCP im Compose-Netz: url dann
+# http://mcp:8000/mcp/ (siehe README, "Hermes in a Docker container").
 
 mcp_servers:
   kore:

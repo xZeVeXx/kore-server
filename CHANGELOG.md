@@ -4,6 +4,30 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
 
 ## Unreleased
 
+### Fixed
+
+- **Snapshots with Apple's recovery HRV were rejected (422).** Since app 0.10, Kore can carry the day
+  on Apple's own recovery HRV (iOS 27). The app then sends `hrv_kind`/`hrv_method_effective`
+  `appleRMSSD` and `hrv_source` `appleRecoveryRMSSD` with the neutral `hrv_ms` value. The ingest did
+  not know these values and rejected the whole snapshot, so the coach saw no data at all. They are
+  now accepted, never mixed with `hrv_rmssd_ms`/`hrv_sdnn_ms` or the rMSSD/SDNN sources, and the
+  `get_recovery_today` tool tells the coach that this is a scale of its own.
+- **Bridge start with Telegram topics in the profile.** Hermes writes Telegram topic prompts with
+  single-quoted numeric keys (`'1': ...`). The strict `skills.inline_shell` check rejected every
+  quoted key, so the bridge refused to start for such profiles. Single-quoted keys made only of
+  `A-Z a-z 0-9 . _ ~ + -` are now accepted when they are indented under a block other than `skills:`.
+  Quoted keys at the top level, inside `skills:`, with double quotes, in list items or naming
+  `inline_shell` stay rejected. `kore-doctor` judges the same way.
+
+### Security
+
+- **Two ways past the `skills.inline_shell` lock closed.** Hermes enables inline shell for any
+  non-empty value, and two texts that read as `false` were not: a deeper continuation line right
+  after `inline_shell: false` (YAML folds it into `"false yes"`) and Unicode whitespace such as
+  NBSP after `false`. Only someone who can already write the Hermes profile's `config.yaml` could
+  use them. The bridge and `kore-doctor` now treat only space and tab as YAML whitespace and reject
+  a deeper line directly after the `inline_shell` line.
+
 ### Added
 
 - **Ports for a second stack.** `KORE_INGEST_PORT` (default 8081) and `KORE_MCP_PORT` (default 8000)
@@ -35,6 +59,16 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
   `{"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1"]}`. The app 0.14 reads it
   before each sync and sends the new lists and Apple's HRV labels only to an ingest that names them,
   so it keeps syncing with a v0.13.0 ingest (which answers 404 there). `/health` stays `{"ok": true}`.
+- **Docker/Unraid guide.** New README section "Hermes in a Docker container (e.g. Unraid)" (German:
+  "Hermes im Docker-Container (z. B. Unraid)") for a Hermes installation in the Hermes Docker image:
+  ingest and MCP by Compose, the MCP reached inside the Compose network at `http://mcp:8000/mcp/` (with
+  `KORE_MCP_URL` in the server `.env`), `KORE_HERMES_DATA_DIR=/opt/data`, moved ports, and the coach
+  bridge as a process in the Hermes container on a fixed container address, restarted without systemd.
+- **Coach profile: consequences spelled out.** The README's profile step now names what an existing
+  profile means: every way that profile is used (Telegram, groups, desktop, scheduled tasks) can read
+  your health data through the read tools, while the bridge's limits apply only in the app chat. A new
+  coach profile stays the recommendation. Optional extra step, never the default: a main assistant
+  that gets only the read tools of the `kore` MCP server (`tools.include`).
 
 ### Changed
 
@@ -44,36 +78,34 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
 - **`kore-doctor devices` only reads.** It no longer needs write access to the pairing state
   directory and creates no lock file (new `PairingStore.list_devices(lock=False)`; devices.json is
   replaced atomically, so a lock-free read is safe).
-
-### Fixed
-
-- **Snapshots with Apple's recovery HRV were rejected (422).** Since app 0.10, Kore can carry the day
-  on Apple's own recovery HRV (iOS 27). The app then sends `hrv_kind`/`hrv_method_effective`
-  `appleRMSSD` and `hrv_source` `appleRecoveryRMSSD` with the neutral `hrv_ms` value. The ingest did
-  not know these values and rejected the whole snapshot, so the coach saw no data at all. They are
-  now accepted, never mixed with `hrv_rmssd_ms`/`hrv_sdnn_ms` or the rMSSD/SDNN sources, and the
-  `get_recovery_today` tool tells the coach that this is a scale of its own.
-- **Bridge start with Telegram topics in the profile.** Hermes writes Telegram topic prompts with
-  single-quoted numeric keys (`'1': ...`). The strict `skills.inline_shell` check rejected every
-  quoted key, so the bridge refused to start for such profiles. Single-quoted keys made only of
-  `A-Z a-z 0-9 . _ ~ + -` are now accepted when they are indented under a block other than `skills:`.
-  Quoted keys at the top level, inside `skills:`, with double quotes, in list items or naming
-  `inline_shell` stay rejected. `kore-doctor` judges the same way.
-
-### Security
-
-- **Two ways past the `skills.inline_shell` lock closed.** Hermes enables inline shell for any
-  non-empty value, and two texts that read as `false` were not: a deeper continuation line right
-  after `inline_shell: false` (YAML folds it into `"false yes"`) and Unicode whitespace such as
-  NBSP after `false`. Only someone who can already write the Hermes profile's `config.yaml` could
-  use them. The bridge and `kore-doctor` now treat only space and tab as YAML whitespace and reject
-  a deeper line directly after the `inline_shell` line.
+- **README "Updating" is now "Upgrading"** (anchor `#upgrading`; German "Aktualisieren",
+  `#aktualisieren`), so the app can link to it. Steps: check out the tag, verify the commit hash,
+  `docker compose up -d --build`, restart the bridge (systemd or container process), `kore-doctor`,
+  `hermes -p <profile> mcp test kore`; paired devices stay paired and new variables are optional.
+- **Docs follow 0.14.** The tool list is 9 read tools plus `propose_training_plan` (`mcp test` shows
+  10 tools, was 8), with `get_activity_body_trend`, `get_nutrition_trend` and the new
+  `get_coach_briefing` keys; the ingest's `GET /capabilities`, the new data categories (steps,
+  weight and body fat, and nutrition only for your own coach after you share it in Kore), the moved
+  ports, `KORE_HERMES_DATA_DIR` and the doctor's new behaviour are described where they belong.
 
 ### Upgrading from 0.13.0
 
 Pull the release, rebuild the containers and restart the bridge (`docker compose up -d --build`,
 `sudo systemctl restart kore-coach-bridge`), then run `kore-doctor`. No `.env` or `bridge.env`
-changes are needed; paired devices stay paired.
+changes are needed; paired devices stay paired. The README's "Upgrading" section has the steps,
+including how to verify the tag's commit hash and how to restart a bridge that runs in the Hermes
+Docker container.
+
+`hermes -p <profile> mcp test kore` now lists 10 tools (before: 8). All new variables are optional:
+`KORE_INGEST_PORT` and `KORE_MCP_PORT` in `.env` only if you want to move a host port,
+`KORE_MCP_URL` in `.env` only for an MCP that lives in the Compose network, and
+`KORE_HERMES_DATA_DIR` in `bridge.env` only for Hermes data outside `<HOME>/.hermes` (such as the
+Docker image's `/opt/data`; with the hardened unit also add that folder to `ReadWritePaths`). The bridge
+unit itself is unchanged.
+
+A v0.13.0 server keeps working with app 0.14: the app reads `GET /capabilities`, gets a 404 there
+and leaves out steps, weight, nutrition and Apple's HRV labels until you upgrade. The other way
+round, app 0.13 against this server leaves the stored lists as they are.
 
 ## 0.13.0
 
@@ -282,7 +314,7 @@ message (also in `contract/health-web-opt-in-v1.md`).
 
 ### Upgrading from 0.10
 
-See "Coming from 0.10 or earlier" in the [README](README.md#updating): run `kore-doctor init-state`,
+See "Coming from 0.10 or earlier" in the [README](README.md#upgrading): run `kore-doctor init-state`,
 add `KORE_STATE_GID` to `.env`, update the `## Kore-App-Chat` section of the profile's `SOUL.md`, and
 check "Breaking for self-hosters" above.
 
