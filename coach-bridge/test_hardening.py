@@ -194,6 +194,15 @@ INLINE_SHELL_SAFE = {
     "MCP-Block wie im Beispielprofil": "mcp_servers:\n  kore:\n    url: http://127.0.0.1:8000/mcp/\n"
                                        "    headers:\n      Authorization: Bearer ${MCP_KORE_API_KEY}\n"
                                        "skills:\n  inline_shell: false\n",
+    # 0.13.1: Hermes schreibt Telegram-Themen als einfach gequotete Zahlen (`'1':`). Unterhalb
+    # anderer Bloecke als skills sind sie erlaubt — einfache Anfuehrungszeichen kennen keine Escapes.
+    "Telegram-Themen als gequotete Zahlen": "telegram:\n  channel_prompts:\n    '1': 'Du bist Hermes.'\n"
+                                             "    '-100123': kurz\n  allowed_chats: '-100123'\n"
+                                             "skills:\n  inline_shell: false\n",
+    "mehrzeiliger Wert hinter gequoteter Zahl": "telegram:\n  channel_prompts:\n    '2': 'Erste Zeile,\n"
+                                                "      zweite Zeile.'\n",
+    "false, danach Kommentar und Geschwister": "skills:\n  inline_shell: false\n  # Kommentar\n"
+                                               "  template_vars: true\n",
 }
 INLINE_SHELL_UNSAFE = {
     "true": "skills:\n  inline_shell: true\n",
@@ -236,6 +245,22 @@ INLINE_SHELL_UNSAFE = {
     "Tag am Schluessel": "skills:\n  inline_shell: false\n!!str key: 1\n",
     "Flow-Mapping hinter Anker": "skills:\n  inline_shell: false\nkey: &x {a: 1}\n",
     "gebrochener gequoteter Schluessel": 'skills:\n  ? "inline_\\\n    shell"\n  : true\n',
+    # 0.13.1: einfach gequotete Schluessel bleiben oben und im skills-Block gesperrt, nur aus
+    # schlichten Zeichen erlaubt und duerfen inline_shell nirgends nennen.
+    "einfach gequoteter skills-Schluessel": "'skills':\n  inline_shell: false\n",
+    "eingerueckter einfach gequoteter skills-Schluessel": "  'skills':\n    inline_shell: true\n",
+    "einfach gequotetes inline_shell unter anderem Block": "telegram:\n  'inline_shell': true\n",
+    "einfach gequoteter Schluessel mit Backslash": "telegram:\n  'inline\\x5fshell': true\n",
+    "einfach gequoteter Schluessel mit Leerzeichen": "telegram:\n  'a b': 1\n",
+    "doppelt gequotete Zahl unter anderem Block": 'telegram:\n  "1": x\n',
+    "einfach gequotete Zahl mit Flow-Mapping": "telegram:\n  '1': {\"inline\\x5fshell\": true}\n",
+    "einfach gequotete Zahl in einer Liste": "telegram:\n  - '1': x\n",
+    # 0.13.1 (Pruefung): Hermes prueft `if cfg.get("inline_shell")` — jeder nicht leere Text ist an.
+    "Fortsetzungszeile nach false": "skills:\n  inline_shell: false\n    yes please\n",
+    "Fortsetzung nach Leerzeile": "skills:\n  inline_shell: false\n\n    yes\n",
+    "geschuetztes Leerzeichen hinter false": "skills:\n  inline_shell: false \n",
+    "ideographisches Leerzeichen hinter false": "skills:\n  inline_shell: false　\n",
+    "Zeile nur aus geschuetztem Leerzeichen": "skills:\n  inline_shell: false\n     \n",
 }
 
 

@@ -586,15 +586,17 @@ def _yaml_content(line: str) -> str:
     if line.lstrip(" \t").startswith("#"):
         return ""
     match = re.search(r"[ \t]#", line)
-    return (line[:match.start()] if match else line).rstrip()
+    # Nur Leerzeichen und Tab sind YAML-Leerraum; str.rstrip() nähme auch NBSP & Co. weg, und
+    # "false\xa0" ist fuer Hermes ein wahrer Text (0.13.1, Pruefung).
+    return (line[:match.start()] if match else line).rstrip(" \t")
 
 
 def _yaml_key_value(text: str):
     """(Schluessel, Wert) einer Zeile im Blockkontext; Schluessel None, wenn sie keinen traegt."""
     match = _YAML_KEY_SEPARATOR_RE.search(text)
     if match is None:
-        return None, text.strip()
-    return text[:match.start()].strip(), text[match.end():].strip()
+        return None, text.strip(" \t")
+    return text[:match.start()].strip(" \t"), text[match.end():].strip(" \t")
 
 
 def _yaml_flow_with_keys(node: str) -> bool:
@@ -625,6 +627,19 @@ def _yaml_unplain(body: str) -> bool:
     return _yaml_flow_with_keys(value)
 
 
+# 0.13.1: Einfach gequotete Schluessel aus schlichten Zeichen, wie Hermes sie fuer Telegram-Themen
+# schreibt (`'1':`). Einfache Anfuehrungszeichen kennen keine Escapes, der Name steht also im Text.
+_YAML_SINGLE_QUOTED_KEY_RE = re.compile(r"'[A-Za-z0-9._~+-]+'")
+
+
+def _yaml_single_quoted_plain_key(body: str) -> bool:
+    """True fuer eine Zeile `'1': wert` — einfach gequoteter Schluessel ohne Escapes, Wert ohne
+    Flow-Schluessel. Listeneintraege und doppelte Anfuehrungszeichen bleiben nicht schlicht."""
+    key, value = _yaml_key_value(body)
+    return (key is not None and _YAML_SINGLE_QUOTED_KEY_RE.fullmatch(key) is not None
+            and not _yaml_flow_with_keys(value))
+
+
 def inline_shell_config_error(text: str):
     """None, wenn `skills.inline_shell` in diesem config.yaml-Text sicher aus ist, sonst ein Satz.
 
@@ -637,19 +652,26 @@ def inline_shell_config_error(text: str):
     ein Merge-Key `<<` im Block, jede andere Erwaehnung von inline_shell (gequotet, tiefer
     verschachtelt, unter einem anderen Schluessel) und auf jeder Ebene jeder Schluessel, der nicht
     schlicht ist (_yaml_unplain): `"inline\x5fshell": true` nennt den Namen nicht einmal.
+    Einzige Ausnahme (0.13.1): eingerueckt unterhalb eines anderen Blocks als skills ein einfach
+    gequoteter Schluessel aus schlichten Zeichen (`'1':`) — er kann skills.inline_shell nicht setzen.
     """
     problem = ("skills.inline_shell is on or not unambiguously off in the Hermes profile; Hermes "
                "would run shell commands from skills. Set `inline_shell: false` under `skills:` "
                "or remove the key")
     in_skills = False
     child_indent = None
+    after_inline_shell = False
     for raw in _YAML_LINE_BREAK_RE.split(text):
         content = _yaml_content(raw)
-        if not content.strip():
+        if not content.strip(" \t"):
             continue
         body = content.lstrip(" ")
         indent = len(content) - len(body)
-        if _yaml_unplain(body):
+        # Eine tiefere Zeile direkt nach `inline_shell: false` setzt den Wert fort ("false yes").
+        if after_inline_shell and indent > child_indent:
+            return problem
+        after_inline_shell = False
+        if _yaml_unplain(body) and not (indent and not in_skills and _yaml_single_quoted_plain_key(body)):
             return problem
         key, value = _yaml_key_value(body)
         separator = key is not None
@@ -678,6 +700,7 @@ def inline_shell_config_error(text: str):
         if key == _INLINE_SHELL_KEY:
             if value not in _INLINE_SHELL_OFF:
                 return problem
+            after_inline_shell = True
         elif mentions:
             return problem
     return None

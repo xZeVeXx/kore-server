@@ -475,14 +475,14 @@ def _yaml_content(line: str) -> str:
     if line.lstrip(" \t").startswith("#"):
         return ""
     match = re.search(r"[ \t]#", line)
-    return (line[:match.start()] if match else line).rstrip()
+    return (line[:match.start()] if match else line).rstrip(" \t")  # nur YAML-Leerraum (wie die Bridge)
 
 
 def _yaml_key_value(text: str):
     match = _YAML_KEY_SEPARATOR_RE.search(text)
     if match is None:
-        return None, text.strip()
-    return text[:match.start()].strip(), text[match.end():].strip()
+        return None, text.strip(" \t")
+    return text[:match.start()].strip(" \t"), text[match.end():].strip(" \t")
 
 
 def _yaml_flow_with_keys(node: str) -> bool:
@@ -510,18 +510,33 @@ def _yaml_unplain(body: str) -> bool:
     return _yaml_flow_with_keys(value)
 
 
+# Einfach gequotete Schluessel aus schlichten Zeichen (`'1':`, Telegram-Themen) wie die Bridge.
+_YAML_SINGLE_QUOTED_KEY_RE = re.compile(r"'[A-Za-z0-9._~+-]+'")
+
+
+def _yaml_single_quoted_plain_key(body: str) -> bool:
+    """`'1': wert` ohne Escapes und ohne Flow-Schluessel im Wert (wie die Bridge)."""
+    key, value = _yaml_key_value(body)
+    return (key is not None and _YAML_SINGLE_QUOTED_KEY_RE.fullmatch(key) is not None
+            and not _yaml_flow_with_keys(value))
+
+
 def inline_shell_config_error(text: str):
     """None, wenn skills.inline_shell sicher aus ist; streng zeilenbasiert wie die Bridge."""
     problem = "skills.inline_shell ist an oder nicht eindeutig aus"
     in_skills = False
     child_indent = None
+    after_inline_shell = False
     for raw in _YAML_LINE_BREAK_RE.split(text):
         content = _yaml_content(raw)
-        if not content.strip():
+        if not content.strip(" \t"):
             continue
         body = content.lstrip(" ")
         indent = len(content) - len(body)
-        if _yaml_unplain(body):
+        if after_inline_shell and indent > child_indent:  # Fortsetzung des Werts (wie die Bridge)
+            return problem
+        after_inline_shell = False
+        if _yaml_unplain(body) and not (indent and not in_skills and _yaml_single_quoted_plain_key(body)):
             return problem
         key, value = _yaml_key_value(body)
         separator = key is not None
@@ -550,6 +565,7 @@ def inline_shell_config_error(text: str):
         if key == _INLINE_SHELL_KEY:
             if value not in _INLINE_SHELL_OFF:
                 return problem
+            after_inline_shell = True
         elif mentions:
             return problem
     return None
