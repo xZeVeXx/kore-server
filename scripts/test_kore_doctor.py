@@ -6,10 +6,12 @@ suchen nach den Werten selbst und nach jeder Hex-Folge ab 32 Zeichen).
 """
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,6 +23,7 @@ import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent
 DOCTOR = SCRIPTS / "kore-doctor"
@@ -91,6 +94,10 @@ FAKE_HERMES = textwrap.dedent("""\
     if args[:2] == ["-p", config["profile"]] and args[2:] == ["mcp", "test", "kore"]:
         print("  Testing 'kore'...")
         print("    Authorization: Bearer " + config["leak"])
+        if config.get("mcp_stdout"):
+            print(config["mcp_stdout"])
+        if config.get("mcp_stderr"):
+            print(config["mcp_stderr"], file=sys.stderr)
         if config["mcp_exit"] == 0:
             print("  \\u2713 Connected (42ms)")
             print("  \\u2713 Tools discovered: 8")
@@ -551,12 +558,19 @@ class DoctorUnitTests(unittest.TestCase):
 
     def test_child_env_matches_the_bridge_exactly(self):
         parent = {"HOME": "/home/andere", "PATH": "/eigener/pfad", "LANG": "de_DE.UTF-8",
-                  "TZ": "Europe/Berlin", "KORE_BRIDGE_TOKEN": "t" * 48, "SECRET_SOMETHING": "x"}
+                  "TZ": "Europe/Berlin", "KORE_BRIDGE_TOKEN": "t" * 48, "SECRET_SOMETHING": "x",
+                  "HERMES_HOME": "/aus/der/umgebung"}
         cases = {
             "leer": {},
             "alles gesetzt": {"KORE_HERMES_HOME": "/srv/hermes", "KORE_HERMES_CHILD_PATH": "/a:/b",
                               "LC_ALL": "C.UTF-8"},
             "leerer Kind-PATH": {"KORE_HERMES_CHILD_PATH": ""},
+            "Datenordner": {"KORE_HERMES_DATA_DIR": "/opt/data"},
+            "Datenordner und alles gesetzt": {"KORE_HERMES_DATA_DIR": "/opt/data/", "LC_ALL": "C.UTF-8",
+                                              "KORE_HERMES_HOME": "/srv/hermes"},
+            "leerer Datenordner": {"KORE_HERMES_DATA_DIR": ""},
+            "relativer Datenordner": {"KORE_HERMES_DATA_DIR": "opt/data"},
+            "Datenordner mit ..": {"KORE_HERMES_DATA_DIR": "/opt/../etc"},
         }
         for name, bridge_env in cases.items():
             with self.subTest(name):
@@ -1043,6 +1057,415 @@ class PairingContractUnitTests(unittest.TestCase):
         self.assertEqual(resolve(None, {}, {}, {"KORE_STATE_DIR": "/e"}), Path("/e"))
         self.assertEqual(resolve(None, {}, {"KORE_STATE_DIR": "./state"}, {}), self.doctor.REPO / "state")
         self.assertEqual(resolve(None, {}, {}, {}), self.doctor.REPO / "state")
+
+
+class DoctorHermesDataDirTests(DoctorTestCase):
+    """0.14 S1: Hermes im Docker-Image liegt unter /opt/data (HERMES_HOME). KORE_HERMES_DATA_DIR in
+    bridge.env: Der Doctor sucht das Profil dort und startet Hermes mit HERMES_HOME."""
+
+    def setUp(self):
+        super().setUp()
+        self.data_dir = Path(self.tmp.name) / "hermes-data"
+        self.data_profile = self.data_dir / "profiles" / "kore-coach"
+        self.data_profile.parent.mkdir(parents=True)
+        shutil.move(str(self.profile_dir), str(self.data_profile))
+        shutil.rmtree(self.home / ".hermes")   # unter HOME/.hermes gibt es nichts mehr
+        self.bridge_env_values["KORE_HERMES_DATA_DIR"] = str(self.data_dir)
+        self.write_envs()
+
+    def hermes_env(self) -> dict:
+        return json.loads((self.hermes.parent / "fake-hermes-env.json").read_text())
+
+    def test_the_profile_is_found_below_the_data_dir_and_hermes_gets_hermes_home(self):
+        code, output = self.run_doctor(bridge_only=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("Hermes-Profil kore-coach existiert", output)
+        env = self.hermes_env()
+        self.assertEqual(env["HERMES_HOME"], str(self.data_dir))
+        self.assertEqual(env["HOME"], str(self.home))   # HOME bleibt der Hermes-Nutzer
+        self.assertNotIn("KORE_HERMES_DATA_DIR", env)
+
+    def test_the_default_profile_lives_directly_in_the_data_dir(self):
+        shutil.move(str(self.data_profile), str(self.data_dir / "default-profile"))
+        for name in ("config.yaml", "SOUL.md"):
+            shutil.move(str(self.data_dir / "default-profile" / name), str(self.data_dir / name))
+        self.bridge_env_values["KORE_HERMES_PROFILE"] = "default"
+        self.hermes_config["profile"] = "default"
+        self.write_hermes_config()
+        self.write_envs()
+
+        code, output = self.run_doctor(bridge_only=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("Hermes-Profil default existiert", output)
+
+    def test_a_profile_only_below_home_is_not_found_when_the_data_dir_is_set(self):
+        shutil.move(str(self.data_profile), str(self.home / "elsewhere"))
+        (self.home / ".hermes" / "profiles").mkdir(parents=True)
+        shutil.copytree(self.home / "elsewhere", self.home / ".hermes" / "profiles" / "kore-coach")
+
+        code, output = self.run_doctor(bridge_only=True)
+
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("existiert nicht unter", output)
+        self.assertIn(str(self.data_dir), output)
+
+    def test_inline_shell_is_checked_in_the_profile_below_the_data_dir(self):
+        (self.data_profile / "config.yaml").write_text("skills:\n  inline_shell: true\n")
+
+        code, output = self.run_doctor(bridge_only=True)
+
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("skills.inline_shell", output)
+
+    def test_an_invalid_data_dir_is_a_deviation_and_hermes_is_not_started(self):
+        for value in ("relative/hermes-data", "/srv/../etc", "~/hermes", "$HOME/hermes"):
+            with self.subTest(value=value):
+                self.setUp()
+                self.bridge_env_values["KORE_HERMES_DATA_DIR"] = value
+                self.write_envs()
+
+                code, output = self.run_doctor(bridge_only=True)
+
+                self.assertNotEqual(code, 0, output)
+                self.assertIn("KORE_HERMES_DATA_DIR", output)
+                self.assertFalse((self.hermes.parent / "fake-hermes-env.json").exists())
+
+    def test_doctor_and_bridge_judge_the_data_dir_alike(self):
+        process = subprocess.run(
+            [sys.executable, "-c",
+             "import json, bridge\n"
+             "from test_hardening import HermesDataDirTests as T\n"
+             "values = list(T.VALID) + list(T.INVALID) + ['', None]\n"
+             "print(json.dumps([[v, bridge.hermes_data_dir_error(v) is None] for v in values]))"],
+            capture_output=True, text=True, timeout=30, cwd=BRIDGE_DIR,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(BRIDGE_DIR),
+                 "HOME": self.tmp.name},
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        verdicts = json.loads(process.stdout)
+        self.assertGreater(len(verdicts), 15)
+        doctor = load_doctor()
+        for value, bridge_valid in verdicts:
+            with self.subTest(value=value):
+                self.assertEqual(doctor.hermes_data_dir_error(value) is None, bridge_valid)
+
+    def test_doctor_and_bridge_find_the_same_profile_config(self):
+        doctor = load_doctor()
+        cases = (
+            ("kore-coach", "/opt/data"), ("default", "/opt/data"), ("kore-coach", ""),
+            ("default", ""), ("kore-coach", "/opt/data/"),
+        )
+        for profile, data_dir in cases:
+            with self.subTest(profile=profile, data_dir=data_dir):
+                process = subprocess.run(
+                    [sys.executable, "-c", "import bridge; print(bridge.profile_config_path())"],
+                    capture_output=True, text=True, timeout=30, cwd=BRIDGE_DIR,
+                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(BRIDGE_DIR),
+                         "KORE_HERMES_HOME": "/srv/hermes-user", "KORE_HERMES_PROFILE": profile,
+                         "KORE_HERMES_DATA_DIR": data_dir},
+                )
+                self.assertEqual(process.returncode, 0, process.stderr)
+                found = doctor.hermes_profile_dir({"KORE_HERMES_DATA_DIR": data_dir}, "/srv/hermes-user",
+                                                  profile)
+                self.assertEqual(str(found / "config.yaml"), process.stdout.strip())
+
+
+class DoctorMcpExtraTests(DoctorTestCase):
+    """Hermes ohne das mcp-Extra: `hermes mcp test kore` scheitert mit einer Python-Meldung. Die
+    Ursache liegt bei Hermes; der Doctor nennt nur die Abhilfe."""
+
+    MISSING = (
+        ("stderr", {"mcp_stderr": "ModuleNotFoundError: No module named 'mcp'"}),
+        ("stdout", {"mcp_stdout": "  x No module named 'mcp'"}),
+        ("Untermodul", {"mcp_stderr": "ModuleNotFoundError: No module named 'mcp.client.sse'"}),
+        ("doppelte Anfuehrungszeichen", {"mcp_stderr": 'No module named "mcp"'}),
+    )
+
+    def test_a_missing_mcp_module_names_the_remedy(self):
+        for name, extra in self.MISSING:
+            with self.subTest(name):
+                self.setUp()
+                self.hermes_config.update(mcp_exit=1, **extra)
+                self.write_hermes_config()
+
+                code, output = self.run_doctor(bridge_only=True)
+
+                self.assertNotEqual(code, 0, output)
+                self.assertRegex(output, r"\[FEHLER\] .*mcp")
+                self.assertIn("hermes pm install --extra mcp", output)
+                # Die Ausgabe von Hermes wird nie weitergegeben.
+                self.assertNotIn("No module named", output)
+
+    def test_other_failures_do_not_get_the_remedy(self):
+        for name, extra in (("Verbindung", {"mcp_stderr": "Connection refused"}),
+                            ("anderes Modul", {"mcp_stderr": "No module named 'yaml'"}),
+                            ("ohne Ausgabe", {})):
+            with self.subTest(name):
+                self.setUp()
+                self.hermes_config.update(mcp_exit=1, **extra)
+                self.write_hermes_config()
+
+                code, output = self.run_doctor(bridge_only=True)
+
+                self.assertNotEqual(code, 0, output)
+                self.assertNotIn("pm install", output)
+
+    def test_a_successful_test_never_gets_the_remedy(self):
+        self.hermes_config.update(mcp_stderr="No module named 'mcp'")
+        self.write_hermes_config()
+        code, output = self.run_doctor(bridge_only=True)
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("pm install", output)
+
+    def test_the_mcp_test_runs_with_a_30_second_limit_and_the_output_is_bounded(self):
+        doctor = load_doctor()
+        limit = doctor.MCP_TEST_OUTPUT_LIMIT
+        self.assertEqual(limit, 65536)
+        real_run = subprocess.run
+        # (Fuellung vor der Meldung, ob die Meldung noch innerhalb der Grenze liegt)
+        for padding, counted in ((limit - 100, True), (limit + 100, False)):
+            with self.subTest(padding=padding):
+                seen = []
+
+                def recording_run(command, *args, **kwargs):
+                    if command[-3:] == ["mcp", "test", "kore"]:
+                        seen.append(kwargs.get("timeout"))
+                        return subprocess.CompletedProcess(
+                            command, 1, stdout="x" * (3 * limit),
+                            stderr="x" * padding + " No module named 'mcp'")
+                    return real_run(command, *args, **kwargs)
+
+                stream = io.StringIO()
+                report = doctor.Report(stream=stream)
+                with mock.patch.object(doctor.subprocess, "run", recording_run):
+                    doctor.check_hermes(report, dict(self.bridge_env_values))
+
+                self.assertEqual(seen, [30])
+                self.assertEqual("hermes pm install --extra mcp" in stream.getvalue(), counted)
+
+    def test_the_missing_module_patterns(self):
+        doctor = load_doctor()
+        for text in ("No module named 'mcp'", "ModuleNotFoundError: No module named 'mcp.client'",
+                     'no module named "mcp"', "MCP SDK is not installed", "mcp package not available"):
+            with self.subTest(text):
+                self.assertTrue(doctor.mcp_module_missing(text))
+        for text in ("", "No module named 'yaml'", "No module named 'mcp_extra'", "Connection refused",
+                     "mcp test kore: 8 tools"):
+            with self.subTest(text):
+                self.assertFalse(doctor.mcp_module_missing(text))
+
+
+class DoctorPortTests(DoctorTestCase):
+    """0.14 S1: KORE_INGEST_PORT und KORE_MCP_PORT der Server-.env statt fester Ports."""
+
+    def test_the_ingest_is_checked_on_kore_ingest_port(self):
+        self.server_env_values["KORE_INGEST_PORT"] = str(self.ingest.port)
+        self.write_envs()
+
+        code, output = self.run_doctor(ingest_url=False)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"http://127.0.0.1:{self.ingest.port}/health antwortet 200", output)
+
+    def test_the_mcp_is_checked_on_kore_mcp_port(self):
+        moved = free_port()
+        self.server_env_values["KORE_MCP_PORT"] = str(moved)
+        self.write_envs()
+
+        code, output = self.run_doctor()
+
+        self.assertNotEqual(code, 0, output)
+        self.assertIn(f"MCP auf 127.0.0.1:{moved} nicht erreichbar", output)
+
+    def test_an_invalid_port_is_a_deviation_that_names_the_key(self):
+        for key in ("KORE_INGEST_PORT", "KORE_MCP_PORT"):
+            for value in ("abc", "0", "65536", "-1", "80 80"):
+                with self.subTest(key=key, value=value):
+                    self.setUp()
+                    self.server_env_values[key] = value
+                    self.write_envs()
+                    code, output = self.run_doctor(ingest_url=key != "KORE_INGEST_PORT")
+                    self.assertNotEqual(code, 0, output)
+                    self.assertIn(f"{key} ist keine Portnummer", output)
+
+    def test_kore_mcp_url_skips_the_local_mcp_check_with_a_hint(self):
+        # Der MCP liegt nur im Compose-Netz: auf 127.0.0.1 antwortet nichts, und das ist kein Fehler.
+        self.server_env_values["KORE_MCP_PORT"] = str(free_port())
+        self.server_env_values["KORE_MCP_URL"] = "http://mcp:8000/mcp/"
+        self.write_envs()
+
+        code, output = self.run_doctor()
+
+        self.assertEqual(code, 0, output)
+        self.assertRegex(output, r"\[HINWEIS\] MCP-Pruefung .*uebersprungen")
+        self.assertIn("KORE_MCP_URL", output)
+        self.assertNotIn("http://mcp:8000", output)   # die Adresse wird nie ausgegeben
+        self.assertNotIn("MCP auf 127.0.0.1", output)
+        self.assertIn("hermes -p kore-coach mcp test kore erfolgreich", output)
+
+    def test_an_empty_kore_mcp_url_changes_nothing(self):
+        self.server_env_values["KORE_MCP_URL"] = ""
+        self.write_envs()
+        code, output = self.run_doctor()
+        self.assertEqual(code, 0, output)
+        self.assertIn("MCP auf 127.0.0.1", output)
+        self.assertNotIn("[HINWEIS]", output)
+
+    def test_env_port_defaults_and_bounds(self):
+        doctor = load_doctor()
+        self.assertEqual(doctor.env_port({}, "KORE_MCP_PORT", 8000), 8000)
+        self.assertEqual(doctor.env_port({"KORE_MCP_PORT": ""}, "KORE_MCP_PORT", 8000), 8000)
+        self.assertEqual(doctor.env_port({"KORE_MCP_PORT": "8001"}, "KORE_MCP_PORT", 8000), 8001)
+        self.assertEqual(doctor.env_port({"KORE_INGEST_PORT": " 8082 "}, "KORE_INGEST_PORT", 8081), 8082)
+        self.assertEqual(doctor.env_port({"KORE_INGEST_PORT": "65535"}, "KORE_INGEST_PORT", 8081), 65535)
+        for bad in ("0", "65536", "-5", "8o81", "8081.0", "1e3", "٨٠٨١"):
+            with self.subTest(bad):
+                with self.assertRaises(ValueError):
+                    doctor.env_port({"KORE_INGEST_PORT": bad}, "KORE_INGEST_PORT", 8081)
+
+
+class DoctorOptionOrderTests(PairingCliCase):
+    """0.14 S1: --bridge-env, --server-env und --state-dir gelten vor und nach dem Unterbefehl."""
+
+    def setUp(self):
+        super().setUp()
+        # Eigene Dateien mit Werten, die sich von den Standard-Dateien der Basisklasse unterscheiden.
+        self.alt_state = self.root / "alt-state"
+        self.alt_bridge = self.root / "alt-bridge.env"
+        self.alt_server = self.root / "alt-server.env"
+        self.alt_bridge.write_text("KORE_BRIDGE_BIND_HOST=10.0.0.10\nKORE_BRIDGE_PORT=9111\n")
+        self.alt_server.write_text("KORE_BIND_ADDRESS=10.0.0.10\nKORE_INGEST_PORT=8082\n")
+        self.options = ["--bridge-env", str(self.alt_bridge), "--server-env", str(self.alt_server),
+                        "--state-dir", str(self.alt_state)]
+
+    def run_raw(self, *argv):
+        env = {key: value for key, value in os.environ.items()
+               if not key.lower().endswith("_proxy") and key != "KORE_STATE_DIR"}
+        env["PATH"] = str(self.empty_path)
+        process = subprocess.run([sys.executable, str(DOCTOR), *argv], capture_output=True, text=True,
+                                 timeout=60, env=env)
+        return process.returncode, process.stdout, process.stderr
+
+    def orders(self, command):
+        """(Name, argv): Optionen nach dem Unterbefehl, davor und gemischt."""
+        o = self.options
+        return (
+            ("nach", [*command[:1], *o, *command[1:]]),
+            ("nach, hinter dem Argument", [*command, *o]),
+            ("vor", [*o, *command]),
+            ("gemischt", [*o[:2], *command[:1], *o[2:], *command[1:]]),
+        )
+
+    def test_pair_reads_everything_from_options_in_every_position(self):
+        for name, argv in self.orders(["pair"]):
+            with self.subTest(name):
+                code, out, err = self.run_raw(*argv)
+                self.assertEqual(code, 0, err)
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+                self.assertEqual(query["bridge"], ["http://10.0.0.10:9111"])
+                self.assertEqual(query["ingest"], ["http://10.0.0.10:8082"])
+        self.assertTrue((self.alt_state / "pairing.json").is_file())
+        self.assertFalse(self.state_dir.exists())
+
+    def test_the_ingest_url_flag_works_before_the_subcommand_too(self):
+        for argv in (["pair", "--ingest-url", "http://10.0.0.10:9999"],
+                     ["--ingest-url", "http://10.0.0.10:9999", "pair"]):
+            with self.subTest(argv):
+                code, out, err = self.run_raw(*self.options, *argv)
+                self.assertEqual(code, 0, err)
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+                self.assertEqual(query["ingest"], ["http://10.0.0.10:9999"])
+
+    def test_devices_reads_the_state_dir_from_every_position(self):
+        store = pairing.PairingStore(str(self.alt_state))
+        store.redeem(store.create_code()["code"], "iPhone", "10.0.0.20")
+        for name, argv in self.orders(["devices"]):
+            with self.subTest(name):
+                code, out, err = self.run_raw(*argv)
+                self.assertEqual(code, 0, err)
+                self.assertIn("iPhone", out)
+
+    def test_revoke_and_init_state_accept_options_in_every_position(self):
+        for name, argv_for in (("nach", lambda i: ["revoke", i, *self.options]),
+                               ("vor", lambda i: [*self.options, "revoke", i]),
+                               ("zwischen", lambda i: ["revoke", *self.options, i])):
+            with self.subTest(name):
+                shutil.rmtree(self.alt_state, ignore_errors=True)
+                store = pairing.PairingStore(str(self.alt_state))
+                device = store.redeem(store.create_code()["code"], "iPhone", "10.0.0.20")
+                code, out, err = self.run_raw(*argv_for(device["device_id"]))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(store.list_devices(lock=False), [])
+        for name, argv in (("nach", ["init-state", *self.options]), ("vor", [*self.options, "init-state"])):
+            with self.subTest(f"init-state {name}"):
+                shutil.rmtree(self.alt_state, ignore_errors=True)
+                code, out, err = self.run_raw(*argv)
+                self.assertEqual(code, 0, err)
+                self.assertTrue(self.alt_state.is_dir())
+
+    def test_without_a_subcommand_the_same_options_drive_the_checks(self):
+        code, out, err = self.run_raw(*self.options, "--bridge-only")
+        self.assertEqual(code, 1, out + err)   # Bridge und Hermes gibt es hier nicht
+        self.assertIn("Zustandsordner der Kopplung fehlt", out)
+        self.assertIn(str(self.alt_state), out)
+
+    def test_unknown_commands_and_options_are_still_errors(self):
+        for argv in (["bogus"], ["devices", "--no-such-option"], ["--no-such-option", "devices"]):
+            with self.subTest(argv):
+                code, out, err = self.run_raw(*argv)
+                self.assertEqual(code, 2, out + err)
+
+
+class DevicesWithoutWriteAccessTests(PairingCliCase):
+    """0.14 S1: `devices` liest nur — ohne Sperrdatei, auch im schreibgeschuetzten Zustandsordner."""
+
+    def tearDown(self):
+        if self.state_dir.is_dir():
+            os.chmod(self.state_dir, 0o750)
+
+    @unittest.skipIf(os.geteuid() == 0, "root schreibt auch in schreibgeschuetzte Ordner")
+    def test_a_read_only_state_dir_lists_the_devices_and_creates_nothing(self):
+        _, out, _ = self.run_cli("pair")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        self.store().redeem(query["code"][0], "iPhone", "10.0.0.20")
+        (self.state_dir / ".lock").unlink()
+        os.chmod(self.state_dir, 0o550)
+        before = sorted(path.name for path in self.state_dir.iterdir())
+
+        code, out, err = self.run_cli("devices")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("iPhone", out)
+        self.assertEqual(sorted(path.name for path in self.state_dir.iterdir()), before)
+        self.assertFalse((self.state_dir / ".lock").exists())
+
+    def test_a_missing_state_dir_is_an_empty_list_and_stays_missing(self):
+        code, out, err = self.run_cli("devices")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "Keine Geraete gekoppelt.")
+        self.assertFalse(self.state_dir.exists())
+
+
+class PairIngestPortTests(PairingCliCase):
+    def test_the_ingest_port_comes_from_the_server_env(self):
+        self.server_env.write_text("KORE_BIND_ADDRESS=10.0.0.10\nKORE_INGEST_PORT=8082\n")
+        code, out, err = self.run_cli("pair")
+        self.assertEqual(code, 0, err)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        self.assertEqual(query["ingest"], ["http://10.0.0.10:8082"])
+
+    def test_the_flag_wins_over_the_env_and_an_invalid_port_is_a_clear_error(self):
+        self.server_env.write_text("KORE_BIND_ADDRESS=10.0.0.10\nKORE_INGEST_PORT=abc\n")
+        code, _, err = self.run_cli("pair")
+        self.assertEqual(code, 1)
+        self.assertIn("KORE_INGEST_PORT ist keine Portnummer", err)
+        self.assertFalse(self.state_dir.exists())   # kein Code verbrannt, nichts angelegt
+        code, out, err = self.run_cli("pair", "--ingest-url", "http://10.0.0.10:8083")
+        self.assertEqual(code, 0, err)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.link_of(out)).query)
+        self.assertEqual(query["ingest"], ["http://10.0.0.10:8083"])
 
 
 if __name__ == "__main__":

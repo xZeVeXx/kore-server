@@ -69,10 +69,11 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(compose.count("cap_drop:\n      - ALL"), 2)
         ports = [line.strip() for line in compose.splitlines() if line.strip().startswith('- "')]
         self.assertEqual(len(ports), 2)
-        # Ingest follows KORE_BIND_ADDRESS (loopback by default); MCP is always loopback-only.
+        # Ingest follows KORE_BIND_ADDRESS (loopback by default) and KORE_INGEST_PORT (8081);
+        # MCP is always loopback-only, only its host port follows KORE_MCP_PORT (8000).
         self.assertEqual(sorted(ports), [
-            '- "${KORE_BIND_ADDRESS:-127.0.0.1}:8081:8081"',
-            '- "127.0.0.1:8000:8000"',
+            '- "${KORE_BIND_ADDRESS:-127.0.0.1}:${KORE_INGEST_PORT:-8081}:8081"',
+            '- "127.0.0.1:${KORE_MCP_PORT:-8000}:8000"',
         ])
 
     def test_ingest_reads_the_pairing_state_through_a_required_group_only(self) -> None:
@@ -206,9 +207,34 @@ class ContainerHardeningTests(unittest.TestCase):
         self.assertEqual(mcp["environment"]["KORE_MCP_HOST"], "0.0.0.0")
         # The same expression that decides the published host address, so the two cannot diverge.
         self.assertEqual(ingest["environment"]["KORE_PUBLISHED_BIND"], "${KORE_BIND_ADDRESS:-127.0.0.1}")
-        self.assertTrue(ingest["ports"][0].startswith("${KORE_BIND_ADDRESS:-127.0.0.1}:8081:"))
+        self.assertTrue(ingest["ports"][0].startswith("${KORE_BIND_ADDRESS:-127.0.0.1}:"))
+        self.assertTrue(ingest["ports"][0].endswith(":8081"))
         self.assertEqual(mcp["environment"]["KORE_PUBLISHED_BIND"], "127.0.0.1")
-        self.assertTrue(mcp["ports"][0].startswith("127.0.0.1:8000:"))
+        self.assertTrue(mcp["ports"][0].startswith("127.0.0.1:"))
+        self.assertTrue(mcp["ports"][0].endswith(":8000"))
+
+    def test_host_ports_follow_the_env_and_the_container_side_stays_fixed(self) -> None:
+        # 0.14 S1: a second stack on the same host needs no compose override any more.
+        services = _compose()
+        ingest, mcp = services["ingest"], services["mcp"]
+        moved = {"KORE_INGEST_PORT": "18081", "KORE_MCP_PORT": "18000"}
+        self.assertEqual(_resolve(ingest["ports"][0], {}), "127.0.0.1:8081:8081")
+        self.assertEqual(_resolve(mcp["ports"][0], {}), "127.0.0.1:8000:8000")
+        self.assertEqual(_resolve(ingest["ports"][0], moved), "127.0.0.1:18081:8081")
+        self.assertEqual(_resolve(mcp["ports"][0], moved), "127.0.0.1:18000:8000")
+        # The LAN address moves the ingest only; the MCP stays on loopback whatever .env says.
+        lan = {"KORE_BIND_ADDRESS": "10.0.0.10", **moved}
+        self.assertEqual(_resolve(ingest["ports"][0], lan), "10.0.0.10:18081:8081")
+        self.assertEqual(_resolve(mcp["ports"][0], lan), "127.0.0.1:18000:8000")
+        # Inside the containers nothing moves: the processes listen on 8081 and 8000 as before.
+        self.assertEqual(mcp["environment"]["KORE_MCP_PORT"], "8000")
+        self.assertNotIn("KORE_INGEST_PORT", ingest["environment"])
+        self.assertIn("http://127.0.0.1:8081/health", ingest["healthcheck"]["test"][3])
+
+    def test_the_env_example_documents_both_host_ports(self) -> None:
+        example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertRegex(example, r"(?m)^#?\s*KORE_INGEST_PORT=8081$")
+        self.assertRegex(example, r"(?m)^#?\s*KORE_MCP_PORT=8000$")
 
     def test_the_image_starts_through_the_bind_guard_not_a_bare_wildcard_uvicorn(self) -> None:
         dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")

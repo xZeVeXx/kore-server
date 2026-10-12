@@ -62,6 +62,10 @@ INSTANCE_ID = os.environ.get("KORE_INSTANCE_ID", "")
 PROFILE = os.environ.get("KORE_HERMES_PROFILE", "")
 # Home of the user that runs Hermes: KORE_HERMES_HOME, else the service user's HOME. No fixed default.
 HOME = os.environ.get("KORE_HERMES_HOME") or os.environ.get("HOME", "")
+# Optional data directory of Hermes (the Docker image keeps it at /opt/data). It becomes HERMES_HOME of
+# the Hermes child and the base of the profile search; without it Hermes lives under <HOME>/.hermes.
+# Only an absolute path without `..` is valid (hermes_data_dir_error); anything else stops the start.
+HERMES_DATA_DIR = os.environ.get("KORE_HERMES_DATA_DIR", "")
 HERMES = os.environ.get("KORE_HERMES_BIN") or (
     os.path.join(HOME, ".hermes", "hermes-agent", "venv", "bin", "hermes") if HOME else ""
 )
@@ -555,10 +559,38 @@ def reject_placeholder(name: str, value) -> None:
 MIN_TOKEN_CHARS = 32
 
 
+# Wie kore-doctor (hermes_data_dir_error); test_kore_doctor.py vergleicht beides.
+def hermes_data_dir_error(value):
+    """None fuer einen leeren (nicht gesetzten) oder gueltigen KORE_HERMES_DATA_DIR, sonst der Grund.
+
+    Gueltig ist nur ein absoluter Pfad ohne `..`-Teil, ohne Steuerzeichen und ohne Leerraum am
+    Rand. Es gibt keine Expansion von `~` oder `$HOME`."""
+    if value is None or value == "":
+        return None
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not os.path.isabs(value)
+        or ".." in value.split("/")
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        return (
+            "KORE_HERMES_DATA_DIR must be an absolute path without '..' "
+            "and without control characters (for example /opt/data)"
+        )
+    return None
+
+
+def hermes_data_dir():
+    """Der gueltige KORE_HERMES_DATA_DIR oder None; ein ungueltiger Wert wird nie benutzt."""
+    return HERMES_DATA_DIR if HERMES_DATA_DIR and hermes_data_dir_error(HERMES_DATA_DIR) is None else None
+
+
 def profile_config_path() -> str:
-    """config.yaml des Profils, wie kore-doctor sie findet: <HOME>/.hermes/config.yaml fuer das
-    Profil `default`, sonst <HOME>/.hermes/profiles/<Profil>/config.yaml."""
-    base = os.path.join(HOME, ".hermes")
+    """config.yaml des Profils, wie kore-doctor sie findet: <Hermes-Ordner>/config.yaml fuer das
+    Profil `default`, sonst <Hermes-Ordner>/profiles/<Profil>/config.yaml. Der Hermes-Ordner ist
+    KORE_HERMES_DATA_DIR, sonst <HOME>/.hermes."""
+    base = hermes_data_dir() or os.path.join(HOME, ".hermes")
     if PROFILE != "default":
         base = os.path.join(base, "profiles", PROFILE)
     return os.path.join(base, "config.yaml")
@@ -745,6 +777,8 @@ def runtime_configuration_error():
         )
     if not HOME:
         return "KORE_HERMES_HOME must be configured (or HOME set for the service user)"
+    if error := hermes_data_dir_error(HERMES_DATA_DIR):
+        return error
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(INSTANCE_ID) is None:
         return "KORE_INSTANCE_ID must be configured as a safe explicit instance identifier"
     if _PLAN_ORIGIN_PRINCIPAL_RE.fullmatch(PROFILE) is None:
@@ -771,10 +805,13 @@ def hermes_child_env(parent_env=None) -> dict:
 
     Hermes provider and MCP credentials must live in the selected profile's own `.env`/auth
     store. In particular, KORE_BRIDGE_TOKEN and arbitrary systemd Environment values never cross
-    this process boundary.
+    this process boundary. HERMES_HOME is the one addition: it comes from the validated
+    KORE_HERMES_DATA_DIR and never from the environment of the service.
     """
     source = os.environ if parent_env is None else parent_env
     child = {"HOME": HOME, "PATH": CHILD_PATH}
+    if data_dir := hermes_data_dir():
+        child["HERMES_HOME"] = data_dir
     for key in _SAFE_CHILD_ENV_KEYS:
         value = source.get(key)
         if isinstance(value, str) and value:

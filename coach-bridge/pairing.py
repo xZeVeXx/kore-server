@@ -378,11 +378,19 @@ class PairingStore:
         log.info("pairing: revoked device %s", device_id)
         return True
 
-    def list_devices(self) -> list:
-        """Paired devices without token hashes, oldest first."""
+    def list_devices(self, lock: bool = True) -> list:
+        """Paired devices without token hashes, oldest first.
+
+        `lock=False` reads without the `.lock` file, so it works in a state directory the caller
+        cannot write to (it never creates a file). devices.json is replaced atomically
+        (`os.replace`), so such a reader sees the old or the new list, never half of one.
+        """
         if not os.path.isdir(self.state_dir):
             return []
-        with self._locked():
+        if lock:
+            with self._locked():
+                devices = self._devices_locked()
+        else:
             devices = self._devices_locked()
         return [
             {key: d.get(key) for key in ("id", "name", "created_at", "last_seen")}

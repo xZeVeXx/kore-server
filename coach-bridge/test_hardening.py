@@ -83,6 +83,7 @@ class BridgeDefaultsCase(unittest.TestCase):
             ("PLAN_ORIGIN_PRINCIPAL", "athlete"),
             ("TOKEN", TEST_TOKEN),
             ("HOME", str(self.home)),
+            ("HERMES_DATA_DIR", ""),
             ("HERMES", "/opt/hermes/bin/hermes"),
             ("BIND_HOST", "127.0.0.1"),
         ):
@@ -494,6 +495,124 @@ class HermesWorkingDirTests(BridgeDefaultsCase):
                 self.assertEqual(child_home, str(self.home))  # HOME bleibt, nur der Ordner wechselt
                 self.assertFalse(os.path.exists(cwd))  # nach dem Lauf entfernt
         self.assertEqual(len({cwd for cwd, *_ in seen}), 3)
+
+
+# ---- 11. KORE_HERMES_DATA_DIR (0.14 S1) -------------------------------------------------------------
+
+class HermesDataDirTests(BridgeDefaultsCase):
+    """Das Hermes-Docker-Image legt sein Home unter /opt/data ab (HERMES_HOME). Die Bridge reicht den
+    Pfad aus KORE_HERMES_DATA_DIR als HERMES_HOME an Hermes weiter und sucht das Profil dort; die
+    Kind-Umgebung bleibt eine Erlaubnisliste, und der Pfad ist absolut und ohne `..`."""
+
+    VALID = ("/opt/data", "/opt/data/", "/srv/hermes-data", "/a", "/opt/my data", "/opt/data..v2",
+             "/opt/.hidden")
+    INVALID = (
+        "opt/data", "data", "~/hermes", "./data", "../data", "/opt/../etc", "/opt/data/..", "/..",
+        "$HOME/data", "${HOME}/data", " /opt/data", "/opt/data ", "/opt/data\n", "/opt/\x00data",
+        "/opt/da\tta", "/opt/data\x7f", "file:///opt/data",
+    )
+
+    def test_without_the_variable_nothing_changes(self):
+        child = bridge.hermes_child_env({"HERMES_HOME": "/untrusted", "LANG": "C.UTF-8"})
+        self.assertEqual(set(child), {"HOME", "PATH", "LANG"})
+        self.assertEqual(bridge.profile_config_path(),
+                         str(self.home / ".hermes" / "profiles" / "kore-coach" / "config.yaml"))
+        self.assertIsNone(bridge.runtime_configuration_error())
+
+    def test_the_child_env_gets_hermes_home_and_nothing_else_new(self):
+        parent = {
+            "HERMES_HOME": "/untrusted",          # nie aus der Umgebung des Dienstes
+            "KORE_BRIDGE_TOKEN": "t" * 48,
+            "OPENROUTER_API_KEY": "provider-secret-in-wrong-place",
+            "LANG": "de_DE.UTF-8",
+        }
+        with patch.object(bridge, "HERMES_DATA_DIR", "/opt/data"), patch.object(
+            bridge, "CHILD_PATH", "/usr/bin:/bin"
+        ):
+            child = bridge.hermes_child_env(parent)
+        self.assertEqual(child, {
+            "HOME": str(self.home), "PATH": "/usr/bin:/bin", "HERMES_HOME": "/opt/data",
+            "LANG": "de_DE.UTF-8",
+        })
+
+    def test_an_invalid_value_never_reaches_the_child_env(self):
+        for value in self.INVALID:
+            with self.subTest(value=ascii(value)):
+                with patch.object(bridge, "HERMES_DATA_DIR", value):
+                    self.assertNotIn("HERMES_HOME", bridge.hermes_child_env({}))
+
+    def test_profiles_are_searched_below_the_data_dir(self):
+        with patch.object(bridge, "HERMES_DATA_DIR", "/opt/data"):
+            self.assertEqual(bridge.profile_config_path(), "/opt/data/profiles/kore-coach/config.yaml")
+            with patch.object(bridge, "PROFILE", "default"):
+                self.assertEqual(bridge.profile_config_path(), "/opt/data/config.yaml")
+
+    def test_only_absolute_paths_without_dotdot_are_valid(self):
+        for value in self.VALID:
+            with self.subTest(valid=value):
+                self.assertIsNone(bridge.hermes_data_dir_error(value))
+        for value in self.INVALID:
+            with self.subTest(invalid=ascii(value)):
+                self.assertIn("KORE_HERMES_DATA_DIR", bridge.hermes_data_dir_error(value))
+        self.assertIsNone(bridge.hermes_data_dir_error(""))   # nicht gesetzt
+        self.assertIsNone(bridge.hermes_data_dir_error(None))
+
+    def test_an_invalid_value_blocks_the_start_and_names_the_key(self):
+        for value in self.INVALID:
+            with self.subTest(value=ascii(value)):
+                with patch.object(bridge, "HERMES_DATA_DIR", value):
+                    self.assertIn("KORE_HERMES_DATA_DIR", bridge.runtime_configuration_error())
+        with patch.object(bridge, "HERMES_DATA_DIR", "/opt/data"):
+            self.assertIsNone(bridge.runtime_configuration_error())
+
+    def test_the_inline_shell_check_reads_the_profile_below_the_data_dir(self):
+        data = Path(self._tmp.name) / "data"
+        unsafe = data / "profiles" / "kore-coach" / "config.yaml"
+        unsafe.parent.mkdir(parents=True)
+        unsafe.write_text("skills:\n  inline_shell: true\n", encoding="utf-8")
+        # Das Profil unter HOME/.hermes ist sicher; geprueft wird trotzdem das im Datenordner.
+        self.write_profile_config("skills:\n  inline_shell: false\n")
+        with patch.object(bridge, "HERMES_DATA_DIR", str(data)):
+            error = bridge.runtime_configuration_error()
+            self.assertIn("skills.inline_shell", error)
+            self.assertIn(str(unsafe), error)
+            unsafe.write_text("skills:\n  inline_shell: false\n", encoding="utf-8")
+            self.assertIsNone(bridge.runtime_configuration_error())
+
+    def test_the_bridge_process_refuses_to_start_with_a_relative_path(self):
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "KORE_BRIDGE_TOKEN": "b" * 48,
+            "KORE_BRIDGE_BIND_HOST": "127.0.0.1",
+            "KORE_BRIDGE_PORT": "0",
+            "KORE_INSTANCE_ID": "kore",
+            "KORE_HERMES_PROFILE": "kore-coach",
+            "KORE_HERMES_HOME": str(self.home),
+            "KORE_HERMES_DATA_DIR": "relative/hermes-data",
+            "KORE_PLAN_ORIGIN_PRINCIPAL": "kore",
+            "KORE_PLAN_ORIGIN_SECRET": "o" * 48,
+            "KORE_STATE_DIR": str(Path(self._tmp.name) / "state"),
+        }
+        completed = subprocess.run(
+            [sys.executable, str(BRIDGE_DIR / "bridge.py")],
+            env=env, capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("KORE_HERMES_DATA_DIR", completed.stderr)
+
+    def test_the_capability_stays_and_hermes_home_reaches_a_real_run(self):
+        self.assertIn("child_env_allowlist_v1", bridge.BRIDGE_CAPABILITIES)
+        with patch.object(bridge, "HERMES_DATA_DIR", "/opt/data"), patch(
+            "bridge._run_process_bounded"
+        ) as run:
+            run.side_effect = hermes_process(reply_stream())
+            bridge.run_turn(
+                "Hallo", scope="general", conversation_id=CONVERSATION, session_ref=None,
+                context=None, origin_ticket=None,
+            )
+        child = run.call_args.kwargs["env"]
+        self.assertEqual(child["HERMES_HOME"], "/opt/data")
+        self.assertEqual(child["HOME"], str(self.home))
 
 
 # ---- 6. Verbindungsgrenze und Gesamtfrist fuers Lesen -------------------------------------------------

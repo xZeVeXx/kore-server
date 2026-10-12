@@ -412,6 +412,55 @@ class PermissionTests(StoreCase):
         self.assertFalse(self.state_dir.exists())
 
 
+class ReadOnlyListTests(StoreCase):
+    """0.14 S1: `kore-doctor devices` only reads. It needs no lock file and no write access."""
+
+    def tearDown(self):
+        if self.state_dir.is_dir():
+            os.chmod(self.state_dir, 0o750)  # cleanup must be able to remove the files
+        super().tearDown()
+
+    def read_only_state(self):
+        self.pair()
+        (self.state_dir / ".lock").unlink()
+        os.chmod(self.state_dir, 0o550)
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into read-only directories")
+    def test_list_devices_without_lock_reads_a_read_only_state_dir_and_creates_nothing(self):
+        self.read_only_state()
+        before = sorted(p.name for p in self.state_dir.iterdir())
+
+        devices = pairing.PairingStore(str(self.state_dir)).list_devices(lock=False)
+
+        self.assertEqual([d["name"] for d in devices], ["iPhone"])
+        self.assertEqual(set(devices[0]), {"id", "name", "created_at", "last_seen"})
+        self.assertEqual(sorted(p.name for p in self.state_dir.iterdir()), before)
+        self.assertFalse((self.state_dir / ".lock").exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes into read-only directories")
+    def test_the_default_still_takes_the_lock(self):
+        # The locked read is what the writers serialise against; only the CLI listing opts out.
+        self.read_only_state()
+        with self.assertRaises(OSError):
+            pairing.PairingStore(str(self.state_dir)).list_devices()
+
+    def test_list_devices_without_lock_matches_the_locked_list(self):
+        self.pair("iPhone")
+        self.pair("iPad", ip="10.0.0.11")
+        self.assertEqual(self.store.list_devices(lock=False), self.store.list_devices())
+
+    def test_a_missing_state_dir_or_devices_file_is_an_empty_list(self):
+        self.assertEqual(self.store.list_devices(lock=False), [])
+        self.state_dir.mkdir()
+        self.assertEqual(self.store.list_devices(lock=False), [])
+
+    def test_a_malformed_devices_file_is_an_error_not_an_empty_list(self):
+        self.pair()
+        (self.state_dir / "devices.json").write_text('{"devices": 7}', encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.store.list_devices(lock=False)
+
+
 class ConcurrencyTests(StoreCase):
     def test_two_threads_redeem_the_same_code_exactly_one_wins(self):
         for round_ in range(20):

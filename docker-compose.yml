@@ -1,9 +1,11 @@
 # Two processes, one SQLite database, one person. No multi-tenancy.
 #
 # The MCP port (8000) is published on 127.0.0.1 only: the Hermes agent runs on
-# the same host and reaches it at http://127.0.0.1:8000/mcp/.
+# the same host and reaches it at http://127.0.0.1:8000/mcp/. KORE_MCP_PORT in .env moves
+# the host port (second stack, port taken); inside the container the MCP stays on 8000.
 #
-# The ingest port (8081) binds to 127.0.0.1 by default. To reach it from your
+# The ingest port (8081) binds to 127.0.0.1 by default; KORE_INGEST_PORT in .env moves the
+# host port the same way (the container still listens on 8081). To reach it from your
 # iPhone, set KORE_BIND_ADDRESS in .env to the LAN or VPN address of this
 # machine (e.g. 10.0.0.10 or 100.64.0.10) — never to 0.0.0.0, and never
 # forward these ports in your router. The container checks that address when it
@@ -43,7 +45,7 @@ services:
       KORE_INGEST_HOST: 0.0.0.0
       KORE_PUBLISHED_BIND: "${KORE_BIND_ADDRESS:-127.0.0.1}"
     ports:
-      - "${KORE_BIND_ADDRESS:-127.0.0.1}:8081:8081"
+      - "${KORE_BIND_ADDRESS:-127.0.0.1}:${KORE_INGEST_PORT:-8081}:8081"
     volumes:
       - kore-db:/data
       - ${KORE_STATE_DIR:-./state}:/state:ro
@@ -87,11 +89,12 @@ services:
       FASTMCP_CHECK_FOR_UPDATES: "off"
       KORE_DB_PATH: /data/kore.db
       KORE_MCP_HOST: 0.0.0.0
+      # The container side stays 8000; the host port is KORE_MCP_PORT in .env (see ports).
       KORE_MCP_PORT: "8000"
       # Same rule as for ingest; this port is always published on loopback (see ports).
       KORE_PUBLISHED_BIND: 127.0.0.1
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${KORE_MCP_PORT:-8000}:8000"
     volumes:
       - kore-db:/data
     restart: unless-stopped

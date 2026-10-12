@@ -5,6 +5,8 @@
 #   <HOME>   dessen Home-Verzeichnis, z. B. /home/<USER>
 # bridge.py laeuft aus dem Repo-Checkout (<HOME>/kore-server); pairing.py liegt daneben.
 # Das Hermes-Profil steht nicht hier, sondern als KORE_HERMES_PROFILE in bridge.env.
+# Liegt Hermes nicht unter <HOME>/.hermes (KORE_HERMES_DATA_DIR in bridge.env), den Ordner
+# zusaetzlich unter ReadWritePaths eintragen; ProtectSystem=strict macht ihn sonst schreibgeschuetzt.
 # Zustandsordner: Die Bridge SCHREIBT dort die Kopplung. Er muss unter ReadWritePaths stehen
 # (systemd expandiert keine Variablen in ReadWritePaths): Liegt er anderswo, setze
 # KORE_STATE_DIR in bridge.env und .env auf diesen Pfad und trage denselben Pfad unten ein.

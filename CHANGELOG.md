@@ -4,6 +4,35 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
 
 ## Unreleased
 
+### Added
+
+- **Ports for a second stack.** `KORE_INGEST_PORT` (default 8081) and `KORE_MCP_PORT` (default 8000)
+  in `.env` move the host ports Docker Compose publishes; inside the containers nothing changes, and
+  the MCP stays on `127.0.0.1`. `kore-doctor` and `kore-doctor pair` read both values from the
+  server `.env`, so checks and pairing links follow the moved ports.
+- **`KORE_HERMES_DATA_DIR`** in `bridge.env` for Hermes installations whose data directory is not
+  `<HOME>/.hermes`, such as the Hermes Docker image (`/opt/data`). The bridge passes it to Hermes as
+  `HERMES_HOME` and looks for the profile in `<dir>/profiles/<name>` (`<dir>/config.yaml` for
+  `default`); `kore-doctor` looks in the same place. The value must be an absolute path without `..`,
+  otherwise the bridge does not start. The Hermes environment stays an allowlist: `HERMES_HOME` is the
+  only addition and never comes from the service's own environment.
+- **`kore-doctor`: `KORE_MCP_URL`** (optional, server `.env`, ignored by Compose). If set, for an MCP
+  that only lives in the Compose network (e.g. `http://mcp:8000/mcp/`), the doctor skips its check on
+  `127.0.0.1` with a `[HINWEIS]` line instead of failing. `hermes mcp test kore` still checks the connection.
+- **`kore-doctor`: Hermes without the `mcp` extra.** If `hermes mcp test kore` fails with
+  `No module named 'mcp'` (or an equivalent message), the doctor names the remedy,
+  `hermes pm install --extra mcp`. The cause is on the Hermes side. The test now has a 30 second
+  limit and only the first 64 KiB of its output are examined.
+
+### Changed
+
+- **`kore-doctor` options before and after the subcommand.** `--bridge-env`, `--server-env` and
+  `--state-dir` work in both positions (`kore-doctor --state-dir X devices` as well as
+  `kore-doctor devices --state-dir X`) and without a subcommand; `--ingest-url` too.
+- **`kore-doctor devices` only reads.** It no longer needs write access to the pairing state
+  directory and creates no lock file (new `PairingStore.list_devices(lock=False)`; devices.json is
+  replaced atomically, so a lock-free read is safe).
+
 ### Fixed
 
 - **Snapshots with Apple's recovery HRV were rejected (422).** Since app 0.10, Kore can carry the day

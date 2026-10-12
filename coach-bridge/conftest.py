@@ -27,3 +27,4 @@ def isolated_hermes_home(monkeypatch, tmp_path):
     """Die Bridge prueft vor jedem Hermes-Lauf die config.yaml des Profils unter HOME; nie die des
     Entwicklers. Tests, die ein Profil brauchen, setzen HOME selbst."""
     monkeypatch.setattr(bridge, "HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setattr(bridge, "HERMES_DATA_DIR", "")
