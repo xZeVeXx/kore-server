@@ -47,6 +47,11 @@ def authorization_ok(authorization: str) -> bool:
     return static_ok or device_ok
 
 
+# Snapshot v2 (contract/snapshot-v2.md): the app sends a newer snapshot field only when this list,
+# read with its token before each sync, names it. A v0.13.0 ingest has no /capabilities (404).
+SNAPSHOT_CAPABILITIES = ("activity_body_nutrition_v1", "apple_hrv_v1")
+
+
 # Default deny: these exact paths are the only ones without a token. Everything else, unknown
 # paths and router-matched variants such as "/ingest\n" included, needs it before the body.
 ANONYMOUS_PATHS = frozenset({"/health"})
@@ -96,6 +101,11 @@ def require_ingest_token(authorization: str = Header(default="")) -> None:
 @app.get("/health")
 def health() -> dict[str, bool]:
     return {"ok": True}
+
+
+@app.get("/capabilities", dependencies=[Depends(require_ingest_token)])
+def capabilities() -> dict[str, list[str]]:
+    return {"snapshot_capabilities": sorted(SNAPSHOT_CAPABILITIES)}
 
 
 def _validate_snapshot_for_storage(payload: dict[str, object]) -> None:

@@ -5,13 +5,16 @@ import importlib
 import logging
 import os
 import secrets
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 import uuid
+from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import fastmcp
 from fastmcp import Client
@@ -476,6 +479,109 @@ class FastMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
             briefing.data["snapshot_received_at"],
             plans.data["snapshot_received_at"],
         )
+
+    # -- snapshot v2: steps, body, nutrition (contract/snapshot-v2.md) ---------------------------
+
+    def reset_snapshot(self) -> None:
+        # Absent lists keep their stored value, so every v2 test starts from an empty table.
+        with sqlite3.connect(Path(self.temp_dir.name) / "mcp.db") as db:
+            db.execute("DELETE FROM snapshot")
+
+    @staticmethod
+    def v2_day(offset: int) -> str:
+        return (date(2026, 6, 1) + timedelta(days=offset)).isoformat()
+
+    def v2_lists(self, count: int = 31) -> dict[str, list[dict[str, Any]]]:
+        # Stored oldest last on purpose: the tools must still answer newest last.
+        offsets = list(reversed(range(count)))
+        return {
+            "steps": [{"date": self.v2_day(i), "count": 8_000 + i} for i in offsets],
+            "body": [{"date": self.v2_day(i), "weight_kg": 80.0 + i / 10} for i in offsets],
+            "nutrition": [{"date": self.v2_day(i), "kcal": 2_000.0 + i} for i in offsets],
+        }
+
+    async def test_trend_tools_are_listed_and_describe_their_units(self) -> None:
+        async with Client(self.mcp_server.mcp) as client:
+            tools = {tool.name: tool for tool in await client.list_tools()}
+        self.assertIn("get_activity_body_trend", tools)
+        self.assertIn("get_nutrition_trend", tools)
+        self.assertIn("get_coach_briefing", tools)
+        activity = tools["get_activity_body_trend"]
+        nutrition = tools["get_nutrition_trend"]
+        for unit in ("Schritte", "kg", "%"):
+            self.assertIn(unit, activity.description)
+        for unit in ("kcal", "g", "unvollständig"):
+            self.assertIn(unit, nutrition.description)
+        for tool in (activity, nutrition):
+            with self.subTest(tool=tool.name):
+                self.assertEqual(list(tool.inputSchema["properties"]), ["days"])
+                self.assertEqual(tool.inputSchema["properties"]["days"]["default"], 30)
+                self.assertEqual(tool.inputSchema.get("required", []), [])
+
+    async def test_trend_tools_bound_days_and_answer_newest_last(self) -> None:
+        self.reset_snapshot()
+        lists = self.v2_lists(31)
+        self.store.save_snapshot({"generated_at": "2026-07-14T12:00:00Z", **lists})
+        newest_last = {key: list(reversed(entries)) for key, entries in lists.items()}
+
+        async with Client(self.mcp_server.mcp) as client:
+            for days, expected in ((None, 30), (30, 30), (7, 7), (1, 1), (0, 1), (-3, 1),
+                                   (31, 30), (10_000, 30)):
+                arguments = {} if days is None else {"days": days}
+                activity = await client.call_tool("get_activity_body_trend", arguments)
+                nutrition = await client.call_tool("get_nutrition_trend", arguments)
+                with self.subTest(days=days):
+                    self.assertEqual(set(activity.data), {"steps", "body"})
+                    self.assertEqual(set(nutrition.data), {"nutrition"})
+                    for key, result in (("steps", activity), ("body", activity),
+                                        ("nutrition", nutrition)):
+                        self.assertEqual(result.data[key], newest_last[key][-expected:])
+            briefing = await client.call_tool("get_coach_briefing")
+
+        self.assertEqual(briefing.data["activity_body_7d"], {
+            "steps": newest_last["steps"][-7:],
+            "body": newest_last["body"][-7:],
+        })
+        self.assertEqual(briefing.data["nutrition_7d"], newest_last["nutrition"][-7:])
+        self.assertEqual(briefing.data["nutrition_7d"][-1]["date"], self.v2_day(30))
+
+    async def test_trend_tools_and_briefing_without_data(self) -> None:
+        self.reset_snapshot()
+        async with Client(self.mcp_server.mcp) as client:
+            for snapshot in (None, {"generated_at": "2026-07-14T12:00:00Z"}):
+                if snapshot is not None:
+                    self.store.save_snapshot(snapshot)
+                with self.subTest(snapshot=snapshot):
+                    activity = await client.call_tool("get_activity_body_trend")
+                    nutrition = await client.call_tool("get_nutrition_trend", {"days": 7})
+                    briefing = await client.call_tool("get_coach_briefing")
+                    self.assertEqual(activity.data, {"steps": [], "body": []})
+                    self.assertEqual(nutrition.data, {"nutrition": []})
+                    self.assertEqual(briefing.data["activity_body_7d"], {"steps": [], "body": []})
+                    self.assertEqual(briefing.data["nutrition_7d"], [])
+
+    async def test_no_nutrition_after_the_app_switched_it_off(self) -> None:
+        # Review focus 2: nutrition on, then off -> the app sends "nutrition": [] and the coach
+        # sees none, also after a later snapshot that leaves the list out.
+        self.reset_snapshot()
+        lists = self.v2_lists(3)
+        snapshots = (
+            ({"generated_at": "2026-07-14T12:00:00Z", **lists}, 3),
+            ({"generated_at": "2026-07-15T12:00:00Z", "steps": lists["steps"],
+              "body": lists["body"], "nutrition": []}, 0),
+            ({"generated_at": "2026-07-16T12:00:00Z"}, 0),
+        )
+        async with Client(self.mcp_server.mcp) as client:
+            for snapshot, nutrition_days in snapshots:
+                self.store.save_snapshot(snapshot)
+                nutrition = await client.call_tool("get_nutrition_trend")
+                activity = await client.call_tool("get_activity_body_trend")
+                briefing = await client.call_tool("get_coach_briefing")
+                with self.subTest(generated_at=snapshot["generated_at"]):
+                    self.assertEqual(len(nutrition.data["nutrition"]), nutrition_days)
+                    self.assertEqual(len(briefing.data["nutrition_7d"]), nutrition_days)
+                    self.assertEqual(len(activity.data["steps"]), 3)
+                    self.assertEqual(len(activity.data["body"]), 3)
 
 
 if __name__ == "__main__":

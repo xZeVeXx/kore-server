@@ -228,6 +228,36 @@ def get_recent_workouts(limit: int = 10) -> dict[str, list[dict[str, Any]]]:
     return {"workouts": workouts[:limit]}
 
 
+# Snapshot v2 (contract/snapshot-v2.md): daily lists of at most 31 entries.
+TREND_MAX_DAYS = 30
+
+
+def _recent_days(snapshot: dict[str, Any], key: str, days: int) -> list[dict[str, Any]]:
+    """The last `days` entries (bounded to 1…30) of a daily list, newest last."""
+    days = max(1, min(days, TREND_MAX_DAYS))
+    entries = sorted(snapshot.get(key) or [], key=lambda entry: entry["date"])
+    return entries[-days:]
+
+
+@mcp.tool
+def get_activity_body_trend(days: int = 30) -> dict[str, list[dict[str, Any]]]:
+    """Schritte (count, Tagessumme) und Körper (weight_kg in kg, body_fat_pct in %, letzter Wert
+    des Tages) aus Apple Health: die letzten `days` Tage mit Werten (1–30), neueste zuletzt."""
+    snapshot = store.get_snapshot()
+    return {
+        "steps": _recent_days(snapshot, "steps", days),
+        "body": _recent_days(snapshot, "body", days),
+    }
+
+
+@mcp.tool
+def get_nutrition_trend(days: int = 30) -> dict[str, list[dict[str, Any]]]:
+    """Ernährung je Tag: Energie (kcal), Eiweiß (protein_g), Kohlenhydrate (carbs_g) und Fett
+    (fat_g) in g. Tagessummen aus Apple Health — unvollständig, wenn nicht alles erfasst wird.
+    Die letzten `days` Tage mit Werten (1–30), neueste zuletzt; leer, wenn nichts geteilt wird."""
+    return {"nutrition": _recent_days(store.get_snapshot(), "nutrition", days)}
+
+
 @mcp.tool
 def get_active_plan() -> dict[str, Any]:
     """Name des aktuell aktiven Trainingsplans (falls vorhanden)."""
@@ -254,7 +284,9 @@ def get_training_plans() -> dict[str, Any]:
 @mcp.tool
 def get_coach_briefing() -> dict[str, Any]:
     """Das komplette Tagesbild in EINEM Call: Recovery heute, HRV-Trend (7 Tage), Schlaf (7 Nächte),
-    letzte Workouts, Profil und alle Trainingspläne. Bevorzugt gegenüber Einzeltools (ein Roundtrip).
+    letzte Workouts, Profil und alle Trainingspläne; dazu Schritte/Gewicht (activity_body_7d) und
+    Ernährung (nutrition_7d), je die letzten 7 Tage mit Werten (Einheiten wie in
+    get_activity_body_trend/get_nutrition_trend). Bevorzugt gegenüber Einzeltools (ein Roundtrip).
     Hinweis: Chat-Nachrichten aus der Kore-App enthalten dasselbe Briefing bereits als Kontext."""
     snapshot = store.get_snapshot()
     return {
@@ -265,6 +297,11 @@ def get_coach_briefing() -> dict[str, Any]:
         "profile": snapshot.get("profile"),
         "active_plan_name": snapshot.get("active_plan_name"),
         "plans": snapshot.get("plans") or [],
+        "activity_body_7d": {
+            "steps": _recent_days(snapshot, "steps", 7),
+            "body": _recent_days(snapshot, "body", 7),
+        },
+        "nutrition_7d": _recent_days(snapshot, "nutrition", 7),
         **_snapshot_freshness(snapshot),
     }
 

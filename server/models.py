@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Annotated, Any, Literal, Optional
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -41,6 +42,8 @@ from snapshot_contract import validate_recovery_hrv_contract
 
 MAX_SNAPSHOT_ELEMENTS = 20_000
 MAX_HRV_MILLISECONDS = 1_000.0
+# Snapshot v2 (contract/snapshot-v2.md): one entry per local day; the app sends 30 days.
+MAX_DAILY_ENTRIES = 31
 
 
 def _parse_iso_day(value: Any) -> date:
@@ -271,6 +274,59 @@ class ProfileDTO(StrictSnapshotModel):
     units: Optional[str] = None
 
 
+# Snapshot v2 (contract/snapshot-v2.md). The optional values default to None without None in
+# their type: a sender leaves the key out, an explicit null is rejected.
+NutritionGrams = Annotated[float, Field(ge=0, le=2_000, allow_inf_nan=False, strict=True)]
+
+
+class StepsDay(StrictSnapshotModel):
+    date: ISODate
+    count: Annotated[int, Field(ge=0, le=200_000, strict=True)]
+
+
+class BodyDay(StrictSnapshotModel):
+    """The day's last measurement."""
+
+    date: ISODate
+    weight_kg: Annotated[float, Field(ge=20, le=400, allow_inf_nan=False, strict=True)]
+    # Percent (18.0), not HealthKit's fraction (0.18).
+    body_fat_pct: Annotated[float, Field(ge=1, le=75, allow_inf_nan=False, strict=True)] = None
+
+
+class NutritionDay(StrictSnapshotModel):
+    """Daily totals; each value is optional, but a day without any value is not sent."""
+
+    date: ISODate
+    kcal: Annotated[float, Field(ge=0, le=20_000, allow_inf_nan=False, strict=True)] = None
+    protein_g: NutritionGrams = None
+    carbs_g: NutritionGrams = None
+    fat_g: NutritionGrams = None
+
+    @model_validator(mode="after")
+    def require_a_value(self) -> "NutritionDay":
+        if self.model_fields_set == {"date"}:
+            raise ValueError("a nutrition day needs at least one value")
+        return self
+
+
+def _one_entry_per_day(entries: list[Any]) -> list[Any]:
+    days = [entry.date for entry in entries]
+    if len(set(days)) != len(days):
+        raise ValueError("a date may appear only once per list")
+    return entries
+
+
+StepsDays = Annotated[
+    list[StepsDay], Field(max_length=MAX_DAILY_ENTRIES), AfterValidator(_one_entry_per_day)
+]
+BodyDays = Annotated[
+    list[BodyDay], Field(max_length=MAX_DAILY_ENTRIES), AfterValidator(_one_entry_per_day)
+]
+NutritionDays = Annotated[
+    list[NutritionDay], Field(max_length=MAX_DAILY_ENTRIES), AfterValidator(_one_entry_per_day)
+]
+
+
 class SnapshotSetDTO(StrictSnapshotModel):
     weight_kg: Annotated[
         float,
@@ -341,6 +397,10 @@ class Snapshot(StrictSnapshotModel):
         default=None,
         max_length=MAX_SNAPSHOT_ELEMENTS,
     )
+    # Absent: the stored list stays. Present: it replaces the stored one, [] clears it.
+    steps: StepsDays = None
+    body: BodyDays = None
+    nutrition: NutritionDays = None
 
     @model_validator(mode="before")
     @classmethod
@@ -372,6 +432,9 @@ class Snapshot(StrictSnapshotModel):
     @model_validator(mode="after")
     def enforce_total_collection_limit(self) -> "Snapshot":
         total = len(self.hrv_trend) + len(self.sleep) + len(self.workouts)
+        for daily in (self.steps, self.body, self.nutrition):
+            if daily is not None:
+                total += len(daily)
         if self.plans is not None:
             total += len(self.plans)
             for plan in self.plans:

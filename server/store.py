@@ -24,6 +24,9 @@ from plan_contract import (
 MAX_PENDING_PLANS_PER_PRINCIPAL = 4
 _INSTANCE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$")
 WorkoutUpdateMode = Literal["replace", "preserve", "replace_local"]
+# Snapshot v2 (contract/snapshot-v2.md): a snapshot without one of these lists keeps the stored
+# list, so an app (or a sync) that does not send them never wipes them; [] clears it.
+DAILY_LISTS = ("steps", "body", "nutrition")
 
 
 def _workout_timestamp(workout: Any) -> datetime:
@@ -310,7 +313,8 @@ class KoreStore:
             db.execute("BEGIN IMMEDIATE")
             self._verify_owner(db)
             payload = dict(data)
-            if workout_update != "replace":
+            absent_daily_lists = [key for key in DAILY_LISTS if key not in payload]
+            if workout_update != "replace" or absent_daily_lists:
                 if workout_update == "preserve" and "workouts" in payload:
                     raise ValueError(
                         "preserved workout snapshot cannot include a replacement"
@@ -357,6 +361,9 @@ class KoreStore:
                         payload["workouts"] = _deduplicate_workouts_by_id(
                             [*replacement, *retained]
                         )
+                    for key in absent_daily_lists:
+                        if key in previous:
+                            payload[key] = previous[key]
             if validate_final_payload is not None:
                 validate_final_payload(payload)
             encoded = json.dumps(

@@ -23,6 +23,18 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
   `No module named 'mcp'` (or an equivalent message), the doctor names the remedy,
   `hermes pm install --extra mcp`. The cause is on the Hermes side. The test now has a 30 second
   limit and only the first 64 KiB of its output are examined.
+- **Steps, weight and nutrition for the coach (snapshot v2).** The snapshot takes three optional
+  daily lists of up to 31 days: `steps` (daily total), `body` (weight in kg, body fat in percent, the
+  day's last value) and `nutrition` (kcal, protein, carbohydrates, fat; daily totals). Each list is
+  strictly bounded, one entry per day. A list in the snapshot replaces the stored one, an empty list
+  clears it, a missing list keeps it, so the 0.13 app never wipes them. New read-only MCP tools
+  `get_activity_body_trend(days)` and `get_nutrition_trend(days)` (1 to 30 days, newest last);
+  `get_coach_briefing` adds the last 7 days as `activity_body_7d` and `nutrition_7d`. Contract:
+  `contract/snapshot-v2.md`.
+- **`GET /capabilities` on the ingest.** With the ingest or a device token it answers
+  `{"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1"]}`. The app 0.14 reads it
+  before each sync and sends the new lists and Apple's HRV labels only to an ingest that names them,
+  so it keeps syncing with a v0.13.0 ingest (which answers 404 there). `/health` stays `{"ok": true}`.
 
 ### Changed
 
