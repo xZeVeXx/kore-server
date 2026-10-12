@@ -91,6 +91,7 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
   the HTTP client library `httpx` is replaced by `httpx2`), FastAPI 0.143.0, Starlette 1.7.0,
   Pydantic 2.14.0 (pydantic-core 2.50.0), Uvicorn 0.54.0. The MCP server behaves as before for
   Hermes (older MCP protocol versions are still served, same `/mcp` route, same bearer token check).
+  CI actions: `actions/checkout` v7.0.1 and `actions/setup-python` v7.0.0, still pinned by commit SHA.
 
 ### Upgrading from 0.13.0
 
