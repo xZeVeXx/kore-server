@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import importlib
 import logging
 import os
@@ -18,8 +17,7 @@ from typing import Any
 
 import fastmcp
 from fastmcp import Client
-from mcp.shared.message import SessionMessage
-from mcp.types import JSONRPCMessage, JSONRPCRequest
+from fastmcp.exceptions import McpError
 from rich.logging import RichHandler
 
 
@@ -155,8 +153,8 @@ class FastMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("replaces_plan_id", plan_read_tool.description)
             self.assertIn("read-only", plan_read_tool.description)
             self.assertIn("niemals", plan_read_tool.description)
-            self.assertIn("origin_ticket", proposal_tool.inputSchema["required"])
-            plan_schema = proposal_tool.inputSchema["properties"]["plan"]
+            self.assertIn("origin_ticket", proposal_tool.input_schema["required"])
+            plan_schema = proposal_tool.input_schema["properties"]["plan"]
             self.assertIn("replaces_plan_id", plan_schema["properties"])
             self.assertIn("base_plan_fingerprint", plan_schema["properties"])
             self.assertIn("removed_session_ids", plan_schema["properties"])
@@ -315,6 +313,24 @@ class FastMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
             completed.stderr,
         )
 
+    @staticmethod
+    async def send_invalid_tool_calls(client: Client, argument_sets: tuple[dict, ...]) -> int:
+        """Send `tools/call` requests the typed client would refuse to build (`name` is not a
+        string), stamped the way the session's protocol era stamps its own requests, so they reach
+        the server's request-validation failure path. Returns how many were answered with an error."""
+        refused = 0
+        for arguments in argument_sets:
+            data = {"method": "tools/call", "params": {"name": 123, "arguments": arguments}}
+            options: dict[str, Any] = {"timeout": 5}
+            client.session._stamp(data, options)
+            try:
+                await client.session._dispatcher.send_raw_request(
+                    data["method"], data["params"], options
+                )
+            except McpError:
+                refused += 1
+        return refused
+
     async def test_pydantic_and_fastmcp_reject_overlimit_before_store(self) -> None:
         ticket, _ = self.ticket()
         pending_before = len(self.store.pending_plans("private-mcp"))
@@ -340,23 +356,10 @@ class FastMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         for logger in captured_namespaces:
             logger.addHandler(collector)
-        raw_response_count = 0
-        raw_responses_received = asyncio.Event()
-
-        async def handle_raw_response(message: object) -> None:
-            nonlocal raw_response_count
-            if isinstance(message, RuntimeError) and "unknown request ID" in str(
-                message
-            ):
-                raw_response_count += 1
-                if raw_response_count == 2:
-                    raw_responses_received.set()
+        raw_error_count = 0
 
         try:
-            async with Client(
-                self.mcp_server.mcp,
-                message_handler=handle_raw_response,
-            ) as client:
+            async with Client(self.mcp_server.mcp) as client:
                 result = await client.call_tool(
                     "propose_training_plan",
                     {"plan": invalid, "origin_ticket": ticket},
@@ -390,17 +393,12 @@ class FastMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     {"origin_ticket": private_ticket_sentinel},
                     {"plan": private_plan_sentinel["name"]},
                 )
-                for request_id, arguments in enumerate(raw_arguments, start=900):
-                    raw_request = JSONRPCRequest(
-                        jsonrpc="2.0",
-                        id=request_id,
-                        method="tools/call",
-                        params={"name": 123, "arguments": arguments},
-                    )
-                    await client.session._write_stream.send(
-                        SessionMessage(message=JSONRPCMessage(raw_request))
-                    )
-                await asyncio.wait_for(raw_responses_received.wait(), timeout=1)
+                raw_error_count += await self.send_invalid_tool_calls(client, raw_arguments)
+            # The same requests on the handshake era, which is what an older MCP client speaks.
+            async with Client(self.mcp_server.mcp, mode="legacy") as legacy_client:
+                raw_error_count += await self.send_invalid_tool_calls(
+                    legacy_client, raw_arguments
+                )
         finally:
             for logger in captured_namespaces:
                 logger.removeHandler(collector)
@@ -408,7 +406,7 @@ class FastMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_error)
         self.assertTrue(foundation_blank_result.is_error)
         self.assertTrue(invalid_ticket_result.is_error)
-        self.assertEqual(raw_response_count, 2)
+        self.assertEqual(raw_error_count, 4)
         formatter = logging.Formatter("%(levelname)s:%(name)s:%(message)s")
         rendered_logs = "\n".join(
             formatter.format(record) for record in collector.records
@@ -514,9 +512,9 @@ class FastMCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(unit, nutrition.description)
         for tool in (activity, nutrition):
             with self.subTest(tool=tool.name):
-                self.assertEqual(list(tool.inputSchema["properties"]), ["days"])
-                self.assertEqual(tool.inputSchema["properties"]["days"]["default"], 30)
-                self.assertEqual(tool.inputSchema.get("required", []), [])
+                self.assertEqual(list(tool.input_schema["properties"]), ["days"])
+                self.assertEqual(tool.input_schema["properties"]["days"]["default"], 30)
+                self.assertEqual(tool.input_schema.get("required", []), [])
 
     async def test_trend_tools_bound_days_and_answer_newest_last(self) -> None:
         self.reset_snapshot()

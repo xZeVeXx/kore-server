@@ -87,8 +87,10 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
   `get_coach_briefing` keys; the ingest's `GET /capabilities`, the new data categories (steps,
   weight and body fat, and nutrition only for your own coach after you share it in Kore), the moved
   ports, `KORE_HERMES_DATA_DIR` and the doctor's new behaviour are described where they belong.
-- **Dependencies updated** (lockfiles regenerated with hashes): FastAPI 0.143.0, Starlette 1.7.0,
-  Pydantic 2.14.0 (pydantic-core 2.50.0), Uvicorn 0.54.0.
+- **Dependencies updated** (lockfiles regenerated with hashes): FastMCP 4.0.11 (on the MCP Python SDK 2.3.0;
+  the HTTP client library `httpx` is replaced by `httpx2`), FastAPI 0.143.0, Starlette 1.7.0,
+  Pydantic 2.14.0 (pydantic-core 2.50.0), Uvicorn 0.54.0. The MCP server behaves as before for
+  Hermes (older MCP protocol versions are still served, same `/mcp` route, same bearer token check).
 
 ### Upgrading from 0.13.0
 

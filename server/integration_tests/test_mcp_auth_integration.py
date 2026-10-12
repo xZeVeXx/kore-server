@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import secrets
 import sys
@@ -139,6 +140,45 @@ class McpHttpAuthTests(_McpEnvironment):
         )
         self.assertNotIn(right.status_code, (401, 403))
 
+    def test_an_older_mcp_client_can_handshake_and_list_the_tools_with_the_right_token(self) -> None:
+        # Hermes speaks a handshake-era MCP protocol: initialize, the initialized notification,
+        # then tools/list on its session. What the server answers must not change with the
+        # FastMCP / MCP SDK version.
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json, text/event-stream",
+        }
+
+        def reply(response):
+            self.assertEqual(response.status_code, 200)
+            data = [line[5:] for line in response.text.splitlines() if line.startswith("data:")]
+            return json.loads(data[-1] if data else response.text)
+
+        for version in ("2025-03-26", "2025-06-18"):
+            with self.subTest(protocol_version=version):
+                initialize = self.client.post("/mcp", headers=headers, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": version, "capabilities": {},
+                               "clientInfo": {"name": "hermes-like", "version": "1"}},
+                })
+                result = reply(initialize)["result"]
+                self.assertEqual(result["protocolVersion"], version)
+                session = {
+                    **headers,
+                    "mcp-session-id": initialize.headers["mcp-session-id"],
+                    "mcp-protocol-version": version,
+                }
+                accepted = self.client.post("/mcp", headers=session, json={
+                    "jsonrpc": "2.0", "method": "notifications/initialized",
+                })
+                self.assertEqual(accepted.status_code, 202)
+                tools = reply(self.client.post("/mcp", headers=session, json={
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                }))["result"]["tools"]
+                names = [tool["name"] for tool in tools]
+                self.assertIn("get_coach_briefing", names)
+                self.assertIn("propose_training_plan", names)
+
     def test_two_authorization_headers_are_refused_before_the_body_is_read(self) -> None:
         # 0.13 S14, like bridge and ingest: a duplicate is ambiguous, not "the first one wins"
         # (FastMCP's bearer backend reads only the first).
@@ -187,7 +227,7 @@ class McpServeTests(_McpEnvironment):
         super().setUpClass()
 
     def test_the_fastmcp_update_check_is_off(self) -> None:
-        # FastMCP 3.4 asks PyPI for a newer version when it prints its banner unless
+        # FastMCP asks PyPI for a newer version when it prints its banner unless
         # FASTMCP_CHECK_FOR_UPDATES is "off" (fastmcp/settings.py, utilities/version_check.py).
         self.assertEqual(fastmcp.settings.check_for_updates, "off")
         self.assertEqual(os.environ["FASTMCP_CHECK_FOR_UPDATES"], "off")

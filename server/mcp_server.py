@@ -30,7 +30,7 @@ def _required_fastmcp_log_level() -> tuple[str, int]:
 # This gate must run before importing FastMCP. Integration processes may already
 # have imported it, so the programmatic clamp immediately below is also required.
 _FASTMCP_LOG_LEVEL, _FASTMCP_LOG_LEVEL_NUMBER = _required_fastmcp_log_level()
-# FastMCP 3.4 asks PyPI for a newer release when it prints its start banner (settings
+# FastMCP asks PyPI for a newer release when it prints its start banner (settings
 # `check_for_updates`, env FASTMCP_CHECK_FOR_UPDATES, default "stable"). The server makes no
 # outbound call: off before the import, and again on the settings object below.
 os.environ["FASTMCP_CHECK_FOR_UPDATES"] = "off"
@@ -179,9 +179,9 @@ def http_middleware() -> list[Middleware]:
     """The ASGI layers FastMCP mounts outside its own session handling: the origin guard, then
     the refusal of a second `Authorization` header (401 before the body, as on ingest and bridge).
 
-    FastMCP 3.4 builds its Starlette app inside `run()`, so the guards are handed in as
-    middleware specs rather than wrapped around a finished app. `TransportSecuritySettings`
-    from the MCP SDK would be the built-in route for the origin check, but FastMCP never forwards it.
+    FastMCP builds its Starlette app inside `run()`, so the guards are handed in as
+    middleware specs rather than wrapped around a finished app. FastMCP's own Host/Origin guard
+    (`http_host_origin_protection`) is off by default and stays off; the origin check is ours.
     """
     return [
         Middleware(OriginGuardMiddleware, allowed_origins=ALLOWED_ORIGINS),

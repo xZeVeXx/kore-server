@@ -1,11 +1,12 @@
-"""Origin guard — the DNS-rebinding protection FastMCP 3.4 does not wire up.
+"""Origin guard — the DNS-rebinding protection FastMCP does not switch on by default.
 
 Both surfaces of this repo speak plain HTTP on a private address. A browser that a
 malicious page controls can therefore reach them: the page cannot read a cross-origin
 response without CORS, but it can *send* requests, and a DNS-rebinding trick makes even
-the read side possible. The MCP SDK ships `TransportSecuritySettings` for exactly this,
-but FastMCP 3.4 never passes them through, and their default is
-`enable_dns_rebinding_protection=False`. So the check lives here instead.
+the read side possible. The MCP SDK ships `TransportSecuritySettings` for exactly this, and
+FastMCP has its own Host/Origin guard (`http_host_origin_protection`), but FastMCP keeps the
+SDK's check disabled and its own guard is off by default (checked in 4.0.11). So the check
+lives here instead.
 
 Policy, deliberately strict and deliberately small:
 
