@@ -192,15 +192,17 @@ class RecoveryToday(StrictSnapshotModel):
     hrv_sdnn_ms: Optional[HRVMilliseconds] = None
     hrv_ms: Optional[HRVMilliseconds] = None
     hrv_baseline_ms: Optional[HRVMilliseconds] = None
+    # appleRMSSD / appleRecoveryRMSSD: Apples Erholungs-HRV (App seit 0.10), eigene Skala, nur in hrv_ms.
     hrv_method_effective: Optional[
-        Literal["rmssd", "sdnn", "sdnnFallbackFromRMSSD"]
+        Literal["rmssd", "sdnn", "sdnnFallbackFromRMSSD", "appleRMSSD"]
     ] = None
-    hrv_kind: Optional[Literal["rmssd", "sdnn"]] = None
+    hrv_kind: Optional[Literal["rmssd", "sdnn", "appleRMSSD"]] = None
     hrv_source: Optional[
         Literal[
             "nightHeartbeatSeriesRMSSD",
             "sleepHealthKitSDNN",
             "metric_tile_fallback",
+            "appleRecoveryRMSSD",
         ]
     ] = None
     hrv_quality: Optional[

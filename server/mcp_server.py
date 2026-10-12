@@ -199,7 +199,9 @@ def _snapshot_freshness(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool
 def get_recovery_today() -> dict[str, Any]:
-    """Heutige Readiness/HRV(Schlaf)/Ruhepuls/Schlaf-Zusammenfassung aus dem letzten App-Snapshot."""
+    """Heutige Readiness/HRV(Schlaf)/Ruhepuls/Schlaf-Zusammenfassung aus dem letzten App-Snapshot.
+
+    hrv_kind appleRMSSD = Apples Erholungs-HRV: eigene Skala, nicht mit rMSSD/SDNN vergleichen."""
     return store.get_snapshot().get("recovery") or {
         "note": "noch keine Daten synchronisiert"
     }

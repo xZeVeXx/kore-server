@@ -2,6 +2,38 @@
 
 All notable changes to `kore-server`. Versions follow the Kore app's release it is tested with.
 
+## Unreleased
+
+### Fixed
+
+- **Snapshots with Apple's recovery HRV were rejected (422).** Since app 0.10, Kore can carry the day
+  on Apple's own recovery HRV (iOS 27). The app then sends `hrv_kind`/`hrv_method_effective`
+  `appleRMSSD` and `hrv_source` `appleRecoveryRMSSD` with the neutral `hrv_ms` value. The ingest did
+  not know these values and rejected the whole snapshot, so the coach saw no data at all. They are
+  now accepted, never mixed with `hrv_rmssd_ms`/`hrv_sdnn_ms` or the rMSSD/SDNN sources, and the
+  `get_recovery_today` tool tells the coach that this is a scale of its own.
+- **Bridge start with Telegram topics in the profile.** Hermes writes Telegram topic prompts with
+  single-quoted numeric keys (`'1': ...`). The strict `skills.inline_shell` check rejected every
+  quoted key, so the bridge refused to start for such profiles. Single-quoted keys made only of
+  `A-Z a-z 0-9 . _ ~ + -` are now accepted when they are indented under a block other than `skills:`.
+  Quoted keys at the top level, inside `skills:`, with double quotes, in list items or naming
+  `inline_shell` stay rejected. `kore-doctor` judges the same way.
+
+### Security
+
+- **Two ways past the `skills.inline_shell` lock closed.** Hermes enables inline shell for any
+  non-empty value, and two texts that read as `false` were not: a deeper continuation line right
+  after `inline_shell: false` (YAML folds it into `"false yes"`) and Unicode whitespace such as
+  NBSP after `false`. Only someone who can already write the Hermes profile's `config.yaml` could
+  use them. The bridge and `kore-doctor` now treat only space and tab as YAML whitespace and reject
+  a deeper line directly after the `inline_shell` line.
+
+### Upgrading from 0.13.0
+
+Pull the release, rebuild the containers and restart the bridge (`docker compose up -d --build`,
+`sudo systemctl restart kore-coach-bridge`), then run `kore-doctor`. No `.env` or `bridge.env`
+changes are needed; paired devices stay paired.
+
 ## 0.13.0
 
 First public release.

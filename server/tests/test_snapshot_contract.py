@@ -41,6 +41,20 @@ class RecoveryHRVContractTests(unittest.TestCase):
                 "hrv_ms": 42.0,
                 "hrv_source": "metric_tile_fallback",
             },
+            # 0.13.1: Apples Erholungs-HRV, eigene Skala im neutralen hrv_ms.
+            {
+                "hrv_ms": 61.0,
+                "hrv_method_effective": "appleRMSSD",
+                "hrv_kind": "appleRMSSD",
+                "hrv_source": "appleRecoveryRMSSD",
+                "hrv_contributed_to_recovery": True,
+            },
+            {
+                "hrv_ms": 60.0,
+                "hrv_method_effective": "appleRMSSD",
+                "hrv_kind": "appleRMSSD",
+                "hrv_source": "metric_tile_fallback",
+            },
         ]
 
         for payload in payloads:
@@ -61,6 +75,15 @@ class RecoveryHRVContractTests(unittest.TestCase):
             {"hrv_rmssd_ms": 42.0, "hrv_source": "sleepHealthKitSDNN"},
             {"hrv_sdnn_ms": 42.0, "hrv_source": "nightHeartbeatSeriesRMSSD"},
             {"hrv_sdnn_ms": 42.0, "hrv_source": "metric_tile_fallback"},
+            # Apples Skala nie in Kores rMSSD-/SDNN-Feldern oder mit deren Herkunft gemischt.
+            {"hrv_rmssd_ms": 42.0, "hrv_kind": "appleRMSSD"},
+            {"hrv_sdnn_ms": 42.0, "hrv_method_effective": "appleRMSSD"},
+            {"hrv_rmssd_ms": 42.0, "hrv_source": "appleRecoveryRMSSD"},
+            {"hrv_ms": 42.0, "hrv_kind": "rmssd", "hrv_source": "appleRecoveryRMSSD"},
+            {"hrv_ms": 42.0, "hrv_kind": "sdnn", "hrv_method_effective": "appleRMSSD"},
+            {"hrv_ms": 42.0, "hrv_kind": "appleRMSSD", "hrv_method_effective": "rmssd"},
+            {"hrv_ms": 42.0, "hrv_kind": "appleRMSSD", "hrv_source": "nightHeartbeatSeriesRMSSD"},
+            {"hrv_ms": 42.0, "hrv_method_effective": "appleRMSSD", "hrv_source": "sleepHealthKitSDNN"},
         ]
 
         for payload in invalid:

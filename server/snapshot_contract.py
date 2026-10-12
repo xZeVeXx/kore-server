@@ -6,6 +6,8 @@ from typing import Any
 
 
 HRV_VALUE_KEYS = ("hrv_rmssd_ms", "hrv_sdnn_ms", "hrv_ms")
+# Apples Erholungs-HRV: eigene Skala, nie mit Kores rMSSD/SDNN gemischt, nur im neutralen hrv_ms.
+APPLE_RMSSD = "appleRMSSD"
 
 
 def validate_recovery_hrv_contract(value: Any) -> Any:
@@ -37,16 +39,28 @@ def validate_recovery_hrv_contract(value: Any) -> Any:
         raise ValueError("rMSSD method conflicts with HRV kind")
     if method in ("sdnn", "sdnnFallbackFromRMSSD") and kind not in (None, "sdnn"):
         raise ValueError("SDNN method conflicts with HRV kind")
+    if method == APPLE_RMSSD and kind not in (None, APPLE_RMSSD):
+        raise ValueError("Apple recovery HRV method conflicts with HRV kind")
 
     if source == "nightHeartbeatSeriesRMSSD":
-        if value_key == "hrv_sdnn_ms" or kind == "sdnn" or method in (
+        if value_key == "hrv_sdnn_ms" or kind in ("sdnn", APPLE_RMSSD) or method in (
             "sdnn",
             "sdnnFallbackFromRMSSD",
+            APPLE_RMSSD,
         ):
             raise ValueError("rMSSD source conflicts with HRV semantics")
     elif source == "sleepHealthKitSDNN":
-        if value_key == "hrv_rmssd_ms" or kind == "rmssd" or method == "rmssd":
+        if value_key == "hrv_rmssd_ms" or kind in ("rmssd", APPLE_RMSSD) or method in (
+            "rmssd",
+            APPLE_RMSSD,
+        ):
             raise ValueError("SDNN source conflicts with HRV semantics")
+    elif source == "appleRecoveryRMSSD":
+        if value_key not in (None, "hrv_ms") or kind not in (None, APPLE_RMSSD) or method not in (
+            None,
+            APPLE_RMSSD,
+        ):
+            raise ValueError("Apple recovery HRV source conflicts with HRV semantics")
     elif source == "metric_tile_fallback" and value_key != "hrv_ms":
         raise ValueError("metric fallback requires the method-neutral hrv_ms field")
 

@@ -496,6 +496,26 @@ class FastAPIIntegrationTests(unittest.TestCase):
                 "hrv_ms": 42.0,
                 "hrv_source": "metric_tile_fallback",
             },
+            # 0.13.1: Apples Erholungs-HRV (App seit 0.10) — eigene Skala, nur im neutralen hrv_ms.
+            {
+                "date": "2026-07-14",
+                "readiness": 74,
+                "hrv_ms": 61.0,
+                "hrv_baseline_ms": 58.0,
+                "hrv_method_effective": "appleRMSSD",
+                "hrv_kind": "appleRMSSD",
+                "hrv_source": "appleRecoveryRMSSD",
+                "hrv_quality": "good",
+                "hrv_sample_count": 46,
+                "hrv_contributed_to_recovery": True,
+            },
+            {
+                "date": "2026-07-14",
+                "hrv_ms": 60.0,
+                "hrv_method_effective": "appleRMSSD",
+                "hrv_kind": "appleRMSSD",
+                "hrv_source": "metric_tile_fallback",
+            },
         ]
 
         for recovery in recoveries:
@@ -561,6 +581,8 @@ class FastAPIIntegrationTests(unittest.TestCase):
             },
             {"date": "2026-07-14", "hrv_sdnn_ms": 1_000.01},
             {"date": "2026-07-14", "hrv_rmssd": 42.0},
+            {"date": "2026-07-14", "hrv_rmssd_ms": 42.0, "hrv_kind": "appleRMSSD"},
+            {"date": "2026-07-14", "hrv_rmssd_ms": 42.0, "hrv_source": "appleRecoveryRMSSD"},
         ]
 
         for recovery in invalid_recoveries:
