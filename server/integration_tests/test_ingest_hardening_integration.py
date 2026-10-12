@@ -192,7 +192,7 @@ class IngestHardeningTests(unittest.TestCase):
         self.assertEqual(self.client.get("/nope", headers=authorized).status_code, 404)
 
     def test_serve_hands_uvicorn_a_concurrency_limit_and_a_keep_alive_timeout(self) -> None:
-        # uvicorn 0.48 has no header or read timeout; these are the limits it does have (0.13 S14).
+        # uvicorn 0.54 has no header or read timeout; these are the limits it does have (0.13 S14).
         with mock.patch.dict(os.environ, {"KORE_INGEST_HOST": "", "KORE_BIND_ADDRESS": ""}), \
                 mock.patch("uvicorn.run") as run:
             self.ingest_api.serve()

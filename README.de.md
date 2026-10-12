@@ -951,7 +951,7 @@ dort frei. Was dein Bot danach damit tut, steuert Kore nicht:
 - **Die Verbindungsgrenze gilt global, nicht je Adresse.** Wer in deinem Netz sitzt, kann die 64
   Verbindungen der Bridge je bis zu 20 s belegen. Das sperrt die Bridge vorübergehend, bindet aber
   keine unbegrenzten Threads oder Speicher.
-- **Ingest und MCP haben keine Frist für Kopfzeilen oder Body.** uvicorn 0.48, das beide bedient,
+- **Ingest und MCP haben keine Frist für Kopfzeilen oder Body.** uvicorn 0.54, das beide bedient,
   bietet keine an. Beide beantworten jede weitere Anfrage mit 503, sobald 1024 Verbindungen offen sind
   oder 1024 Anfragen laufen, und schließen eine ruhende Keep-Alive-Verbindung nach 5 s. Wer in deinem
   Netz seine Kopfzeilen aber tröpfchenweise schickt, hält eine solche Verbindung beliebig lange offen,

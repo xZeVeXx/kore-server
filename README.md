@@ -922,7 +922,7 @@ Kore sends health context only in chats with health sharing turned on, and the b
 - **The connection limit is global, not per address.** Someone in your network can keep the bridge's
   64 connections busy for up to 20 s each. That blocks the bridge for the time being but binds no
   unlimited threads or memory.
-- **Ingest and MCP have no deadline for headers or body.** uvicorn 0.48, which serves both, offers
+- **Ingest and MCP have no deadline for headers or body.** uvicorn 0.54, which serves both, offers
   none. Both answer every further request with 503 once 1024 connections are open or 1024 requests are
   running, and close an idle keep-alive connection after 5 s. But a sender in your network that
   trickles its headers keeps such a connection open as long as it likes, and 1024 of them block the

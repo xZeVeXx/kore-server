@@ -87,6 +87,8 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
   `get_coach_briefing` keys; the ingest's `GET /capabilities`, the new data categories (steps,
   weight and body fat, and nutrition only for your own coach after you share it in Kore), the moved
   ports, `KORE_HERMES_DATA_DIR` and the doctor's new behaviour are described where they belong.
+- **Dependencies updated** (lockfiles regenerated with hashes): FastAPI 0.143.0, Starlette 1.7.0,
+  Pydantic 2.14.0 (pydantic-core 2.50.0), Uvicorn 0.54.0.
 
 ### Upgrading from 0.13.0
 
