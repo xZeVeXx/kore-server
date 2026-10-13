@@ -131,7 +131,7 @@ Führ die Schritte als der Linux-Nutzer aus, der Bridge und Hermes betreibt (nic
 ```bash
 git clone https://github.com/xZeVeXx/kore-server.git ~/kore-server
 cd ~/kore-server
-git checkout --detach v0.13.0
+git checkout --detach v0.14.0
 ```
 
 **2. Den Zustandsordner der Kopplung anlegen.** Er muss *vor* `docker compose up` existieren,

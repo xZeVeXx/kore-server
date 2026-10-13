@@ -128,7 +128,7 @@ Run the steps as the Linux user that will run the bridge and Hermes (not as root
 ```bash
 git clone https://github.com/xZeVeXx/kore-server.git ~/kore-server
 cd ~/kore-server
-git checkout --detach v0.13.0
+git checkout --detach v0.14.0
 ```
 
 **2. Create the pairing state directory.** It must exist *before* `docker compose up`; otherwise
