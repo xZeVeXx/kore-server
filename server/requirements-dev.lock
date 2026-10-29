@@ -37,7 +37,9 @@ authlib==1.8.0 \
 beartype==0.23.0 \
     --hash=sha256:9d915ce043a2262ee3eb110d1c1c528179f06eb4145e375a750f72ddbdf40fa3 \
     --hash=sha256:a88b85be516c064d4de2b42045a258a43be97bce5cbc18b777f332027c0979f7
-    # via py-key-value-aio
+    # via
+    #   fastmcp-slim
+    #   py-key-value-aio
 cachetools==7.2.1 \
     --hash=sha256:63aa53dfe7473c10cccdd5a01dedf76ef2c4b73a58840d9396e7d0752cbdac3b \
     --hash=sha256:b1a7537025c06abf96fcc1443e496af9a3fb95e774e70e1f0af226f73f7f2dcc
@@ -286,13 +288,13 @@ fastapi==0.143.0 \
     --hash=sha256:1acffe48206a80917cf7dac21992b5c44b25384e8902bf745c1fd9dabcf6c51f \
     --hash=sha256:3e9395fd35276425b61b516a31fdd7c77fe2af83e41b4da22e30696fb1304c5d
     # via -r requirements.txt
-fastmcp==4.0.11 \
-    --hash=sha256:55fc7b8e25d4f8365818ba93f7008d1b6e646ce7fe8ae49342687243ccbef9f2 \
-    --hash=sha256:defbc5f2566a702f45817d1acead120dfa8127d60b1c1512b3200232ead13a44
+fastmcp==4.1.2 \
+    --hash=sha256:1b70a8467ac4dd6416c7c101cd54562f089b55e6636a196b4a20bdac3ccb0284 \
+    --hash=sha256:3d5eddfe624b002ebcf202d5a55ff13bdce6925ce58bfcaeb28bc2e3bbee1830
     # via -r requirements.txt
-fastmcp-slim==4.0.11 \
-    --hash=sha256:524905197e318d934908594f16fedea559d44dd682bd763d40f3556233a2b1d9 \
-    --hash=sha256:9152aac74d8837bc37576f5f3d83f17567250a9dfcd8187133c43faaaa9dd06f
+fastmcp-slim==4.1.2 \
+    --hash=sha256:4b703ddbd35165ebf03b2cc560688f458f3fe4db11e635074fcc303496734154 \
+    --hash=sha256:58a4e547a0f85cfee2d2219677ed31c0f1c4911741a5c91a1ee5fbf69dde35fa
     # via fastmcp
 griffelib==2.3.2 \
     --hash=sha256:8e710afededd5607f95bf3c8ccc175ee306e7084459faf27b9f9f44ef2a7a274 \
