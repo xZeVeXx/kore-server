@@ -165,12 +165,11 @@ class HermesOptionAdaptationTests(unittest.TestCase):
                 patch.dict(os.environ, {"KORE_HERMES_WORK_DIR": ""}):
             base = os.path.join(home, ".hermes", "kore-bridge-work")
             self.assertEqual(bridge.hermes_work_base(), base)
-            with bridge.hermes_working_dir() as first, bridge.hermes_working_dir() as second:
-                self.assertEqual(os.path.dirname(first), base)
-                self.assertNotEqual(first, second)
+            with bridge.hermes_working_dir() as first:
+                self.assertEqual(first, os.path.join(base, "chat"))
                 self.assertEqual(os.listdir(first), [])
                 self.assertEqual(os.stat(base).st_mode & 0o777, 0o700)
-            self.assertFalse(os.path.exists(first), "Nach dem Lauf ist der Ordner weg.")
+            self.assertTrue(os.path.isdir(first), "Der Ordner bleibt: Fortsetzen braucht ihn.")
         with patch.dict(os.environ, {"KORE_HERMES_WORK_DIR": "/srv/kore-work"}):
             self.assertEqual(bridge.hermes_work_base(), "/srv/kore-work")
 

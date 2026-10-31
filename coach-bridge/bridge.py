@@ -854,25 +854,49 @@ def hermes_working_dir():
 
     0.14.2: Seit Hermes v0.22.5 meldet der Chat-Client seinen Arbeitsordner an den Gateway-Dienst, und
     der laeuft ausserhalb der Sandbox der Bridge. Ein Ordner im privaten /tmp existiert fuer ihn nicht
-    (`invalid_params`). Der Ordner liegt deshalb unter `hermes_work_base()` (sichtbar fuer beide, kein
-    Git-Repo), sonst wie bisher im Temp-Ordner.
+    (`invalid_params`), und das Gateway friert den Ordner je Session ein: Fortsetzen verlangt, dass er
+    noch existiert. Der Ordner ist deshalb EIN fester Ordner `<hermes_work_base()>/chat` (sichtbar fuer
+    beide, kein Git-Repo), den die Bridge vor und nach jedem Lauf leert. So bleibt die Zusage „leer,
+    nichts vom vorigen Lauf“, und eine Session laesst sich fortsetzen. Liegt die Basis in einem Repo oder
+    ist sie nicht beschreibbar, bleibt es beim frischen Temp-Ordner (mit dem Gateway scheitert der Lauf
+    dann sichtbar, statt fremde Dateien zu laden).
     """
     base = hermes_work_base()
-    path = None
-    # Hermes liest Kontextdateien der Elternordner nur bis zur Git-Wurzel. Liegt der Ordner in einem Repo, bleibt
-    # es beim privaten Temp-Ordner (mit dem Gateway scheitert der Lauf dann sichtbar, statt fremde Dateien zu laden).
+    stable = os.path.join(base, "chat")
     if not _inside_git_worktree(base):
         try:
-            os.makedirs(base, mode=0o700, exist_ok=True)
-            path = tempfile.mkdtemp(prefix="kore-hermes-", dir=base)
+            os.makedirs(stable, mode=0o700, exist_ok=True)
+            os.chmod(base, 0o700)
+            os.chmod(stable, 0o700)
+            _empty_directory(stable)
         except OSError:
-            path = None
-    if path is None:
-        path = tempfile.mkdtemp(prefix="kore-hermes-")
+            stable = None
+    else:
+        stable = None
+    if stable is not None:
+        try:
+            yield stable
+        finally:
+            _empty_directory(stable)
+        return
+    path = tempfile.mkdtemp(prefix="kore-hermes-")
     try:
         yield path
     finally:
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _empty_directory(path: str) -> None:
+    """Entfernt alles in `path`, den Ordner selbst nicht."""
+    for name in os.listdir(path):
+        entry = os.path.join(path, name)
+        if os.path.isdir(entry) and not os.path.islink(entry):
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            try:
+                os.unlink(entry)
+            except FileNotFoundError:
+                pass
 
 
 def validated_content_length(raw_value) -> int:
