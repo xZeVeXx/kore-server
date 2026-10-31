@@ -1645,6 +1645,8 @@ def is_unknown_session_error(result_record, stderr: str, resume_id: str) -> bool
 # lieber laut. Die Wall-Clock-Grenze haelt die Bridge ohnehin selbst (`KORE_BRIDGE_TIMEOUT`, Prozessgruppe wird beendet).
 DROPPABLE_HERMES_OPTIONS = frozenset({"--run-budget", "--max-turns", "--source"})
 _UNSUPPORTED_OPTIONS_RE = re.compile(r"Unsupported (?:[A-Za-z]+ )?CLI options?: ([^\n]*)")
+# v0.22.5: Das Gateway nimmt nur noch feste Quellen an (cli, tui, gui, acp, tool, oneshot); `kore-<scope>` lehnt es ab.
+_UNSUPPORTED_SOURCE_RE = re.compile(r"Gateway does not support source ")
 _OPTION_TOKEN_RE = re.compile(r"(?<![\w-])--?[A-Za-z][A-Za-z0-9-]*")
 _dropped_hermes_options: set = set()
 _dropped_hermes_options_lock = threading.Lock()
@@ -1659,6 +1661,8 @@ def unsupported_hermes_options(result_record, stderr) -> frozenset:
         texts.append(stderr)
     found = set()
     for text in texts:
+        if _UNSUPPORTED_SOURCE_RE.search(text):
+            found.add("--source")
         for match in _UNSUPPORTED_OPTIONS_RE.finditer(text):
             # Die Liste endet vor dem ersten Satz danach („--run-budget. No local fallback …").
             listed = match.group(1).split(". ", 1)[0]
@@ -1833,20 +1837,22 @@ def run_budget_seconds() -> int:
 def _run_hermes_once(args, prompt_bytes, on_delta, on_process):
     """Ein Hermes-Lauf: (Prozess, StreamResult, Fehlercode, bisher gestreamte Deltas).
 
-    Lehnt Hermes eine weglassbare Option ab (siehe `DROPPABLE_HERMES_OPTIONS`), laeuft derselbe Aufruf einmal ohne sie."""
-    process, stream, error_code, streamed = _run_hermes_attempt(adapted_hermes_args(args), prompt_bytes, on_delta,
-                                                                on_process)
-    if (
-        error_code == "hermes_failed"
-        and process is not None
-        and not streamed
-        and learn_unsupported_hermes_options(unsupported_hermes_options(
-            stream.result_record if stream is not None else None,
-            process.stderr if isinstance(process.stderr, str) else None,
-        ))
-    ):
+    Lehnt Hermes eine weglassbare Option ab (siehe `DROPPABLE_HERMES_OPTIONS`), laeuft derselbe Aufruf ohne sie erneut.
+    Hermes meldet Ablehnungen nacheinander (v0.22.5: erst `--run-budget`, dann die Quelle); jede Wiederholung muss etwas
+    Neues gelernt haben, also hoechstens eine je weglassbarer Option."""
+    for _ in range(len(DROPPABLE_HERMES_OPTIONS) + 1):
         process, stream, error_code, streamed = _run_hermes_attempt(adapted_hermes_args(args), prompt_bytes, on_delta,
                                                                     on_process)
+        if not (
+            error_code == "hermes_failed"
+            and process is not None
+            and not streamed
+            and learn_unsupported_hermes_options(unsupported_hermes_options(
+                stream.result_record if stream is not None else None,
+                process.stderr if isinstance(process.stderr, str) else None,
+            ))
+        ):
+            break
     return process, stream, error_code, streamed
 
 
@@ -2466,7 +2472,8 @@ SESSION_LIST_LIMIT = 5_000
 SESSION_EXPORT_MAX_BYTES = 4 * 1_024 * 1_024
 FORGET_SCOPES = {"health": ("health",), "all": ("general", "health")}
 # Genau die Form aus hermes_state_ids.new_session_id (6 Hex bei CLI, 8 Gateway, 12 Import).
-_HERMES_SESSION_ID_RE = re.compile(r"[0-9]{8}_[0-9]{6}_[0-9a-f]{6,12}\Z")
+# Klassische IDs (`20260924_120000_aaaaaa`) und seit Hermes v0.22.5 die des Gateways (`local-` + Hex, Probe: 64 Zeichen).
+_HERMES_SESSION_ID_RE = re.compile(r"(?:[0-9]{8}_[0-9]{6}_[0-9a-f]{6,12}|local-[0-9a-f]{16,64})\Z")
 _SESSION_MAINTENANCE_LOCK = threading.Lock()
 PRUNE_INCLUDE_ALL = ("--include-archived", "--include-pinned")
 # `prune` zaehlt offene Sessions, die es auslaesst (hermes_cli/sessions_cmd.py).
@@ -2583,17 +2590,18 @@ def _session_record(hermes_session_id: str, timeout=None):
 
 
 def session_chain(hermes_session_id: str, scope: str):
-    """Die Session und ihre Kompressions-Vorgaenger derselben Kore-Quelle, Spitze zuerst.
+    """Die Session und ihre Kompressions-Vorgaenger derselben Quelle, Spitze zuerst.
 
-    "not_found", wenn Hermes die Session nicht kennt; "foreign", wenn sie nicht aus der
-    Kore-Quelle dieses Scopes stammt; None, wenn sie nicht lesbar ist. Die Kette endet an jedem
-    Glied, das kein Kompressions-Vorgaenger derselben Quelle ist."""
-    source = _kore_source(scope)
+    "not_found", wenn Hermes die Session nicht kennt; None, wenn sie nicht lesbar ist. Die Spitze
+    kommt aus einer signierten Referenz (`verify_session`): Die Signatur der Bridge belegt, dass die
+    Bridge diese Session fuer diesen Scope angelegt hat. Deshalb entscheidet die Hermes-Quelle hier
+    nicht mehr (0.14.2: das Gateway von Hermes v0.22.5 vergibt nur noch feste Quellen, nicht mehr
+    `kore-<scope>`). Die Kette endet an jedem Glied, das kein Kompressions-Vorgaenger mit der Quelle
+    der Spitze ist."""
     record = _session_record(hermes_session_id)
     if record is None or record == "not_found":
         return record
-    if record["source"] != source:
-        return "foreign"
+    source = record["source"]
     chain = [hermes_session_id]
     current = record
     while len(chain) < MAX_SESSION_CHAIN:
@@ -2692,8 +2700,8 @@ def forget(*, conversation_id=None, sessions=None, scope=None, store=None) -> di
                 counts["failed"] += 1
                 continue
             chain = session_chain(hermes_session_id, ref_scope)
-            if chain in ("not_found", "foreign"):
-                counts["not_found" if chain == "not_found" else "failed"] += 1
+            if chain == "not_found":
+                counts["not_found"] += 1
                 continue
             if chain is None:
                 # Nicht lesbar: die signierte Session selbst trotzdem loeschen, aber ohne

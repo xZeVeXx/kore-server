@@ -120,6 +120,41 @@ class HermesOptionAdaptationTests(unittest.TestCase):
         self.assertEqual(outcome.error_code, "hermes_failed")
         self.assertEqual(run.call_count, 2)
 
+    def test_a_rejected_source_counts_as_an_unsupported_option(self):
+        error = "Gateway does not support source 'kore-health'"
+        self.assertEqual(bridge.unsupported_hermes_options({"error": error}, f"Error: {error}\n"),
+                         frozenset({"--source"}))
+
+    @patch("bridge._run_process_bounded")
+    def test_budget_then_source_rejections_end_in_an_answer(self, run):
+        # Hermes v0.22.5 meldet erst --run-budget, nach dem Weglassen dann die Quelle: zwei Anpassungen, eine Antwort.
+        run.side_effect = hermes_sequence(
+            rejected_process(),
+            rejected_process("Gateway does not support source 'kore-general'"),
+            hermes_process(reply_stream("Da bin ich")),
+        )
+
+        outcome, journal = self.turn()
+
+        self.assertIsNone(outcome.error_code)
+        self.assertEqual(outcome.reply, "Da bin ich")
+        last = run.call_args_list[-1].args[0]
+        self.assertNotIn("--run-budget", last)
+        self.assertNotIn("--source", last)
+        self.assertIn("-t", last)
+        self.assertIn("kore-hermes-option-dropped option=--source", journal)
+
+    def test_gateway_session_ids_are_hermes_session_ids(self):
+        gateway_id = "local-" + "6b6cd1f6" * 8
+        self.assertIsNotNone(bridge._HERMES_SESSION_ID_RE.fullmatch(gateway_id))
+        self.assertIsNotNone(bridge._HERMES_SESSION_ID_RE.fullmatch("20260924_120000_aaaaaa"))
+        self.assertIsNone(bridge._HERMES_SESSION_ID_RE.fullmatch("local-../etc"))
+        self.assertTrue(bridge.valid_session_token(gateway_id))
+        with patch.object(bridge, "TOKEN", "t" * 48):
+            ref = bridge.sign_session("health", stream_tests.CONVERSATION, gateway_id)
+            self.assertLessEqual(len(ref.partition(":")[2]), 120)
+            self.assertEqual(bridge.verify_session(ref, "health", stream_tests.CONVERSATION), gateway_id)
+
     def test_only_comfort_options_are_droppable(self):
         self.assertEqual(bridge.DROPPABLE_HERMES_OPTIONS, frozenset({"--run-budget", "--max-turns", "--source"}))
 

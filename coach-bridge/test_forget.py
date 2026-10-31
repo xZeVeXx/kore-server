@@ -249,9 +249,9 @@ class ForgetBySessionTests(ForgetTestCase):
         self.assertEqual(result, {"deleted": 0, "not_found": 1, "failed": 0})
         self.assertEqual(cli.deleted_ids(), [])
 
-    def test_never_deletes_a_session_of_another_source(self):
-        # Eine signierte ID gehoert immer zu Kore; die Quelle wird trotzdem geprueft, und die
-        # Kette endet an jedem Glied, das nicht aus derselben Kore-Quelle stammt.
+    def test_a_signed_session_is_deleted_whatever_source_the_gateway_gave_it(self):
+        # 0.14.2: Das Gateway von Hermes v0.22.5 vergibt nur feste Quellen (cli, oneshot, …). Die Signatur
+        # der Bridge belegt die Herkunft; die Kette endet trotzdem an jedem Glied mit anderer Quelle als die Spitze.
         cli = self.use_cli({
             ROOT: session("telegram", end_reason="compression"),
             TIP: session("kore-general", parent=ROOT),
@@ -266,10 +266,9 @@ class ForgetBySessionTests(ForgetTestCase):
             store=self.store,
         )
 
-        self.assertEqual(result, {"deleted": 1, "not_found": 0, "failed": 1})
-        self.assertEqual(cli.deleted_ids(), [TIP])
-        self.assertIn(ROOT, cli.sessions)
-        self.assertIn(MIDDLE, cli.sessions)
+        self.assertEqual(result, {"deleted": 2, "not_found": 0, "failed": 0})
+        self.assertEqual(sorted(cli.deleted_ids()), sorted([TIP, MIDDLE]))
+        self.assertIn(ROOT, cli.sessions, "Ein Vorgaenger mit anderer Quelle bleibt.")
 
     def test_a_parent_that_is_not_a_compression_predecessor_stays(self):
         cli = self.use_cli({
