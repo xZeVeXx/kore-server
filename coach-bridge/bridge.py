@@ -1700,6 +1700,163 @@ def is_unknown_session_error(result_record, stderr: str, resume_id: str) -> bool
     return any(line.strip() == expected for line in output_lines(stderr))
 
 
+# ---- Zustandsdateien der Bridge (0.14.2) ----------------------------------------------
+# Im Zustandsordner der Kopplung (`KORE_STATE_DIR`, unter systemd in ReadWritePaths). Jede Datei gehoert nur dem
+# Dienst-User (0600) und wird atomar geschrieben (Temp-Datei + os.replace). Eine fehlende, unlesbare oder kaputte
+# Datei bringt die Bridge nie zum Absturz: Sie beginnt leer und meldet das im Journal.
+BRIDGE_STATE_DIR = pairing.state_dir_from_env()
+STATE_FILE_MAX_BYTES = 4 * 1_024 * 1_024
+
+
+def journal_bridge_state(event: str, **fields) -> None:
+    """`kore-<event> feld=wert …` nach stderr; Werte nur aus festen Vokabularen oder Zahlen."""
+    parts = [f"kore-{event}"] + [f"{name}={_journal_value(value)}" for name, value in fields.items()]
+    try:
+        print(" ".join(parts), file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+def _read_state_json(path: str):
+    """(Objekt, Problem): (None, None), wenn die Datei fehlt; (None, "unreadable" | "malformed"), wenn sie nicht
+    lesbar oder kein JSON-Objekt ist; sonst (dict, None)."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(STATE_FILE_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return None, None
+    except OSError:
+        return None, "unreadable"
+    if len(raw) > STATE_FILE_MAX_BYTES:
+        return None, "malformed"
+    try:
+        data = strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None, "malformed"
+    return (data, None) if isinstance(data, dict) else (None, "malformed")
+
+
+def _write_state_json(state_dir: str, name: str, obj) -> None:
+    """Schreibt `obj` atomar als `<state_dir>/<name>` (0600); legt den Zustandsordner wie die Kopplung an."""
+    if not os.path.isdir(state_dir):
+        os.mkdir(state_dir, pairing.STATE_DIR_MODE)
+        os.chmod(state_dir, pairing.STATE_DIR_MODE)
+    tmp = os.path.join(state_dir, f".{name}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)  # unabhaengig von der umask
+            json.dump(obj, handle, ensure_ascii=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, os.path.join(state_dir, name))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+# ---- Sitzungsbuch (0.14.2) ------------------------------------------------------------
+# Hermes v0.22.5 vergibt im Gateway nur noch feste Quellen (die Bridge laesst `--source kore-<scope>` weg), also
+# findet `sessions list/prune --source kore-<scope>` die neuen Kore-Sessions nicht mehr. Die Bridge fuehrt deshalb
+# selbst Buch: je Hermes-Session, die ein erfolgreicher Turn gemeldet hat, Scope und zuletzt benutzt (UTC). Keine
+# Inhalte, keine Chat-IDs. Das Buch ist der Beleg, dass die Bridge die Session angelegt hat; Scope-Vergessen und
+# Aufbewahrungsfrist loeschen darueber. Sessions von vor dem Update (Quelle `kore-<scope>`) findet weiter die Quelle.
+SESSION_LEDGER_FILE = "bridge-sessions.json"
+SESSION_LEDGER_VERSION = 1
+SESSION_LEDGER_MAX_ENTRIES = 5_000
+
+
+def _utc_stamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class SessionLedger:
+    """`bridge-sessions.json`: {"version": 1, "sessions": {"<Hermes-ID>": {"scope", "last_used"}}}.
+
+    Nur dieser Prozess schreibt; der Inhalt liegt nach dem ersten Lesen im Speicher, jede Aenderung schreibt die
+    ganze Datei. Hoechstens `SESSION_LEDGER_MAX_ENTRIES` Eintraege: darueber fallen die am laengsten unbenutzten
+    heraus (Journal). Keine Methode wirft: ein Schreibfehler steht im Journal, der Turn laeuft weiter."""
+
+    def __init__(self, state_dir: str, max_entries: int = SESSION_LEDGER_MAX_ENTRIES):
+        self.state_dir = state_dir
+        self.path = os.path.join(state_dir, SESSION_LEDGER_FILE)
+        self.max_entries = max_entries
+        self._lock = threading.Lock()
+        self._entries = None  # Hermes-ID -> (Scope, zuletzt benutzt)
+
+    def _load_locked(self) -> dict:
+        if self._entries is None:
+            self._entries = self._read()
+        return self._entries
+
+    def _read(self) -> dict:
+        data, problem = _read_state_json(self.path)
+        if data is None:
+            if problem is not None:
+                journal_bridge_state("session-ledger-reset", reason=problem)
+            return {}
+        sessions = data.get("sessions")
+        if data.get("version") != SESSION_LEDGER_VERSION or not isinstance(sessions, dict):
+            journal_bridge_state("session-ledger-reset", reason="malformed")
+            return {}
+        entries, skipped = {}, 0
+        for sid, row in sessions.items():
+            scope = row.get("scope") if isinstance(row, dict) else None
+            used = _parse_iso8601(row.get("last_used")) if isinstance(row, dict) else None
+            if not valid_session_token(sid) or scope not in _SESSION_SCOPES or used is None:
+                skipped += 1
+                continue
+            entries[sid] = (scope, used)
+        if skipped:
+            journal_bridge_state("session-ledger-skipped", count=skipped)
+        return entries
+
+    def _save_locked(self) -> None:
+        rows = {sid: {"scope": scope, "last_used": _utc_stamp(used)}
+                for sid, (scope, used) in self._entries.items()}
+        try:
+            _write_state_json(self.state_dir, SESSION_LEDGER_FILE,
+                              {"version": SESSION_LEDGER_VERSION, "sessions": rows})
+        except Exception as error:
+            journal_bridge_state("session-ledger-write-failed", error=type(error).__name__)
+
+    def touch(self, hermes_session_id, scope: str, now=None) -> None:
+        """Traegt die Session ein oder setzt „zuletzt benutzt“ auf jetzt."""
+        if not valid_session_token(hermes_session_id) or scope not in _SESSION_SCOPES:
+            return
+        moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+        with self._lock:
+            entries = self._load_locked()
+            entries[hermes_session_id] = (scope, moment)
+            excess = len(entries) - self.max_entries
+            if excess > 0:
+                for sid in sorted(entries, key=lambda key: entries[key][1])[:excess]:
+                    del entries[sid]
+                journal_bridge_state("session-ledger-full", dropped=excess)
+            self._save_locked()
+
+    def remove(self, hermes_session_ids) -> None:
+        """Traegt geloeschte (oder Hermes unbekannte) Sessions aus."""
+        with self._lock:
+            entries = self._load_locked()
+            gone = [sid for sid in dict.fromkeys(hermes_session_ids) if sid in entries]
+            for sid in gone:
+                del entries[sid]
+            if gone:
+                self._save_locked()
+
+    def session_ids(self, scope: str, used_before=None) -> list:
+        """Die Sessions des Scopes, zuletzt benutzte zuerst; mit `used_before` nur die davor zuletzt benutzten."""
+        with self._lock:
+            entries = self._load_locked()
+            rows = [(used, sid) for sid, (entry_scope, used) in entries.items()
+                    if entry_scope == scope and (used_before is None or used < used_before)]
+        return [sid for _, sid in sorted(rows, reverse=True)]
+
+
+SESSION_LEDGER = SessionLedger(BRIDGE_STATE_DIR)
+
+
 # ---- Hermes-Kommandozeile: anpassen statt erzwingen (0.14.1) ------------------------
 # Hermes aktualisiert sich selbst, und mit einem Update kann eine Option wegfallen oder im Gateway-Modus abgelehnt werden
 # (v0.22.5: „Unsupported gateway CLI options: --run-budget"). Die Bridge zwingt Hermes nichts auf: Lehnt es eine Option ab,
@@ -1766,6 +1923,8 @@ def learn_unsupported_hermes_options(options) -> bool:
         _dropped_hermes_options.update(options)
     for option in sorted(new):
         journal_hermes_option_dropped(option)
+    if new:
+        persist_learned_hermes_options()
     return bool(new)
 
 
@@ -1775,6 +1934,66 @@ def journal_hermes_option_dropped(option: str) -> None:
         print(f"kore-hermes-option-dropped option={_journal_value(option)}", file=sys.stderr, flush=True)
     except Exception:
         pass
+
+
+# Gelernte Ablehnungen ueberstehen einen Neustart (0.14.2): Sie liegen mit der Hermes-Version, unter der sie gelernt
+# wurden, im Zustandsordner. Beim Start gelten sie nur, wenn `hermes --version` dieselbe erste Zeile meldet; nach
+# einem Hermes-Update lernt die Bridge neu. So kostet der erste Turn nach einem Neustart keine Fehlversuche.
+HERMES_OPTIONS_FILE = "bridge-hermes-options.json"
+HERMES_VERSION_TIMEOUT_S = 10
+HERMES_VERSION_MAX_CHARS = 200
+
+
+def hermes_version():
+    """Erste Zeile von `hermes --version` oder None (nicht lesbar, leer, zu lang)."""
+    try:
+        with hermes_working_dir() as cwd:
+            process = _run_process_bounded([HERMES, "--version"], cwd=cwd, env=hermes_child_env(),
+                                           timeout=HERMES_VERSION_TIMEOUT_S, output_limit=64 * 1_024)
+    except Exception:
+        return None
+    if process.returncode != 0 or not isinstance(process.stdout, str):
+        return None
+    lines = [line.strip() for line in output_lines(process.stdout) if line.strip()]
+    if not lines or len(lines[0]) > HERMES_VERSION_MAX_CHARS:
+        return None
+    return lines[0]
+
+
+def persist_learned_hermes_options() -> None:
+    """Schreibt die weggelassenen Optionen mit der aktuellen Hermes-Version; ohne lesbare Version nichts."""
+    version = hermes_version()
+    if version is None:
+        return
+    with _dropped_hermes_options_lock:
+        dropped = sorted(_dropped_hermes_options)
+    try:
+        _write_state_json(BRIDGE_STATE_DIR, HERMES_OPTIONS_FILE, {"hermes_version": version, "dropped": dropped})
+    except Exception as error:
+        journal_bridge_state("hermes-options-write-failed", error=type(error).__name__)
+
+
+def restore_learned_hermes_options() -> None:
+    """Beim Start: uebernimmt gelernte Ablehnungen, wenn das installierte Hermes noch dieselbe Version meldet."""
+    data, problem = _read_state_json(os.path.join(BRIDGE_STATE_DIR, HERMES_OPTIONS_FILE))
+    if data is None:
+        if problem is not None:
+            journal_bridge_state("hermes-options-reset", reason=problem)
+        return
+    dropped = data.get("dropped")
+    if not isinstance(dropped, list) or not isinstance(data.get("hermes_version"), str):
+        journal_bridge_state("hermes-options-reset", reason="malformed")
+        return
+    current = hermes_version()
+    if current != data["hermes_version"]:
+        journal_bridge_state("hermes-options-reset",
+                             reason="hermes_version_unknown" if current is None else "hermes_version_changed")
+        return
+    restored = sorted(DROPPABLE_HERMES_OPTIONS.intersection(item for item in dropped if isinstance(item, str)))
+    with _dropped_hermes_options_lock:
+        _dropped_hermes_options.update(restored)
+    for option in restored:
+        journal_bridge_state("hermes-option-restored", option=option)
 
 
 # ---- Journal bei gescheitertem Turn (0.10) -----------------------------------------
@@ -2024,6 +2243,7 @@ def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
     ):
         # Verfall oder Loeschen: im selben Turn neu beginnen statt 502.
         context_state, reset_reason = "reset", "expired"
+        SESSION_LEDGER.remove((resume_id,))
         process, stream, error_code, streamed = run(None)
 
     if error_code is not None:
@@ -2038,6 +2258,9 @@ def run_turn(message: str, *, scope: str, conversation_id, session_ref, context,
             exit_code=process.returncode if process is not None else None,
         )
     reply = stream.reply or "".join(stream.deltas) or _NO_REPLY
+    if stream.session_id is not None:
+        # Auch die Tages-Anpassung (ohne Chat-ID) legt eine Hermes-Session an: ins Sitzungsbuch damit.
+        SESSION_LEDGER.touch(stream.session_id, scope)
     session = None
     if conversation_id is not None and stream.session_id is not None:
         try:
@@ -2718,10 +2941,42 @@ def _forget_counts() -> dict:
     return {"deleted": 0, "not_found": 0, "failed": 0}
 
 
+def forget_session_chain(hermes_session_id: str, scope: str, counts: dict, outcomes: dict) -> None:
+    """Loescht eine Session, deren Herkunft belegt ist (signierte Referenz oder Sitzungsbuch), samt ihren
+    Kompressions-Vorgaengern (`session_chain`). Eine Quellenpruefung gibt es hier nicht: der Beleg ist die Signatur
+    bzw. das Buch. `outcomes` sammelt je Hermes-ID das Ergebnis; schon behandelte IDs zaehlen nicht ein zweites Mal."""
+    if hermes_session_id in outcomes:
+        return
+    chain = session_chain(hermes_session_id, scope)
+    if chain == "not_found":
+        counts["not_found"] += 1
+        outcomes[hermes_session_id] = "not_found"
+        return
+    if chain is None:
+        # Nicht lesbar: die Session selbst trotzdem loeschen, aber ohne Bestaetigung, denn ihre
+        # Vorgaenger sind unbekannt.
+        counts["failed"] += 1
+        chain = [hermes_session_id]
+    for sid in chain:
+        if sid in outcomes:
+            continue
+        outcomes[sid] = delete_hermes_session(sid)
+        counts[outcomes[sid]] += 1
+
+
+def _forget_ledger_outcomes(outcomes: dict) -> None:
+    """Traegt geloeschte und Hermes unbekannte Sessions aus dem Sitzungsbuch aus (einmal je Lauf)."""
+    SESSION_LEDGER.remove(sid for sid, result in outcomes.items() if result != "failed")
+
+
 def forget(*, conversation_id=None, sessions=None, scope=None, store=None) -> dict:
     """POST /coach/forget. Entweder ein Chat (`conversation_id` + signierte Referenzen) oder ein
     Scope ("health" | "all"). Zuerst stoppen die laufenden Turns der betroffenen Chats und ihre
     Puffer verschwinden, dann loescht die Bridge die Hermes-Sessions.
+
+    Ein Scope umfasst die Sessions des Sitzungsbuchs (0.14.2, ohne Quellenpruefung: das Buch ist der
+    Beleg) und den Altbestand von vor Hermes v0.22.5 mit der Quelle `kore-<scope>` (Quellenpruefung
+    je ID wie bisher).
 
     Zaehlt Hermes-Sessions: `deleted`; `not_found` (schon weg); `failed` (Signatur passt nicht,
     fremde Quelle, Hermes nicht lesbar, Zeitbudget erschoepft, offene Session, die Hermes in der
@@ -2731,69 +2986,93 @@ def forget(*, conversation_id=None, sessions=None, scope=None, store=None) -> di
     store = TURNS if store is None else store
     counts = _forget_counts()
     deadline = time.monotonic() + FORGET_BUDGET_S
+    outcomes = {}
     if scope is not None:
         store.drop(scope=scope)
         with _SESSION_MAINTENANCE_LOCK:
-            for kore_scope in FORGET_SCOPES[scope]:
-                if time.monotonic() > deadline:
-                    counts["failed"] += 1
-                    continue
-                listing = scope_session_ids(kore_scope)
-                if listing is None:
-                    counts["failed"] += 1
-                    continue
-                ids, hidden = listing
-                counts["failed"] += hidden
-                for position, sid in enumerate(ids):
+            try:
+                for kore_scope in FORGET_SCOPES[scope]:
+                    for sid in SESSION_LEDGER.session_ids(kore_scope):
+                        if sid in outcomes:
+                            continue
+                        if time.monotonic() > deadline:
+                            counts["failed"] += 1
+                            outcomes[sid] = "failed"
+                            continue
+                        forget_session_chain(sid, kore_scope, counts, outcomes)
                     if time.monotonic() > deadline:
-                        counts["failed"] += len(ids) - position
-                        break
-                    counts[delete_listed_session(sid, kore_scope)] += 1
+                        counts["failed"] += 1
+                        continue
+                    listing = scope_session_ids(kore_scope)
+                    if listing is None:
+                        counts["failed"] += 1
+                        continue
+                    ids, hidden = listing
+                    counts["failed"] += hidden
+                    # Schon ueber das Buch geloeschte nicht noch einmal; Gescheiterte zaehlen je Quelle wie bisher.
+                    ids = [sid for sid in ids if outcomes.get(sid) not in ("deleted", "not_found")]
+                    for position, sid in enumerate(ids):
+                        if time.monotonic() > deadline:
+                            counts["failed"] += len(ids) - position
+                            break
+                        outcomes[sid] = delete_listed_session(sid, kore_scope)
+                        counts[outcomes[sid]] += 1
+            finally:
+                _forget_ledger_outcomes(outcomes)
         return counts
 
     store.drop(conversation_id=conversation_id)
     with _SESSION_MAINTENANCE_LOCK:
-        for ref in dict.fromkeys(sessions or ()):
-            if time.monotonic() > deadline:
-                counts["failed"] += 1
-                continue
-            ref_scope = ref.partition(":")[0]
-            hermes_session_id = verify_session(ref, ref_scope, conversation_id)
-            if hermes_session_id is None:
-                counts["failed"] += 1
-                continue
-            chain = session_chain(hermes_session_id, ref_scope)
-            if chain == "not_found":
-                counts["not_found"] += 1
-                continue
-            if chain is None:
-                # Nicht lesbar: die signierte Session selbst trotzdem loeschen, aber ohne
-                # Bestaetigung, denn ihre Vorgaenger sind unbekannt.
-                counts["failed"] += 1
-                chain = [hermes_session_id]
-            for sid in chain:
-                counts[delete_hermes_session(sid)] += 1
+        try:
+            for ref in dict.fromkeys(sessions or ()):
+                if time.monotonic() > deadline:
+                    counts["failed"] += 1
+                    continue
+                ref_scope = ref.partition(":")[0]
+                hermes_session_id = verify_session(ref, ref_scope, conversation_id)
+                if hermes_session_id is None:
+                    counts["failed"] += 1
+                    continue
+                # Je Referenz eigene Ergebnisse: jede signierte Referenz zaehlt wie bisher fuer sich.
+                ref_outcomes = {}
+                forget_session_chain(hermes_session_id, ref_scope, counts, ref_outcomes)
+                outcomes.update(ref_outcomes)
+        finally:
+            _forget_ledger_outcomes(outcomes)
     return counts
 
 
 def prune_expired(store=None):
-    """Verfall: loescht Kore-Sessions beider Quellen nach SESSION_RETENTION_DAYS Tagen
-    Inaktivitaet. Laeuft nur ohne laufenden Turn; beginnt einer mittendrin, bricht der Lauf ab.
+    """Verfall: loescht Kore-Sessions nach SESSION_RETENTION_DAYS Tagen Inaktivitaet — die des
+    Sitzungsbuchs (zuletzt benutzt, samt Kompressions-Vorgaengern) und den Altbestand beider Quellen
+    `kore-<scope>`. Laeuft nur ohne laufenden Turn; beginnt einer mittendrin, bricht der Lauf ab.
     Rueckgabe: Zaehler oder None (uebersprungen, wird bald erneut versucht)."""
     store = TURNS if store is None else store
     counts = _forget_counts()
+    outcomes = {}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=SESSION_RETENTION_DAYS)
     with _SESSION_MAINTENANCE_LOCK:
         if store.active_count():
             return None
-        for scope in ("general", "health"):
-            ids = expired_session_ids(scope)
-            if ids is None:
-                counts["failed"] += 1
-                continue
-            for sid in ids:
-                if store.active_count():
-                    return None
-                counts[delete_listed_session(sid, scope)] += 1
+        try:
+            for scope in ("general", "health"):
+                for sid in SESSION_LEDGER.session_ids(scope, used_before=cutoff):
+                    if store.active_count():
+                        return None
+                    forget_session_chain(sid, scope, counts, outcomes)
+                ids = expired_session_ids(scope)
+                if ids is None:
+                    counts["failed"] += 1
+                    continue
+                for sid in ids:
+                    if outcomes.get(sid) in ("deleted", "not_found"):
+                        continue
+                    if store.active_count():
+                        return None
+                    outcomes[sid] = delete_listed_session(sid, scope)
+                    counts[outcomes[sid]] += 1
+        finally:
+            _forget_ledger_outcomes(outcomes)
     return counts
 
 
@@ -3415,6 +3694,7 @@ if __name__ == "__main__":
         print(warning, file=sys.stderr, flush=True)
     if COACH_NAME_WARNING:
         print(COACH_NAME_WARNING, file=sys.stderr, flush=True)
+    restore_learned_hermes_options()
     threading.Thread(
         target=_sweep_turns_forever, args=(TURNS,), name="kore-turn-sweeper", daemon=True
     ).start()

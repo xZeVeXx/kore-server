@@ -23,6 +23,17 @@ def isolated_pairing_state(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def isolated_bridge_state(monkeypatch, tmp_path):
+    """Sitzungsbuch und gelernte Hermes-Optionen nie im echten Zustandsordner. `hermes --version` laeuft ueber
+    denselben Prozess-Runner wie die Chat-Fakes; standardmaessig gibt es keine Version (also nichts zu merken), die
+    Tests dafuer (test_session_ledger.py) setzen sie selbst."""
+    state_dir = str(tmp_path / "bridge-state")
+    monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir)
+    monkeypatch.setattr(bridge, "SESSION_LEDGER", bridge.SessionLedger(state_dir))
+    monkeypatch.setattr(bridge, "hermes_version", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_hermes_home(monkeypatch, tmp_path):
     """Die Bridge prueft vor jedem Hermes-Lauf die config.yaml des Profils unter HOME; nie die des
     Entwicklers. Tests, die ein Profil brauchen, setzen HOME selbst."""
