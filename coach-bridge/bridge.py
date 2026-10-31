@@ -819,6 +819,29 @@ def hermes_child_env(parent_env=None) -> dict:
     return child
 
 
+def hermes_work_base() -> str:
+    """Wo die Arbeitsordner der Hermes-Laeufe entstehen: `KORE_HERMES_WORK_DIR`, sonst `kore-bridge-work` im
+    Datenordner von Hermes (`KORE_HERMES_DATA_DIR`, sonst `<HOME>/.hermes`). Den liest und beschreibt die Bridge
+    ohnehin (ReadWritePaths der Unit), und das Gateway sieht ihn."""
+    explicit = os.environ.get("KORE_HERMES_WORK_DIR", "").strip()
+    if explicit:
+        return explicit
+    data = HERMES_DATA_DIR or os.path.join(HOME or os.path.expanduser("~"), ".hermes")
+    return os.path.join(data, "kore-bridge-work")
+
+
+def _inside_git_worktree(path: str) -> bool:
+    """Liegt `path` (oder ein Elternordner) in einem Git-Arbeitsbaum?"""
+    current = os.path.abspath(path)
+    while True:
+        if os.path.exists(os.path.join(current, ".git")):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 @contextmanager
 def hermes_working_dir():
     """Frischer, leerer, privater Arbeitsordner (0700) fuer genau einen Hermes-Lauf; danach weg.
@@ -828,8 +851,24 @@ def hermes_working_dir():
     des Dienstes (unter systemd mit PrivateTmp ein eigenes /tmp), ausserhalb jedes Repos, und ist
     fuer jeden Lauf neu, damit kein Lauf dem naechsten eine Kontextdatei hinterlaesst. HOME im
     Kind-Env bleibt unveraendert (Hermes findet sein Profil darueber).
+
+    0.14.2: Seit Hermes v0.22.5 meldet der Chat-Client seinen Arbeitsordner an den Gateway-Dienst, und
+    der laeuft ausserhalb der Sandbox der Bridge. Ein Ordner im privaten /tmp existiert fuer ihn nicht
+    (`invalid_params`). Der Ordner liegt deshalb unter `hermes_work_base()` (sichtbar fuer beide, kein
+    Git-Repo), sonst wie bisher im Temp-Ordner.
     """
-    path = tempfile.mkdtemp(prefix="kore-hermes-")
+    base = hermes_work_base()
+    path = None
+    # Hermes liest Kontextdateien der Elternordner nur bis zur Git-Wurzel. Liegt der Ordner in einem Repo, bleibt
+    # es beim privaten Temp-Ordner (mit dem Gateway scheitert der Lauf dann sichtbar, statt fremde Dateien zu laden).
+    if not _inside_git_worktree(base):
+        try:
+            os.makedirs(base, mode=0o700, exist_ok=True)
+            path = tempfile.mkdtemp(prefix="kore-hermes-", dir=base)
+        except OSError:
+            path = None
+    if path is None:
+        path = tempfile.mkdtemp(prefix="kore-hermes-")
     try:
         yield path
     finally:

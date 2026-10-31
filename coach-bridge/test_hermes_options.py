@@ -155,6 +155,25 @@ class HermesOptionAdaptationTests(unittest.TestCase):
             self.assertLessEqual(len(ref.partition(":")[2]), 120)
             self.assertEqual(bridge.verify_session(ref, "health", stream_tests.CONVERSATION), gateway_id)
 
+    def test_working_dirs_live_where_the_gateway_can_see_them(self):
+        # Hermes v0.22.5 meldet den Arbeitsordner an das Gateway; ein Ordner im privaten /tmp der Bridge-Sandbox
+        # existiert dort nicht (invalid_params). Der Ordner liegt unter dem Hermes-Datenordner, frisch und leer.
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as home, \
+                patch.object(bridge, "HOME", home), patch.object(bridge, "HERMES_DATA_DIR", ""), \
+                patch.dict(os.environ, {"KORE_HERMES_WORK_DIR": ""}):
+            base = os.path.join(home, ".hermes", "kore-bridge-work")
+            self.assertEqual(bridge.hermes_work_base(), base)
+            with bridge.hermes_working_dir() as first, bridge.hermes_working_dir() as second:
+                self.assertEqual(os.path.dirname(first), base)
+                self.assertNotEqual(first, second)
+                self.assertEqual(os.listdir(first), [])
+                self.assertEqual(os.stat(base).st_mode & 0o777, 0o700)
+            self.assertFalse(os.path.exists(first), "Nach dem Lauf ist der Ordner weg.")
+        with patch.dict(os.environ, {"KORE_HERMES_WORK_DIR": "/srv/kore-work"}):
+            self.assertEqual(bridge.hermes_work_base(), "/srv/kore-work")
+
     def test_only_comfort_options_are_droppable(self):
         self.assertEqual(bridge.DROPPABLE_HERMES_OPTIONS, frozenset({"--run-budget", "--max-turns", "--source"}))
 
