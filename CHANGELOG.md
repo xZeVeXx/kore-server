@@ -2,7 +2,7 @@
 
 All notable changes to `kore-server`. Versions follow the Kore app's release it is tested with.
 
-## Unreleased
+## 0.14.1
 
 ### Fixed
 
