@@ -352,6 +352,7 @@ Edit `bridge.env` (absolute paths only; systemd does not expand `$HOME` or `~`):
 | `KORE_HERMES_BIN` | absolute path to `hermes` |
 | `KORE_HERMES_HOME` | the home directory of this user |
 | `KORE_HERMES_DATA_DIR` (optional) | only if Hermes keeps its data somewhere other than `<home>/.hermes`, as the Hermes Docker image does (`/opt/data`). An absolute path without `..`, otherwise the bridge does not start. The bridge passes it to Hermes as `HERMES_HOME` (the only addition to the Hermes environment) and looks for the profile in `<dir>/profiles/<name>`; `kore-doctor` looks there too. With the systemd unit, also add the folder to `ReadWritePaths`. See [Hermes in a Docker container](#hermes-in-a-docker-container-eg-unraid). |
+| `KORE_HERMES_WORK_DIR` (optional) | where the Hermes runs work. Default: `kore-bridge-work` in the Hermes data folder (`<home>/.hermes` or `KORE_HERMES_DATA_DIR`); the bridge uses its subfolder `chat` and empties it before and after every run. Set it only if the Hermes gateway cannot see that folder. Never inside a Git checkout; with the systemd unit, also add it to `ReadWritePaths`. |
 | `KORE_HERMES_PROFILE` | `kore-coach` |
 | `KORE_INSTANCE_ID`, `KORE_PLAN_ORIGIN_PRINCIPAL` | the same values as in the server's `.env`; never change them later |
 | `KORE_PLAN_ORIGIN_SECRET` | the same value as in the server's `.env` |
@@ -945,8 +946,8 @@ for a newer release on PyPI at startup is switched off (`FASTMCP_CHECK_FOR_UPDAT
 | --- | --- |
 | **Ingest + MCP**, Docker volume `kore-db` (SQLite) | the latest snapshot from the app: profile basics, recovery, HRV daily values up to 30 days, resting heart rate, sleep, workouts with heart rate and calories, daily steps, weight and body fat (up to 30 days), nutrition daily totals (up to 30 days; only if you share them in Kore), training plans with names and notes; pending plan proposals |
 | **Pairing state**, `state/` next to `docker-compose.yml` | the server id, the hash of an open one-time code with its count of failed attempts, and for each paired device an id, a name, the hash of its token and two timestamps. No tokens or codes in clear text |
-| **Coach bridge** | no database. Running turns live in memory (up to 24 hours, 64 answers) and are lost on restart. Each Hermes run works in a fresh, empty temporary directory that is deleted afterwards. The journal gets a one-line failure record without content |
-| **Hermes profile**, `~/.hermes/profiles/<profile>/` | the chat sessions of Kore (sources `kore-general`/`kore-health`) and the profile's memory. The bridge deletes Kore sessions after 30 days without activity and when you delete a chat in Kore; it never touches memory |
+| **Coach bridge** | no database. Running turns live in memory (up to 24 hours, 64 answers) and are lost on restart. In the state directory, `bridge-sessions.json` lists the Hermes sessions the bridge started, each with its scope and last use (no content, no chat ids), so it can delete them; `bridge-hermes-options.json` remembers which options the installed Hermes rejects. Each Hermes run works in an empty folder (`kore-bridge-work/chat` in the Hermes data folder) that is emptied before and after the run. The journal gets a one-line failure record without content |
+| **Hermes profile**, `~/.hermes/profiles/<profile>/` | the chat sessions of Kore (since Hermes v0.22.5 with the gateway's source `oneshot`, before that `kore-general`/`kore-health`) and the profile's memory. The bridge deletes Kore sessions after 30 days without activity and when you delete a chat in Kore; it never touches memory |
 | **Your model provider** | the prompts, and with "Share health context with coach" turned on, the health context in each message. That is how a chat works; choose your provider accordingly |
 
 Without the "Share health context" switch, the coach receives only what you type. Steps, weight and
@@ -1062,7 +1063,7 @@ hermes -p <profile> mcp test kore             # "Connected", and the tools of th
 
 Paired devices stay paired: the pairing state and all tokens are untouched. New variables in `.env` and
 `bridge.env` are optional; add one only if you need what it does (`KORE_INGEST_PORT`, `KORE_MCP_PORT`,
-`KORE_MCP_URL` in `.env`, `KORE_HERMES_DATA_DIR` in `bridge.env`). An older server keeps working with a
+`KORE_MCP_URL` in `.env`, `KORE_HERMES_DATA_DIR`, `KORE_HERMES_WORK_DIR` in `bridge.env`). An older server keeps working with a
 newer Kore, which leaves out what the server cannot take and says so under **Test coach bridge**, with a
 link to this section and a text you can paste into your Hermes to run these steps.
 

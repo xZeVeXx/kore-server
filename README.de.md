@@ -362,6 +362,7 @@ Bearbeite `bridge.env` (nur absolute Pfade; systemd expandiert weder `$HOME` noc
 | `KORE_HERMES_BIN` | absoluter Pfad zu `hermes` |
 | `KORE_HERMES_HOME` | das Home-Verzeichnis dieses Nutzers |
 | `KORE_HERMES_DATA_DIR` (optional) | nur wenn Hermes seine Daten nicht unter `<Home>/.hermes` ablegt, wie das Hermes-Docker-Image (`/opt/data`). Ein absoluter Pfad ohne `..`, sonst startet die Bridge nicht. Die Bridge gibt ihn als `HERMES_HOME` an Hermes weiter (die einzige Zugabe zur Hermes-Umgebung) und sucht das Profil unter `<Ordner>/profiles/<Name>`; `kore-doctor` sucht dort ebenfalls. Bei der systemd-Unit den Ordner zusätzlich in `ReadWritePaths` eintragen. Siehe [Hermes im Docker-Container](#hermes-im-docker-container-z-b-unraid). |
+| `KORE_HERMES_WORK_DIR` (optional) | wo die Hermes-Läufe arbeiten. Standard: `kore-bridge-work` im Datenordner von Hermes (`<Home>/.hermes` oder `KORE_HERMES_DATA_DIR`); die Bridge nutzt darin den Unterordner `chat` und leert ihn vor und nach jedem Lauf. Nur setzen, wenn das Gateway von Hermes diesen Ordner nicht sieht. Nie in einem Git-Checkout; bei der systemd-Unit zusätzlich in `ReadWritePaths` eintragen. |
 | `KORE_HERMES_PROFILE` | `kore-coach` |
 | `KORE_INSTANCE_ID`, `KORE_PLAN_ORIGIN_PRINCIPAL` | dieselben Werte wie in der `.env` des Servers; später nie ändern |
 | `KORE_PLAN_ORIGIN_SECRET` | derselbe Wert wie in der `.env` des Servers |
@@ -976,8 +977,8 @@ systemd-Unit). Was jeder Teil speichert:
 | --- | --- |
 | **Ingest + MCP**, Docker-Volume `kore-db` (SQLite) | der jüngste Snapshot aus der App: Profil-Basisdaten, Erholung, HRV-Tageswerte bis 30 Tage, Ruhepuls, Schlaf, Workouts mit Puls und kcal, tägliche Schritte, Gewicht und Körperfett (bis 30 Tage), Ernährung als Tagessummen (bis 30 Tage; nur wenn du sie in Kore teilst), Trainingspläne mit Namen und Notizen; offene Plan-Vorschläge |
 | **Kopplungszustand**, `state/` neben der `docker-compose.yml` | die Server-ID, der Hash eines offenen Einmalcodes samt Zahl der Fehlversuche und je gekoppeltem Gerät eine ID, ein Name, der Hash seines Tokens und zwei Zeitstempel. Keine Tokens oder Codes im Klartext |
-| **Coach-Bridge** | keine Datenbank. Laufende Turns liegen im Arbeitsspeicher (bis 24 Stunden, 64 Antworten) und gehen beim Neustart verloren. Jeder Hermes-Lauf arbeitet in einem frischen, leeren temporären Ordner, der danach gelöscht wird. Das Journal bekommt nur eine Fehlerzeile ohne Inhalt |
-| **Hermes-Profil**, `~/.hermes/profiles/<profil>/` | die Chat-Sessions von Kore (Quellen `kore-general`/`kore-health`) und das Gedächtnis des Profils. Die Bridge löscht Kore-Sessions nach 30 Tagen ohne Aktivität und wenn du einen Chat in Kore löschst; das Gedächtnis fasst sie nie an |
+| **Coach-Bridge** | keine Datenbank. Laufende Turns liegen im Arbeitsspeicher (bis 24 Stunden, 64 Antworten) und gehen beim Neustart verloren. Im Zustandsordner führt `bridge-sessions.json` die Hermes-Sessions, die die Bridge angelegt hat, je mit Scope und letzter Nutzung (keine Inhalte, keine Chat-IDs), damit sie sie löschen kann; `bridge-hermes-options.json` merkt sich, welche Optionen das installierte Hermes ablehnt. Jeder Hermes-Lauf arbeitet in einem leeren Ordner (`kore-bridge-work/chat` im Datenordner von Hermes), der vor und nach dem Lauf geleert wird. Das Journal bekommt nur eine Fehlerzeile ohne Inhalt |
+| **Hermes-Profil**, `~/.hermes/profiles/<profil>/` | die Chat-Sessions von Kore (seit Hermes v0.22.5 mit der Gateway-Quelle `oneshot`, davor `kore-general`/`kore-health`) und das Gedächtnis des Profils. Die Bridge löscht Kore-Sessions nach 30 Tagen ohne Aktivität und wenn du einen Chat in Kore löschst; das Gedächtnis fasst sie nie an |
 | **Dein Modell-Anbieter** | die Prompts, und bei eingeschaltetem „Health-Kontext mit Coach teilen“ der Health-Kontext in jeder Nachricht. So funktioniert ein Chat; wähl deinen Anbieter entsprechend |
 
 Ohne den Schalter „Health-Kontext teilen“ bekommt der Coach nur, was du tippst. Schritte, Gewicht und
@@ -1095,7 +1096,7 @@ hermes -p <profil> mcp test kore              # „Connected“ und die Werkzeug
 
 Gekoppelte Geräte bleiben gekoppelt: Der Kopplungszustand und alle Tokens bleiben unberührt. Neue
 Variablen in `.env` und `bridge.env` sind optional; ergänze eine nur, wenn du brauchst, was sie bewirkt
-(`KORE_INGEST_PORT`, `KORE_MCP_PORT`, `KORE_MCP_URL` in der `.env`, `KORE_HERMES_DATA_DIR` in der
+(`KORE_INGEST_PORT`, `KORE_MCP_PORT`, `KORE_MCP_URL` in der `.env`, `KORE_HERMES_DATA_DIR`, `KORE_HERMES_WORK_DIR` in der
 `bridge.env`). Ein älterer Server funktioniert mit einem neueren Kore weiter; Kore lässt weg, was der
 Server nicht annimmt, und sagt es unter **„Coach-Bridge testen“**, mit einem Link auf diesen Abschnitt
 und einem Text, den du in deinen Hermes einfügen kannst, damit er diese Schritte ausführt.

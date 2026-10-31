@@ -2,6 +2,44 @@
 
 All notable changes to `kore-server`. Versions follow the Kore app's release it is tested with.
 
+## Unreleased
+
+### Fixed
+
+- **Coach chat with Hermes v0.22.5 (gateway).** The gateway accepts only its own session sources (`cli`,
+  `tui`, `gui`, `acp`, `tool`, `oneshot`) and rejects `--source kore-<scope>`; the bridge now drops that option
+  like the other comfort options, also when Hermes names the rejections one after the other. Gateway session
+  ids (`local-<hex>`) are accepted, and forgetting one chat relies on the bridge's signed reference instead of
+  the Hermes source. Hermes runs work in one fixed folder that the gateway can see,
+  `<Hermes data>/kore-bridge-work/chat` (`KORE_HERMES_WORK_DIR` overrides the base), emptied before and after
+  every run, so a chat can be continued.
+- **"Forget all health chats" and the session retention found nothing after the Hermes update.** Both looked up
+  Kore sessions by their Hermes source, which the gateway no longer sets. The bridge now keeps a session ledger,
+  `bridge-sessions.json` in the state directory (`KORE_STATE_DIR`, the same folder as the pairing state; mode
+  0600, written atomically): for each Hermes session a successful turn reported, its scope and the time it was
+  last used. No content and no chat ids. Forgetting a scope deletes the ledger's sessions of that scope with
+  their compression predecessors, plus older sessions that still carry the source `kore-<scope>`; sessions of
+  other sources (Telegram, your own CLI runs) stay. The retention deletes ledger sessions unused for
+  `KORE_BRIDGE_SESSION_RETENTION_DAYS` days the same way. A deleted session leaves the ledger; above 5,000
+  entries the longest unused fall out (`kore-session-ledger-full`). A missing, unreadable or broken ledger
+  starts empty and says so in the journal (`kore-session-ledger-reset`); it never stops the bridge or a turn.
+
+### Changed
+
+- **Learned Hermes options survive a restart.** The options the installed Hermes rejected are stored with the
+  first line of `hermes --version` in `bridge-hermes-options.json` (state directory, 0600). On start the bridge
+  uses them again only if Hermes reports the same version (`kore-hermes-option-restored`); after a Hermes update
+  it learns anew (`kore-hermes-options-reset reason=hermes_version_changed`). The first turn after a restart then
+  needs no retries.
+
+### Upgrading from 0.14.1
+
+- Restart the bridge after checking out the new tag. The state directory must be writable for the bridge, as it
+  already is for pairing (`ReadWritePaths` of the unit).
+- New optional `KORE_HERMES_WORK_DIR` in `bridge.env`: only if the Hermes gateway cannot see
+  `<Hermes data>/kore-bridge-work`. The folder must not be inside a Git checkout; with the systemd unit, add it
+  to `ReadWritePaths`.
+
 ## 0.14.1
 
 ### Fixed
