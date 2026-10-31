@@ -1,0 +1,128 @@
+"""0.14.1: Die Bridge passt sich an die Kommandozeile des installierten Hermes an, statt Optionen zu erzwingen."""
+
+import io
+import unittest
+from contextlib import redirect_stderr
+from unittest.mock import patch
+
+import bridge
+import test_runner_stream_json as stream_tests
+from test_runner_stream_json import CONVERSATION, hermes_process, hermes_sequence, reply_stream, stream_lines
+
+# Wortlaut von Hermes v0.22.5 im Gateway-Modus (result-Record und stderr), gekuerzt um den Hinweistext.
+GATEWAY_ERROR = (
+    "Unsupported gateway CLI options: --run-budget. No local fallback or policy changes were made.\n"
+    "  --run-budget: use `agent.run_budget_seconds` in config.yaml"
+)
+
+
+def rejected_stream(error=GATEWAY_ERROR) -> str:
+    return stream_lines(
+        {"type": "system", "subtype": "init", "model": "", "session_id": ""},
+        {"type": "result", "session_id": "", "exit_code": 2, "text": "", "error": error},
+    )
+
+
+def rejected_process(error=GATEWAY_ERROR):
+    return hermes_process(rejected_stream(error), stderr=f"Error: {error}\n", returncode=2)
+
+
+class HermesOptionAdaptationTests(unittest.TestCase):
+    def setUp(self):
+        # Dieselbe Bridge-Umgebung wie die Stream-json-Tests, ohne deren Tests hier ein zweites Mal zu sammeln.
+        stream_tests.StreamJsonRunnerTests.setUp(self)
+        bridge._dropped_hermes_options.clear()
+        self.addCleanup(bridge._dropped_hermes_options.clear)
+
+    def turn(self):
+        with redirect_stderr(io.StringIO()) as journal:
+            outcome = bridge.run_turn(
+                "Hallo", scope="general", conversation_id=CONVERSATION, session_ref=None,
+                context=None, origin_ticket=None,
+            )
+        return outcome, journal.getvalue()
+
+    def test_the_gateway_message_names_exactly_the_rejected_options(self):
+        self.assertEqual(bridge.unsupported_hermes_options({"error": GATEWAY_ERROR}, None),
+                         frozenset({"--run-budget"}))
+        self.assertEqual(bridge.unsupported_hermes_options(None, f"Error: {GATEWAY_ERROR}\n"),
+                         frozenset({"--run-budget"}))
+        self.assertEqual(
+            bridge.unsupported_hermes_options({"error": "Unsupported CLI options: --run-budget, --max-turns."}, None),
+            frozenset({"--run-budget", "--max-turns"}),
+        )
+        self.assertEqual(bridge.unsupported_hermes_options({"error": "credentials or agent init failed"}, "boom"),
+                         frozenset())
+
+    def test_dropping_an_option_removes_its_value_but_never_the_program(self):
+        args = ["/opt/hermes", "chat", "--max-turns", "6", "--run-budget", "135", "-t", "web"]
+        self.assertEqual(bridge.without_hermes_options(args, {"--run-budget"}),
+                         ["/opt/hermes", "chat", "--max-turns", "6", "-t", "web"])
+        self.assertEqual(bridge.without_hermes_options(["--run-budget", "x"], {"--run-budget"}), ["--run-budget", "x"])
+
+    @patch("bridge._run_process_bounded")
+    def test_a_rejected_run_budget_is_dropped_and_the_turn_answers(self, run):
+        run.side_effect = hermes_sequence(rejected_process(), hermes_process(reply_stream("Hallo zurück")))
+
+        outcome, journal = self.turn()
+
+        self.assertIsNone(outcome.error_code)
+        self.assertEqual(outcome.reply, "Hallo zurück")
+        self.assertEqual(run.call_count, 2)
+        first, second = (call.args[0] for call in run.call_args_list)
+        self.assertIn("--run-budget", first)
+        self.assertNotIn("--run-budget", second)
+        self.assertEqual(second, bridge.without_hermes_options(first, {"--run-budget"}))
+        self.assertIn("kore-hermes-option-dropped option=--run-budget", journal)
+
+    @patch("bridge._run_process_bounded")
+    def test_a_learned_drop_applies_from_the_start_of_later_turns(self, run):
+        run.side_effect = hermes_sequence(rejected_process(), hermes_process(reply_stream()),
+                                          hermes_process(reply_stream()))
+        self.turn()
+
+        outcome, journal = self.turn()
+
+        self.assertIsNone(outcome.error_code)
+        self.assertEqual(run.call_count, 3)
+        self.assertNotIn("--run-budget", run.call_args_list[2].args[0])
+        self.assertEqual(journal, "", "Die Anpassung steht nur einmal im Journal.")
+
+    @patch("bridge._run_process_bounded")
+    def test_a_rejected_safety_option_is_never_dropped(self, run):
+        error = "Unsupported gateway CLI options: -t. No local fallback or policy changes were made."
+        run.side_effect = hermes_sequence(rejected_process(error))
+
+        outcome, _ = self.turn()
+
+        self.assertEqual(outcome.error_code, "hermes_failed")
+        self.assertEqual(outcome.failure_class, "hermes_option_unsupported")
+        self.assertEqual(run.call_count, 1, "Werkzeugliste weglassen hiesse mehr Werkzeuge: kein zweiter Lauf.")
+        self.assertEqual(bridge._dropped_hermes_options, set())
+
+    @patch("bridge._run_process_bounded")
+    def test_a_mixed_rejection_with_a_safety_option_fails_without_dropping_anything(self, run):
+        error = "Unsupported gateway CLI options: --run-budget, --query-file. No local fallback."
+        run.side_effect = hermes_sequence(rejected_process(error))
+
+        outcome, _ = self.turn()
+
+        self.assertEqual(outcome.error_code, "hermes_failed")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(bridge._dropped_hermes_options, set())
+
+    @patch("bridge._run_process_bounded")
+    def test_a_second_rejection_after_the_retry_does_not_loop(self, run):
+        run.side_effect = hermes_sequence(rejected_process(), rejected_process())
+
+        outcome, _ = self.turn()
+
+        self.assertEqual(outcome.error_code, "hermes_failed")
+        self.assertEqual(run.call_count, 2)
+
+    def test_only_comfort_options_are_droppable(self):
+        self.assertEqual(bridge.DROPPABLE_HERMES_OPTIONS, frozenset({"--run-budget", "--max-turns", "--source"}))
+
+
+if __name__ == "__main__":
+    unittest.main()

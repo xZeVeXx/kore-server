@@ -1637,6 +1637,79 @@ def is_unknown_session_error(result_record, stderr: str, resume_id: str) -> bool
     return any(line.strip() == expected for line in output_lines(stderr))
 
 
+# ---- Hermes-Kommandozeile: anpassen statt erzwingen (0.14.1) ------------------------
+# Hermes aktualisiert sich selbst, und mit einem Update kann eine Option wegfallen oder im Gateway-Modus abgelehnt werden
+# (v0.22.5: „Unsupported gateway CLI options: --run-budget"). Die Bridge zwingt Hermes nichts auf: Lehnt es eine Option ab,
+# die nur Komfort ist, laesst die Bridge sie ab da weg und wiederholt den Lauf einmal. Optionen, die Sicherheit tragen
+# (Werkzeugliste, Prompt ueber stdin, Ausgabeformat, Profil, Fortsetzen), werden nie weggelassen: Dann scheitert der Turn
+# lieber laut. Die Wall-Clock-Grenze haelt die Bridge ohnehin selbst (`KORE_BRIDGE_TIMEOUT`, Prozessgruppe wird beendet).
+DROPPABLE_HERMES_OPTIONS = frozenset({"--run-budget", "--max-turns", "--source"})
+_UNSUPPORTED_OPTIONS_RE = re.compile(r"Unsupported (?:[A-Za-z]+ )?CLI options?: ([^\n]*)")
+_OPTION_TOKEN_RE = re.compile(r"(?<![\w-])--?[A-Za-z][A-Za-z0-9-]*")
+_dropped_hermes_options: set = set()
+_dropped_hermes_options_lock = threading.Lock()
+
+
+def unsupported_hermes_options(result_record, stderr) -> frozenset:
+    """Die Optionen, die Hermes laut eigener Meldung nicht annimmt (result-Record oder stderr); sonst leer."""
+    texts = []
+    if isinstance(result_record, dict) and isinstance(result_record.get("error"), str):
+        texts.append(result_record["error"])
+    if isinstance(stderr, str):
+        texts.append(stderr)
+    found = set()
+    for text in texts:
+        for match in _UNSUPPORTED_OPTIONS_RE.finditer(text):
+            # Die Liste endet vor dem ersten Satz danach („--run-budget. No local fallback …").
+            listed = match.group(1).split(". ", 1)[0]
+            found.update(_OPTION_TOKEN_RE.findall(listed))
+    return frozenset(found)
+
+
+def without_hermes_options(args: list, names) -> list:
+    """`args` ohne die genannten Optionen samt ihrem Wert (alle weglassbaren Optionen tragen genau einen Wert)."""
+    names = frozenset(names)
+    result, skip = [], False
+    for index, arg in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if index > 0 and arg in names:
+            skip = True
+            continue
+        result.append(arg)
+    return result
+
+
+def adapted_hermes_args(args: list) -> list:
+    """`args` ohne die Optionen, die das installierte Hermes schon einmal abgelehnt hat."""
+    with _dropped_hermes_options_lock:
+        dropped = frozenset(_dropped_hermes_options)
+    return without_hermes_options(args, dropped) if dropped else list(args)
+
+
+def learn_unsupported_hermes_options(options) -> bool:
+    """Merkt sich abgelehnte, weglassbare Optionen. `True`, wenn ein neuer Lauf ohne sie sinnvoll ist: alle Optionen sind
+    weglassbar und mindestens eine war noch nicht weggelassen. Eine abgelehnte Pflichtoption heisst `False`."""
+    options = frozenset(options)
+    if not options or not options <= DROPPABLE_HERMES_OPTIONS:
+        return False
+    with _dropped_hermes_options_lock:
+        new = options - _dropped_hermes_options
+        _dropped_hermes_options.update(options)
+    for option in sorted(new):
+        journal_hermes_option_dropped(option)
+    return bool(new)
+
+
+def journal_hermes_option_dropped(option: str) -> None:
+    """`kore-hermes-option-dropped option=…` nach stderr: Die Bridge hat sich an ein Hermes-Update angepasst."""
+    try:
+        print(f"kore-hermes-option-dropped option={_journal_value(option)}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 # ---- Journal bei gescheitertem Turn (0.10) -----------------------------------------
 # Eine Zeile je gescheitertem Turn nach stderr, also ins Journal des Dienstes. Sie traegt nur
 # Kennungen aus festen Vokabularen: nie Prompt, Antwort, Token, Health-Werte oder stderr-Rohtext.
@@ -1654,6 +1727,8 @@ def classify_hermes_failure(error_code, process, stream) -> str:
     if any(line.strip().startswith("Session not found: ") for line in output_lines(stderr)):
         return "session_unknown"
     record = stream.result_record if stream is not None else None
+    if unsupported_hermes_options(record, stderr):
+        return "hermes_option_unsupported"
     if record is None:
         return "no_result"
     if record.get("error") == _HERMES_INIT_FAILED:
@@ -1756,7 +1831,26 @@ def run_budget_seconds() -> int:
 
 
 def _run_hermes_once(args, prompt_bytes, on_delta, on_process):
-    """Ein Hermes-Lauf: (Prozess, StreamResult, Fehlercode, bisher gestreamte Deltas)."""
+    """Ein Hermes-Lauf: (Prozess, StreamResult, Fehlercode, bisher gestreamte Deltas).
+
+    Lehnt Hermes eine weglassbare Option ab (siehe `DROPPABLE_HERMES_OPTIONS`), laeuft derselbe Aufruf einmal ohne sie."""
+    process, stream, error_code, streamed = _run_hermes_attempt(adapted_hermes_args(args), prompt_bytes, on_delta,
+                                                                on_process)
+    if (
+        error_code == "hermes_failed"
+        and process is not None
+        and not streamed
+        and learn_unsupported_hermes_options(unsupported_hermes_options(
+            stream.result_record if stream is not None else None,
+            process.stderr if isinstance(process.stderr, str) else None,
+        ))
+    ):
+        process, stream, error_code, streamed = _run_hermes_attempt(adapted_hermes_args(args), prompt_bytes, on_delta,
+                                                                    on_process)
+    return process, stream, error_code, streamed
+
+
+def _run_hermes_attempt(args, prompt_bytes, on_delta, on_process):
     streamed = []
 
     def on_line(line):

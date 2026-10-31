@@ -2,6 +2,24 @@
 
 All notable changes to `kore-server`. Versions follow the Kore app's release it is tested with.
 
+## Unreleased
+
+### Fixed
+
+- **Coach chat failed after a Hermes update (`hermes_failed`, exit 2).** Hermes v0.22.5 rejects `--run-budget`
+  in gateway mode ("Unsupported gateway CLI options: --run-budget"), and the bridge passed it on every turn.
+  The bridge now adapts to the installed Hermes instead of forcing options on it: when Hermes rejects an
+  option that is only a comfort (`--run-budget`, `--max-turns`, `--source`), the bridge drops it from then on
+  and repeats the run once in the same turn. The journal says so once per option
+  (`kore-hermes-option-dropped option=…`). Options that carry safety (the toolset list `-t`, the prompt via
+  `--query-file -`, the output format, the profile, `--resume`) are never dropped; a turn whose Hermes rejects
+  one fails with `class=hermes_option_unsupported`. The wall-clock limit stays with the bridge
+  (`KORE_BRIDGE_TIMEOUT`, the whole Hermes process group is ended), so dropping `--run-budget` does not lift it.
+
+### Upgrading from 0.14.0
+
+- Restart the bridge after checking out the new tag. No new variables.
+
 ## 0.14.0
 
 ### Fixed
