@@ -49,7 +49,11 @@ def authorization_ok(authorization: str) -> bool:
 
 # Snapshot v2 (contract/snapshot-v2.md): the app sends a newer snapshot field only when this list,
 # read with its token before each sync, names it. A v0.13.0 ingest has no /capabilities (404).
-SNAPSHOT_CAPABILITIES = ("activity_body_nutrition_v1", "apple_hrv_v1")
+SNAPSHOT_CAPABILITIES = (
+    "activity_body_nutrition_v1",
+    "apple_hrv_v1",
+    "exercise_laterality_v1",
+)
 
 
 # Default deny: these exact paths are the only ones without a token. Everything else, unknown
@@ -141,8 +145,16 @@ def ingest(snapshot: Snapshot) -> dict[str, bool]:
 
 
 @app.get("/plan/pending", dependencies=[Depends(require_ingest_token)])
-def pending_plans() -> dict[str, list[dict[str, object]]]:
-    return {"plans": store.pending_plans(ORIGIN_POLICY.principal)}
+def pending_plans(laterality: int = 0) -> dict[str, list[dict[str, object]]]:
+    plans = store.pending_plans(ORIGIN_POLICY.principal)
+    if laterality != 1:
+        # An app that does not know `laterality` rejects the unknown key; `bilateral` already
+        # carries the derived value for it.
+        for plan in plans:
+            for session in plan.get("sessions", []):
+                for exercise in session.get("exercises", []):
+                    exercise.pop("laterality", None)
+    return {"plans": plans}
 
 
 @app.post("/plan/{plan_id}/ack", dependencies=[Depends(require_ingest_token)])

@@ -2,6 +2,16 @@
 
 All notable changes to `kore-server`. Versions follow the Kore app's release it is tested with.
 
+## Unreleased
+
+### Added
+
+- **One-sided exercises (`laterality`).** Plan exercises take the optional field `laterality` (`both`,
+  `two_dumbbells`, `single`) in snapshots and coach plan proposals; `bilateral` is derived from it, and a
+  contradicting pair is rejected. The ingest names the new capability `exercise_laterality_v1` in
+  `GET /capabilities`. `GET /plan/pending` leaves `laterality` out unless the app asks with
+  `?laterality=1`, so an older app keeps accepting every proposal. The coach instructions explain the field.
+
 ## 0.14.2
 
 ### Fixed

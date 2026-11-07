@@ -121,6 +121,7 @@ class PlanExercise(BaseModel):
         Field(ge=0, le=MAXIMUM_WARMUP_WEIGHT_KG, allow_inf_nan=False),
     ] | SkipJsonSchema[None] = None
     bilateral: bool | SkipJsonSchema[None] = None
+    laterality: Literal["both", "two_dumbbells", "single"] | SkipJsonSchema[None] = None
 
 
 class PlanCardioTarget(BaseModel):
@@ -347,6 +348,7 @@ class SnapshotExerciseDTO(StrictSnapshotModel):
         Annotated[float, Field(ge=0, allow_inf_nan=False, strict=True)]
     ] = None
     bilateral: StrictBool
+    laterality: Optional[Literal["both", "two_dumbbells", "single"]] = None
 
 
 class SnapshotCardioTargetDTO(StrictSnapshotModel):

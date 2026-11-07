@@ -1,6 +1,6 @@
 # Snapshot v2: steps, body, nutrition
 
-Capabilities: `activity_body_nutrition_v1` and `apple_hrv_v1` (ingest `GET /capabilities`). Both are
+Capabilities: `activity_body_nutrition_v1`, `apple_hrv_v1` and `exercise_laterality_v1` (ingest `GET /capabilities`). All are
 **optional** for the app and not in [`app-required-capabilities.json`](app-required-capabilities.json),
 which lists what the app needs from the bridge. An app that does not see them treats the ingest as an
 older server: it keeps syncing and leaves out the fields the capability stands for.
@@ -12,7 +12,7 @@ device's token ([`pairing-v1.md`](pairing-v1.md)). No request body.
 
 | Request | Answer |
 | --- | --- |
-| valid token | `200 {"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1"]}`, names sorted |
+| valid token | `200 {"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1", "exercise_laterality_v1"]}`, names sorted |
 | missing or wrong token | `401 {"detail": "Unauthorized"}`, as on every protected route |
 | valid token, ingest v0.13.0 | `404`: the route does not exist there |
 
@@ -25,7 +25,18 @@ JSON, a body larger than 4 KiB) means "no capabilities"; the sync still runs.
 | Capability | Without it, the app … | With it, the app … |
 | --- | --- | --- |
 | `apple_hrv_v1` | leaves out `hrv_kind`, `hrv_method_effective` and `hrv_source` when one of them is `appleRMSSD` or `appleRecoveryRMSSD`; `hrv_ms` and every other field stay | sends them |
+| `exercise_laterality_v1` | sends no `laterality` on plan exercises (`bilateral` stays) and asks `GET /plan/pending` without `?laterality=1` | sends `laterality` (`both`, `two_dumbbells` or `single`) on plan exercises and asks `GET /plan/pending?laterality=1` |
 | `activity_body_nutrition_v1` | sends none of `steps`, `body`, `nutrition` | always sends `steps` and `body` (possibly empty) and `nutrition` (empty while nutrition sharing is off or Health access to it is missing) |
+
+## Exercise `laterality`
+
+Optional field on an exercise in a plan snapshot (`plans[].sessions[].exercises[]`) and in a coach plan
+proposal: `"both"`, `"two_dumbbells"` or `"single"`; any other value is rejected. It is always derived
+alongside `bilateral` (`both` is `false`, the others `true`): a proposal with `laterality` and no
+`bilateral` gets it derived, one whose two fields contradict is rejected. `GET /plan/pending` removes
+`laterality` from every exercise unless the request carries `?laterality=1`, because an app without the
+capability rejects unknown keys; `bilateral` is then still correct. Apps that never send the field keep
+working unchanged.
 
 ## Lists in `POST /ingest`
 

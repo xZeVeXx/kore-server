@@ -1147,7 +1147,7 @@ If you decline, nothing happens.
 
 `POST /ingest` (snapshot), `GET /plan/pending`, `POST /plan/{id}/ack` with `{"accepted": true|false}`,
 `GET /capabilities`, `GET /health` (no token). `GET /capabilities` answers
-`{"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1"]}`: Kore reads it before each
+`{"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1", "exercise_laterality_v1"]}`: Kore reads it before each
 sync and sends the newer snapshot fields (steps, weight, nutrition; Apple's recovery HRV labels) only
 to an ingest that names them (an ingest v0.13.0 answers 404, and Kore syncs without them); see
 [`contract/snapshot-v2.md`](contract/snapshot-v2.md). (The coach bridge has a `GET /capabilities` of its

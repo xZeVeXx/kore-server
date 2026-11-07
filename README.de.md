@@ -1182,7 +1182,7 @@ mit der Kapsel „VOM COACH“, genau in der Form, in der er lokal gespeichert w
 
 `POST /ingest` (Snapshot), `GET /plan/pending`, `POST /plan/{id}/ack` mit `{"accepted": true|false}`,
 `GET /capabilities`, `GET /health` (ohne Token). `GET /capabilities` antwortet
-`{"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1"]}`: Kore liest es vor jedem
+`{"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1", "exercise_laterality_v1"]}`: Kore liest es vor jedem
 Sync und schickt die neueren Snapshot-Felder (Schritte, Gewicht, Ernährung; die Apple-Kennungen der
 Erholungs-HRV) nur an einen Ingest, der sie nennt (ein Ingest v0.13.0 antwortet 404, und Kore synchronisiert
 ohne sie); siehe [`contract/snapshot-v2.md`](contract/snapshot-v2.md). (Die Coach-Bridge hat ein eigenes

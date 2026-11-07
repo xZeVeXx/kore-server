@@ -25,7 +25,7 @@ _ENV_KEYS = (
     "KORE_DB_PATH", "KORE_INSTANCE_ID", "KORE_INGEST_TOKEN",
     "KORE_PLAN_ORIGIN_PRINCIPAL", "KORE_STATE_DIR",
 )
-CAPABILITIES = {"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1"]}
+CAPABILITIES = {"snapshot_capabilities": ["activity_body_nutrition_v1", "apple_hrv_v1", "exercise_laterality_v1"]}
 
 
 def _load_pairing():

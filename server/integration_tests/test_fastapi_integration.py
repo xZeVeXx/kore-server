@@ -184,6 +184,129 @@ class FastAPIIntegrationTests(unittest.TestCase):
         self.assertEqual(retry.json(), first.json())
         self.assertEqual(conflict.status_code, 404)
 
+    def _add_laterality_plan(self) -> str:
+        origin = self.origin_ticket.VerifiedOrigin(
+            version=1,
+            conversation_id=str(uuid.uuid4()),
+            principal="private-api",
+            nonce=secrets.token_urlsafe(24),
+            issued_at=int(time.time()),
+            expires_at=int(time.time()) + 180,
+        )
+        return self.store.add_plan(
+            {
+                "schema_version": "1.0",
+                "name": "Laterality",
+                "sessions": [
+                    {
+                        "name": "Pull",
+                        "kind": "strength",
+                        "exercises": [
+                            {
+                                "name": "One-arm row",
+                                "note": "",
+                                "laterality": "single",
+                                "sets": [{"weight_kg": 20, "reps": 12}],
+                            }
+                        ],
+                    }
+                ],
+            },
+            origin,
+        )
+
+    def _pending_exercise(self, query: str) -> dict[str, object]:
+        response = self.client.get(
+            f"/plan/pending{query}", headers=self.authorization()
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["plans"][0]["sessions"][0]["exercises"][0]
+
+    def test_pending_strips_laterality_without_query(self) -> None:
+        plan_id = self._add_laterality_plan()
+        for query in ("", "?laterality=0"):
+            exercise = self._pending_exercise(query)
+            self.assertNotIn("laterality", exercise)
+            self.assertIs(exercise["bilateral"], True)
+        self.client.post(
+            f"/plan/{plan_id}/ack",
+            headers=self.authorization(),
+            json={"accepted": False},
+        )
+
+    def test_pending_keeps_laterality_with_query(self) -> None:
+        plan_id = self._add_laterality_plan()
+        exercise = self._pending_exercise("?laterality=1")
+        self.assertEqual(exercise["laterality"], "single")
+        self.assertIs(exercise["bilateral"], True)
+        self.client.post(
+            f"/plan/{plan_id}/ack",
+            headers=self.authorization(),
+            json={"accepted": False},
+        )
+
+    def test_capabilities_lists_exercise_laterality(self) -> None:
+        response = self.client.get("/capabilities", headers=self.authorization())
+        self.assertEqual(response.status_code, 200)
+        names = response.json()["snapshot_capabilities"]
+        self.assertIn("exercise_laterality_v1", names)
+        self.assertEqual(names, sorted(names))
+
+    def test_snapshot_accepts_optional_laterality(self) -> None:
+        def snapshot(exercise: dict[str, object]) -> dict[str, object]:
+            return {
+                "generated_at": "2026-07-14T12:00:00Z",
+                "plans": [
+                    {
+                        "plan_id": str(uuid.uuid4()).upper(),
+                        "base_plan_fingerprint": "sha256:" + "a" * 64,
+                        "name": "Plan",
+                        "active": True,
+                        "source": "user",
+                        "sessions": [
+                            {
+                                "session_id": str(uuid.uuid4()).upper(),
+                                "name": "Pull",
+                                "kind": "strength",
+                                "exercises": [
+                                    {
+                                        "exercise_id": str(uuid.uuid4()).upper(),
+                                        "name": "One-arm row",
+                                        "note": "",
+                                        "sets": [{"weight_kg": 20.0, "reps": 12}],
+                                        "bilateral": True,
+                                        **exercise,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        def stored_exercise() -> dict[str, object]:
+            return self.store.get_snapshot()["plans"][0]["sessions"][0]["exercises"][0]
+
+        with_value = self.client.post(
+            "/ingest", headers=self.authorization(), json=snapshot({"laterality": "single"})
+        )
+        self.assertEqual(with_value.status_code, 200)
+        self.assertEqual(stored_exercise()["laterality"], "single")
+
+        without = self.client.post(
+            "/ingest", headers=self.authorization(), json=snapshot({})
+        )
+        self.assertEqual(without.status_code, 200)
+        self.assertNotIn("laterality", stored_exercise())
+
+        for bad in ("left", 1):
+            rejected = self.client.post(
+                "/ingest",
+                headers=self.authorization(),
+                json=snapshot({"laterality": bad}),
+            )
+            self.assertEqual(rejected.status_code, 422)
+
     def test_unconfirmed_workout_scope_preserves_atomically_and_validates_strictly(
         self,
     ) -> None:

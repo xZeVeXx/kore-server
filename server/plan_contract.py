@@ -65,8 +65,10 @@ _EXERCISE_KEYS = frozenset(
         "warmup_sets",
         "warmup_weight_kg",
         "bilateral",
+        "laterality",
     }
 )
+_LATERALITIES = frozenset({"both", "two_dumbbells", "single"})
 _SET_KEYS = frozenset({"weight_kg", "reps", "reps_max"})
 
 # Exact scalar membership of Foundation's CharacterSet.whitespacesAndNewlines on
@@ -359,6 +361,15 @@ def validate_and_normalize_plan(
                 if type(bilateral) is not bool:
                     raise InvalidPlanProposal("bilateral must be a boolean")
                 normalized_exercise["bilateral"] = bilateral
+            if "laterality" in exercise:
+                laterality = exercise["laterality"]
+                if type(laterality) is not str or laterality not in _LATERALITIES:
+                    raise InvalidPlanProposal("laterality is not a known value")
+                derived_bilateral = laterality != "both"
+                if normalized_exercise.get("bilateral", derived_bilateral) is not derived_bilateral:
+                    raise InvalidPlanProposal("laterality contradicts bilateral")
+                normalized_exercise["bilateral"] = derived_bilateral
+                normalized_exercise["laterality"] = laterality
 
             normalized_exercises.append(normalized_exercise)
         normalized_session["exercises"] = normalized_exercises

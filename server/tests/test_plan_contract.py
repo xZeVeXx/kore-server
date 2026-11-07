@@ -225,6 +225,50 @@ class PlanContractTests(unittest.TestCase):
             self.assertNotIn(key, legacy_exercise)
         self.assertNotIn("reps_max", legacy_exercise["sets"][0])
 
+    def test_laterality_accepted_and_sets_bilateral(self) -> None:
+        for laterality, bilateral in (
+            ("both", False),
+            ("two_dumbbells", True),
+            ("single", True),
+        ):
+            plan = strength_plan()
+            plan["sessions"][0]["exercises"][0]["laterality"] = laterality
+
+            exercise = validate_and_normalize_plan(plan)["sessions"][0]["exercises"][0]
+
+            self.assertEqual(exercise["laterality"], laterality)
+            self.assertIs(exercise["bilateral"], bilateral)
+
+        # Matching explicit bilateral is fine; without laterality nothing is invented.
+        plan = strength_plan()
+        plan["sessions"][0]["exercises"][0].update(
+            {"laterality": "single", "bilateral": True}
+        )
+        exercise = validate_and_normalize_plan(plan)["sessions"][0]["exercises"][0]
+        self.assertEqual(exercise["laterality"], "single")
+        legacy = validate_and_normalize_plan(strength_plan())["sessions"][0]["exercises"][0]
+        self.assertNotIn("laterality", legacy)
+
+    def test_laterality_unknown_value_rejected(self) -> None:
+        for value in ("left", "", "SINGLE", None, True, 1, ["single"]):
+            plan = strength_plan()
+            plan["sessions"][0]["exercises"][0]["laterality"] = value
+            with self.subTest(value=value):
+                self.assertInvalid(plan)
+
+    def test_laterality_contradicting_bilateral_rejected(self) -> None:
+        for laterality, bilateral in (
+            ("single", False),
+            ("two_dumbbells", False),
+            ("both", True),
+        ):
+            plan = strength_plan()
+            plan["sessions"][0]["exercises"][0].update(
+                {"laterality": laterality, "bilateral": bilateral}
+            )
+            with self.subTest(laterality=laterality, bilateral=bilateral):
+                self.assertInvalid(plan)
+
     def test_explicit_null_advanced_fields_are_not_treated_as_omission(self) -> None:
         mutations: list[dict[str, object]] = []
         for key in (
