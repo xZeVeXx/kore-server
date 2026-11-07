@@ -34,7 +34,7 @@ Optional field on an exercise in a plan snapshot (`plans[].sessions[].exercises[
 proposal: `"both"`, `"two_dumbbells"` or `"single"`; any other value is rejected. It is always derived
 alongside `bilateral` (`both` is `false`, the others `true`): a proposal with `laterality` and no
 `bilateral` gets it derived, one whose two fields contradict is rejected. `GET /plan/pending` removes
-`laterality` from every exercise unless the request carries `?laterality=1`, because an app without the
+`laterality` from every exercise unless the request carries exactly `?laterality=1` (any other value, including `0`, strips it), because an app without the
 capability rejects unknown keys; `bilateral` is then still correct. Apps that never send the field keep
 working unchanged.
 

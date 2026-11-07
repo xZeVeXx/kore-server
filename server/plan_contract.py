@@ -366,7 +366,8 @@ def validate_and_normalize_plan(
                 if type(laterality) is not str or laterality not in _LATERALITIES:
                     raise InvalidPlanProposal("laterality is not a known value")
                 derived_bilateral = laterality != "both"
-                if normalized_exercise.get("bilateral", derived_bilateral) is not derived_bilateral:
+                explicit = normalized_exercise.get("bilateral", derived_bilateral)
+                if explicit is not derived_bilateral:
                     raise InvalidPlanProposal("laterality contradicts bilateral")
                 normalized_exercise["bilateral"] = derived_bilateral
                 normalized_exercise["laterality"] = laterality

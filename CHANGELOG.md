@@ -12,6 +12,13 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
   `GET /capabilities`. `GET /plan/pending` leaves `laterality` out unless the app asks with
   `?laterality=1`, so an older app keeps accepting every proposal. The coach instructions explain the field.
 
+### Downgrading
+
+- An older server cannot read stored plan proposals that contain `laterality` and silently hides them from
+  `GET /plan/pending`. Those hidden rows still count towards the limit of 4 open proposals (the limit counts
+  every pending row), so after a downgrade they can block new proposals. Before a downgrade, accept or
+  reject all open proposals in the app.
+
 ## 0.14.2
 
 ### Fixed
