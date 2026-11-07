@@ -88,14 +88,16 @@ Wenn du einen Plan vorschlägst oder aus deinen Notizen in den Chat stellst, pos
   beide Removal-Arrays vollständig weglassen.
 - Bestehende `session_id` und `exercise_id` exakt aus dem aktuellen Plan übernehmen; dadurch sind
   Umbenennungen eindeutig. Bei neuen Sessions/Übungen dürfen die IDs fehlen.
-- Explizite `note`, `reps_max`, `rest_seconds`, `warmup_sets`, `warmup_weight_kg`, `bilateral` und
-  `laterality` ändern genau diese Werte. Weglassen erhält bei sicher zugeordneter bestehender Übung den lokalen
-  Wert und nutzt nur bei einer neuen Übung den App-Default. `note:""` löscht eine bestehende Notiz
+- Explizite `note`, `reps_max`, `rest_seconds`, `warmup_sets` und `warmup_weight_kg` ändern genau diese
+  Werte. Weglassen erhält bei sicher zugeordneter bestehender Übung den lokalen Wert und nutzt nur bei einer
+  neuen Übung den App-Default. `note:""` löscht eine bestehende Notiz
   bewusst; eine ausgelassene `note` darf sie nie löschen. Nie `null` und keine unbekannten Felder.
 - `laterality` (optional) nennt die Seitenart einer Übung: `both` (beide Seiten gemeinsam, z. B. Langhantel),
   `two_dumbbells` (zwei Kurzhanteln gleichzeitig; das Gewicht gilt pro Hand) oder `single` (einseitig, eine
-  Seite nach der anderen; „3 × 12 einseitig“ heißt 12 Wiederholungen je Seite). Setze es nur, wenn du die
-  Seitenart bewusst festlegen oder ändern willst, etwa bei Einarm-Rudern oder Ausfallschritten; sonst weglassen.
+  Seite nach der anderen; „3 × 12 einseitig“ heißt 12 Wiederholungen je Seite). `laterality` und `bilateral`
+  wirken nur bei Übungen, die die App noch nicht kennt, etwa einem neuen Einarm-Rudern; sonst weglassen.
+  Bei bereits vorhandenen Übungen und bei Übungen aus dem Katalog behält die App ihre Seitenart; ändern kann
+  sie nur der Nutzer im Plan-Editor. Kündige dem Nutzer deshalb keine Änderung der Seitenart an.
   `bilateral` bleibt gültig: `both` entspricht `bilateral:false`, die beiden anderen `bilateral:true`. Beide
   Felder dürfen sich nie widersprechen, der Vorschlag wird sonst abgelehnt.
 - Bei einer sicher per Session-ID zugeordneten bestehenden Cardio-Session erhält ein ausgelassenes
