@@ -2,7 +2,7 @@
 
 All notable changes to `kore-server`. Versions follow the Kore app's release it is tested with.
 
-## Unreleased
+## 0.15.0
 
 ### Added
 
@@ -11,6 +11,23 @@ All notable changes to `kore-server`. Versions follow the Kore app's release it 
   contradicting pair is rejected. The ingest names the new capability `exercise_laterality_v1` in
   `GET /capabilities`. `GET /plan/pending` leaves `laterality` out unless the app asks with
   `?laterality=1`, so an older app keeps accepting every proposal. The coach instructions explain the field.
+
+### Changed
+
+- **Dependencies.** fastmcp 4.1.4, fastapi 0.162.0, pydantic 2.14.2, starlette 1.10.0, pytest 9.2.0, a newer
+  `python:3.14-slim` base image and updated GitHub Actions; lock files regenerated.
+
+### Upgrading from 0.14.2
+
+Check out the tag, verify its commit, rebuild the containers and restart the bridge
+(`docker compose up -d --build`, `sudo systemctl restart kore-coach-bridge`), then run `kore-doctor`. Replace
+the `## Kore-App-Chat` section in the profile's `SOUL.md` with the current
+[`hermes/kore-app-chat-soul.md`](hermes/kore-app-chat-soul.md) (the README command does it with a backup;
+`kore-doctor` flags an outdated section). No `.env` or `bridge.env` changes; paired devices stay paired.
+
+A v0.14.2 server keeps working with Kore 0.21: the app does not find `exercise_laterality_v1` in
+`GET /capabilities`, leaves `laterality` out and shows the update hint. Kore 0.20 against this server sends
+no `laterality` and keeps working as before.
 
 ### Downgrading
 
